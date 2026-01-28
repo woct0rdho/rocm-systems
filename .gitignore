@@ -1,2 +1,7 @@
 .cline_storage
 /projects/hip/_build
+
+/build/
+/install/
+
+*.o

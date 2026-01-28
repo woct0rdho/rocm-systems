@@ -151,12 +151,26 @@ data_ready_callback(void*                                client_callback_data,
 
     auto* agent_session = static_cast<pc_sampling::PCSAgentSession*>(client_callback_data);
 
+    // Validate the data size before copying/parsing
+    if(data_size == 0 || (data_size % sizeof(packet_union_t)) != 0)
+    {
+        ROCP_CI_LOG(WARNING) << "pc_sampling: invalid data_size=" << data_size
+                             << " (packet_union_t size=" << sizeof(packet_union_t)
+                             << "), lost_sample_count=" << lost_sample_count
+                             << " -- dropping batch";
+        return;
+    }
+
     // Wrap around the logic for copying PC samples from ROCr's buffer to the SDK's
     // PC sampling buffer inside the lambda function called by the CID manager,
     // a component responsible for managing the PC sampling related part of the
     // process of retiring correlation IDs.
     agent_session->cid_manager->manage_cids_implicit([&]() {
         size_t samples_num = data_size / sizeof(packet_union_t);
+        ROCP_CI_LOG(INFO) << "pc_sampling: data_ready size=" << data_size
+                          << " samples=" << samples_num
+                          << " lost=" << lost_sample_count
+                          << " agent=" << agent_session->agent->id.handle;
         // allocate a temporary buffer for copying PC samples
         // TODO: think about how to optimize this (e.g., introduce a buffer pool)
         auto buff = std::make_unique<packet_union_t[]>(samples_num);

@@ -148,6 +148,24 @@ copyHwId<GFX9, rocprofiler_pc_sampling_hw_id_v0_t>(rocprofiler_pc_sampling_hw_id
 
 template <>
 inline void
+copyHwId<GFX11, rocprofiler_pc_sampling_hw_id_v0_t>(rocprofiler_pc_sampling_hw_id_v0_t& hw_id,
+                                                    const uint32_t                      hw_id_reg)
+{
+    // HW_ID1 layout per RDNA3 ISA (applies to gfx11)
+    // 4:0 -> wave_id
+    hw_id.wave_id = EXTRACT_BITS(hw_id_reg, 4, 0);
+    // 9:8 -> simd_id
+    hw_id.simd_id = EXTRACT_BITS(hw_id_reg, 9, 8);
+    // 13:10 -> wgp_id
+    hw_id.cu_or_wgp_id = EXTRACT_BITS(hw_id_reg, 13, 10);
+    // 16 -> sa_id
+    hw_id.shader_array_id = EXTRACT_BITS(hw_id_reg, 16, 16);
+    // 20:18 -> se_id
+    hw_id.shader_engine_id = EXTRACT_BITS(hw_id_reg, 20, 18);
+}
+
+template <>
+inline void
 copyHwId<GFX12, rocprofiler_pc_sampling_hw_id_v0_t>(rocprofiler_pc_sampling_hw_id_v0_t& hw_id,
                                                     const uint32_t                      hw_id_reg)
 {
@@ -304,7 +322,10 @@ copySample<GFX11, rocprofiler_pc_sampling_record_host_trap_v0_t>(const void* sam
 {
     const auto& sample_ = *static_cast<const perf_sample_host_trap_v1*>(sample);
     auto        ret     = copySampleHeader<rocprofiler_pc_sampling_record_host_trap_v0_t>(sample_);
-    // TODO: decode other fields.
+    
+    copyChipletId<GFX11>(ret, sample_);
+    copyHwId<GFX11>(ret.hw_id, sample_.hw_id);
+
     return ret;
 }
 

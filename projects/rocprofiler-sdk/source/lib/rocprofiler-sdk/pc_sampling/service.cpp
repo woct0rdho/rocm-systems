@@ -229,7 +229,7 @@ configure_pc_sampling_service(context::context*                ctx,
     session->cid_manager  = std::make_unique<PCSCIDManager>(session->parser.get());
 
     ROCP_ERROR << "PC sampling session with id: " << session->ioctl_pcs_id
-               << " hsa been created!\n";
+               << " has been created!\n";
 
     return ROCPROFILER_STATUS_SUCCESS;
 }

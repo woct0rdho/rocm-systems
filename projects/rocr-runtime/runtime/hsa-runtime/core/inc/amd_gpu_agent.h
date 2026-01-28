@@ -821,6 +821,8 @@ class GpuAgent : public GpuAgentInt {
   typedef struct {
     /* Sampling data - stored on device for trap handler access */
     pcs_sampling_data_t* device_data;
+    size_t device_data_size;
+    uint64_t device_data_gpu_va;
 
     /* Sampling host buffer - stored on host */
     uint8_t* host_buffer;

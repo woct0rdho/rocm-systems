@@ -1555,6 +1555,13 @@ pc_sampling_callback(rocprofiler_context_id_t /* context_id*/,
         {
             if(cur_header->kind == ROCPROFILER_PC_SAMPLING_RECORD_HOST_TRAP_V0_SAMPLE)
             {
+                if(cur_header->payload == nullptr)
+                {
+                    ROCP_CI_LOG(WARNING)
+                        << "pc_sampling host-trap record has null payload, dropping sample";
+                    invalid_samples_cnt++;
+                    continue;
+                }
                 auto* pc_sample = static_cast<rocprofiler_pc_sampling_record_host_trap_v0_t*>(
                     cur_header->payload);
 
@@ -1569,6 +1576,13 @@ pc_sampling_callback(rocprofiler_context_id_t /* context_id*/,
             }
             else if(cur_header->kind == ROCPROFILER_PC_SAMPLING_RECORD_STOCHASTIC_V0_SAMPLE)
             {
+                if(cur_header->payload == nullptr)
+                {
+                    ROCP_CI_LOG(WARNING)
+                        << "pc_sampling stochastic record has null payload, dropping sample";
+                    invalid_samples_cnt++;
+                    continue;
+                }
                 auto* pc_sample = static_cast<rocprofiler_pc_sampling_record_stochastic_v0_t*>(
                     cur_header->payload);
 

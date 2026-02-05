@@ -357,25 +357,9 @@ trap_entry:
   s_mov_b64                             ttmp[14:15], ttmp[2:3]          //now ttmp[14:15] = host_trap_buffers
   s_branch                              .profile_trap_handlers_gfx9     // Off to the profile handlers
 .elseif .amdgcn.gfx_generation_number == 11
-  // GFX11: HW_REG_SQ_SHADER_TMA hwreg IDs are remapped to PERF_SNAPSHOT_PC
-  // on GFX11, so s_getreg_b32 reads the wrong register. Use sendmsg only,
-  // matching the CWSR handler's approach (HAVE_SENDMSG_RTN).
-  s_sendmsg_rtn_b64                     [ttmp14, ttmp15], sendmsg(MSG_RTN_GET_TMA)
-  s_waitcnt                             lgkmcnt(0)
-  // sendmsg returns tma_addr >> 8; shift left to get real VA.
-  s_lshl_b64                            ttmp[14:15], ttmp[14:15], 8
-  // Sign-extend bit 47 for canonical 48-bit addresses.
-  s_bitcmp1_b32                         ttmp15, 0xF
-  s_cbranch_scc0                        .no_sign_ext_tma_gfx11
-  s_or_b32                              ttmp15, ttmp15, 0xFFFF0000
-.no_sign_ext_tma_gfx11:
-
-  // Load host_trap_buffers from TMA indirection table.
-  s_load_dwordx2                        ttmp[2:3], ttmp[14:15], 0 glc   // ttmp[2:3]=*host_trap_buffers
-  s_bitset1_b32                         ttmp11, TTMP11_PCS_IS_HOSTTRAP  // mark as host trap (optional)
-  s_waitcnt                             lgkmcnt(0)
-  s_mov_b64                             ttmp[14:15], ttmp[2:3]          // ttmp[14:15] = host_trap_buffers
-  s_branch                              .profile_trap_handlers_gfx11
+  // GFX11: Clear host trap bit and return. No sample recording yet (stub).
+  s_setreg_imm32_b32                    hwreg(HW_REG_TRAPSTS, SQ_WAVE_TRAPSTS_HOST_TRAP_SHIFT, 1), 0
+  s_branch                              .exit_trap
 .else
   // Ignore host traps.  They should be masked by the driver anyway.
   s_branch .not_s_trap
@@ -384,163 +368,28 @@ trap_entry:
 .if .amdgcn.gfx_generation_number == 11
 .profile_trap_handlers_gfx11:
   // ================================================================
-  // GFX11 PC Sampling Trap Handler
+  // GFX11 PC Sampling Trap Handler — MINIMAL (Step 1 debug)
   //
-  // Design:
-  //   - Only v0/v1 touched (lane 0 only).  No other VGPR lane modified.
-  //   - VCC never modified — all arithmetic in SALU (uses SCC, not VCC).
-  //   - EXEC saved to TTMPs, not VGPRs.
-  //   - Global ops use saddr=ttmp[14:15] — no extra VGPR for addresses.
-  //
-  // TTMP allocation:
-  //   ttmp2  = saved v0 lane 0        ttmp3  = saved v1 lane 0
-  //   ttmp4  = saved exec_lo          ttmp5  = saved exec_hi
-  //   ttmp13 = saved dispatch_id (from ttmp6)
-  //   ttmp6, ttmp7 = scratch (clobbered by sendmsg)
+  // No VMEM ops at all. Tests whether the fault comes from VMEM
+  // operations or from the trap save/restore mechanism itself.
   // ================================================================
 
   // --- Save state ---
   s_mov_b32 ttmp13, ttmp6              // save dispatch ID
-  s_mov_b32 ttmp4, exec_lo             // save EXEC to TTMPs (not VGPRs!)
+  s_mov_b32 ttmp4, exec_lo             // save EXEC to TTMPs
   s_mov_b32 ttmp5, exec_hi
   s_mov_b64 exec, 1                    // narrow EXEC: only lane 0 active
   v_readlane_b32 ttmp2, v0, 0          // save v0 lane 0
   v_readlane_b32 ttmp3, v1, 0          // save v1 lane 0
-  // VCC is never modified in this handler — no save needed.
 
-  // v1 = 0 (voffset for saddr mode); reset after any clobber.
-  v_mov_b32 v1, 0
+  // --- NO VMEM OPS — just save and restore ---
 
-  // --- Debug: increment reserved0 (offset 0x0C) ---
-  v_mov_b32 v0, 1
-  global_atomic_add_u32 v0, v1, v0, ttmp[14:15] offset:0x0C glc
-  s_waitcnt vmcnt(0)
-
-  // --- Debug: write magic 0xC0DEC0DE once at offset 0x30 ---
-  global_load_b32 v0, v1, ttmp[14:15] offset:0x30 glc
-  s_waitcnt vmcnt(0)
-  v_readlane_b32 ttmp6, v0, 0
-  s_cmp_eq_u32 ttmp6, 0
-  s_cbranch_scc0 .skip_magic_gfx11
-  v_mov_b32 v0, 0xC0DEC0DE
-  global_store_b32 v1, v0, ttmp[14:15] offset:0x30
-  s_waitcnt vmcnt(0)
-.skip_magic_gfx11:
-
-  // --- Debug: dump TTMP14/15 to offset 0x38/0x3C once ---
-  global_load_b32 v0, v1, ttmp[14:15] offset:0x38 glc
-  s_waitcnt vmcnt(0)
-  v_readlane_b32 ttmp6, v0, 0
-  s_cmp_eq_u32 ttmp6, 0
-  s_cbranch_scc0 .skip_tma_dump_gfx11
-  v_mov_b32 v0, ttmp14
-  global_store_b32 v1, v0, ttmp[14:15] offset:0x38
-  s_waitcnt vmcnt(0)
-  v_mov_b32 v0, ttmp15
-  global_store_b32 v1, v0, ttmp[14:15] offset:0x3C
-  s_waitcnt vmcnt(0)
-.skip_tma_dump_gfx11:
-
-  // --- Debug: increment reserved1[1] (offset 0x34) ---
-  v_mov_b32 v0, 1
-  global_atomic_add_u32 v0, v1, v0, ttmp[14:15] offset:0x34 glc
-  s_waitcnt vmcnt(0)
-
-  // --- Atomic increment buf_write_val (offset 0x00, 64-bit) ---
-  // v[0:1] = {1, 0} (increment).  v1=0 doubles as voffset.
-  v_mov_b32 v0, 1
-  global_atomic_add_u64 v[0:1], v1, v[0:1], ttmp[14:15] glc
-  s_waitcnt vmcnt(0)
-  // v[0:1] = old value.  v0 = index, v1 = high32 (bit31 = buffer_id).
-
-  // --- Extract buffer_id, check overflow (SALU only, no VCC) ---
-  v_readlane_b32 ttmp6, v1, 0          // ttmp6 = high 32 bits
-  s_lshr_b32 ttmp7, ttmp6, 31          // ttmp7 = buffer_id (0 or 1)
-  s_and_b32 ttmp6, ttmp6, 0x7FFFFFFF   // high 31 bits must be 0
-  s_cmp_lg_u32 ttmp6, 0
-  s_cbranch_scc1 .skip_sample_gfx11    // skip if overflow
-
-  // --- Bounds check (SALU only) ---
-  v_mov_b32 v1, ttmp7                  // v1.0 = buffer_id (frees ttmp7)
-  s_load_dword ttmp6, ttmp[14:15], 0x8 // ttmp6 = buf_size
-  s_waitcnt lgkmcnt(0)
-  v_readlane_b32 ttmp7, v0, 0          // ttmp7 = index
-  s_cmp_ge_u32 ttmp7, ttmp6            // index >= buf_size?
-  s_cbranch_scc1 .skip_sample_gfx11
-
-  // --- Compute sample slot address (SALU only) ---
-  // byte_offset = ((buffer_id * buf_size + index) << 6) + 0x40
-  v_readlane_b32 ttmp7, v1, 0          // ttmp7 = buffer_id
-  s_mul_i32 ttmp7, ttmp7, ttmp6        // ttmp7 = buffer_id * buf_size
-  v_readlane_b32 ttmp6, v0, 0          // ttmp6 = index
-  s_add_u32 ttmp7, ttmp7, ttmp6        // ttmp7 = bid*bsz + idx
-  s_lshl_b32 ttmp6, ttmp7, 6           // ttmp6 = above * 64
-  s_add_u32 ttmp6, ttmp6, 0x40         // ttmp6 = byte offset from base
-  s_add_u32 ttmp14, ttmp14, ttmp6      // advance base to sample slot
-  s_addc_u32 ttmp15, ttmp15, 0
-  // ttmp[14:15] = sample slot address.
-
-  v_mov_b32 v1, 0                      // reset voffset for stores
-
-  // --- Store sample data (all 32-bit stores, saddr mode) ---
-
-  // 1. Timestamp at +0x30/+0x34
-  s_sendmsg_rtn_b64 ttmp[6:7], sendmsg(MSG_RTN_GET_REALTIME)
-  s_waitcnt lgkmcnt(0)
-  v_mov_b32 v0, ttmp6
-  global_store_b32 v1, v0, ttmp[14:15] offset:0x30
-  v_mov_b32 v0, ttmp7
-  global_store_b32 v1, v0, ttmp[14:15] offset:0x34
-
-  // 2. PC at +0x00/+0x04 (ttmp1 NOT modified — needed for s_rfe_b64)
-  v_mov_b32 v0, ttmp0
-  global_store_b32 v1, v0, ttmp[14:15] offset:0x00
-  s_and_b32 ttmp6, ttmp1, 0xFFFF       // PC[47:32], non-destructive
-  v_mov_b32 v0, ttmp6
-  global_store_b32 v1, v0, ttmp[14:15] offset:0x04
-
-  // 3. EXEC at +0x08/+0x0C (saved in ttmp4/ttmp5)
-  v_mov_b32 v0, ttmp4
-  global_store_b32 v1, v0, ttmp[14:15] offset:0x08
-  v_mov_b32 v0, ttmp5
-  global_store_b32 v1, v0, ttmp[14:15] offset:0x0C
-
-  // 4. Workgroup IDs at +0x10/+0x14/+0x18
-  v_mov_b32 v0, ttmp8
-  global_store_b32 v1, v0, ttmp[14:15] offset:0x10
-  v_mov_b32 v0, ttmp9
-  global_store_b32 v1, v0, ttmp[14:15] offset:0x14
-  v_mov_b32 v0, ttmp10
-  global_store_b32 v1, v0, ttmp[14:15] offset:0x18
-
-  // 5. Wave ID & HW_ID at +0x1C/+0x20
-  s_getreg_b32 ttmp6, hwreg(0x17)
-  v_mov_b32 v0, ttmp6
-  global_store_b32 v1, v0, ttmp[14:15] offset:0x20
-  s_and_b32 ttmp6, ttmp6, 0x1F
-  v_mov_b32 v0, ttmp6
-  global_store_b32 v1, v0, ttmp[14:15] offset:0x1C
-
-  // 6. Correlation ID at +0x38/+0x3C
-  s_sendmsg_rtn_b32 ttmp6, sendmsg(MSG_RTN_GET_DOORBELL)
-  s_waitcnt lgkmcnt(0)
-  s_and_b32 ttmp6, ttmp6, 0x3FF
-  v_mov_b32 v0, ttmp13                 // dispatch_id
-  global_store_b32 v1, v0, ttmp[14:15] offset:0x38
-  v_mov_b32 v0, ttmp6                  // doorbell_id
-  global_store_b32 v1, v0, ttmp[14:15] offset:0x3C
-
-  s_waitcnt vmcnt(0)
-
-.skip_sample_gfx11:
   // --- Restore state ---
   v_writelane_b32 v0, ttmp2, 0         // restore v0 lane 0
   v_writelane_b32 v1, ttmp3, 0         // restore v1 lane 0
-  // No other VGPR lanes were touched — nothing else to restore.
   s_mov_b32 exec_lo, ttmp4             // restore EXEC
   s_mov_b32 exec_hi, ttmp5
   s_mov_b32 ttmp6, ttmp13              // restore dispatch ID
-  // VCC was never modified — no restore needed.
 
   // --- Check for concurrent exceptions ---
   s_getreg_b32                          ttmp2, hwreg(HW_REG_TRAPSTS)

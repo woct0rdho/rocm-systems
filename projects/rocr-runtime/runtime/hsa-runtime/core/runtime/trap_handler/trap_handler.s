@@ -308,7 +308,12 @@ trap_entry:
 
   // Extract trap_id from ttmp2
   s_bfe_u32                             ttmp2, ttmp1, SQ_WAVE_PC_HI_TRAP_ID_BFE
+.if .amdgcn.gfx_generation_number == 11
+  // Isolation: on gfx11, route trap_id==0 through hosttrap path too.
+  s_cbranch_scc0                        .is_host_trap_detected
+.else
   s_cbranch_scc0                        .not_s_trap                      // If trap_id == 0, it's not an s_trap nor host trap
+.endif
 
   // Check if the it was an host trap.
   s_bitcmp1_b32                         ttmp1, SQ_WAVE_PC_HI_HT_SHIFT
@@ -357,19 +362,12 @@ trap_entry:
   s_mov_b64                             ttmp[14:15], ttmp[2:3]          //now ttmp[14:15] = host_trap_buffers
   s_branch                              .profile_trap_handlers_gfx9     // Off to the profile handlers
 .elseif .amdgcn.gfx_generation_number == 11
-  // GFX11 host-trap path:
-  // 1) Clear host-trap bit.
-  // 2) Retrieve TMA via trap message and decode canonical VA from SQ_SHADER_TMA encoding (addr>>8).
-  // 3) Branch to gfx11 profile handler.
+  // Isolation step B setup:
+  // Clear host trap, fetch TMA via GET_TMA, then enter gfx11 profile handler.
   s_setreg_imm32_b32                    hwreg(HW_REG_TRAPSTS, SQ_WAVE_TRAPSTS_HOST_TRAP_SHIFT, 1), 0
   s_sendmsg_rtn_b64                     ttmp[2:3], sendmsg(MSG_RTN_GET_TMA)
   s_waitcnt                             lgkmcnt(0)
   s_mov_b64                             ttmp[14:15], ttmp[2:3]
-  s_lshl_b64                            ttmp[14:15], ttmp[14:15], 8
-  s_bitcmp1_b32                         ttmp15, 0xF
-  s_cbranch_scc0                        .gfx11_tma_no_sign_ext
-  s_or_b32                              ttmp15, ttmp15, 0xFFFF0000
-.gfx11_tma_no_sign_ext:
   s_branch                              .profile_trap_handlers_gfx11
 .else
   // Ignore host traps.  They should be masked by the driver anyway.
@@ -402,6 +400,8 @@ trap_entry:
   v_readlane_b32                        ttmp3, v1, 0
   v_readlane_b32                        ttmp6, v2, 0
   v_readlane_b32                        ttmp7, v3, 0
+
+  // Isolation step C: run minimal VMEM marker path.
 
   // Null guard on TMA pointer.
   s_cmp_eq_u64                          ttmp[14:15], 0
@@ -441,6 +441,17 @@ trap_entry:
   v_readlane_b32                        ttmp0, v3, 0
   s_cmp_ge_u32                          ttmp10, ttmp0
   s_cbranch_scc1                        .pc_sampling_restore_gfx11
+
+  // Isolation step: verify host-trap handler entry/header path without sample writes.
+  // If this marker appears and faults stop, the issue is in sample-address/write logic.
+  s_add_u32                             ttmp0, ttmp14, 0x0c
+  s_addc_u32                            ttmp1, ttmp15, 0
+  v_writelane_b32                       v0, ttmp0, 0
+  v_writelane_b32                       v1, ttmp1, 0
+  v_mov_b32                             v2, 0xA1150002
+  flat_store_dword                      v[0:1], v2 glc slc
+  s_waitcnt                             vmcnt(0) & lgkmcnt(0)
+  s_branch                              .pc_sampling_restore_gfx11
 
   // sample_addr = base + 0x40 + (buf_to_use * buf_size + local_entry) * 64
   s_mul_hi_u32                          ttmp1, ttmp0, ttmp11

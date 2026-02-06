@@ -414,6 +414,16 @@ trap_entry:
   s_cmp_eq_u64                          ttmp[14:15], 0
   s_cbranch_scc1                        .pc_sampling_restore_gfx11
 
+  // Entry marker independent of host_trap_buffers:
+  // write TMA[1] = 0xDEAD so host can confirm trap handler entry.
+  s_add_u32                             ttmp0, ttmp14, 0x8
+  s_addc_u32                            ttmp1, ttmp15, 0
+  v_writelane_b32                       v0, ttmp0, 0
+  v_writelane_b32                       v1, ttmp1, 0
+  v_mov_b32                             v2, 0xDEAD
+  flat_store_dword                      v[0:1], v2 glc slc
+  s_waitcnt                             vmcnt(0) & lgkmcnt(0)
+
   // Load host_trap_buffers = *(u64*)TMA using lane0 VMEM.
   // Avoid scalar s_load from trap context (can fault on gfx1151).
   v_writelane_b32                       v0, ttmp14, 0

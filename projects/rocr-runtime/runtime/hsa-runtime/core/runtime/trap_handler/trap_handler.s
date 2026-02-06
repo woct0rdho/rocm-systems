@@ -357,41 +357,289 @@ trap_entry:
   s_mov_b64                             ttmp[14:15], ttmp[2:3]          //now ttmp[14:15] = host_trap_buffers
   s_branch                              .profile_trap_handlers_gfx9     // Off to the profile handlers
 .elseif .amdgcn.gfx_generation_number == 11
-  // GFX11: Clear host trap bit and return. No sample recording yet (stub).
+  // GFX11: Clear host trap bit
   s_setreg_imm32_b32                    hwreg(HW_REG_TRAPSTS, SQ_WAVE_TRAPSTS_HOST_TRAP_SHIFT, 1), 0
-  s_branch                              .exit_trap
+
+  // DEBUG: Write magic 0xBEEF to TMA+8 to verify handler entry is reached.
+  // Save exec/v0/v1 early, write to TMA (from SPI ttmp[14:15]), then restore.
+  // On GFX11 without CWSR, SPI puts SQ_SHADER_TMA (addr>>8) into ttmp[14:15].
+  s_mov_b32                             ttmp4, exec_lo
+  s_mov_b32                             ttmp5, exec_hi
+  s_mov_b64                             exec, 1
+  v_readlane_b32                        ttmp2, v0, 0
+  v_readlane_b32                        ttmp3, v1, 0
+
+  // Try writing to ttmp[14:15] directly (the raw SPI value, which is TMA>>8)
+  // This should write to the WRONG address but proves the entry is reached
+  v_mov_b32                             v0, 0xBEEF
+  v_mov_b32                             v1, 0
+  global_store_b32                      v1, v0, ttmp[14:15] offset:0x08
+  s_waitcnt                             vmcnt(0)
+
+  // Also try with the shifted address (TMA>>8 << 8 = real TMA)
+  s_lshl_b64                            ttmp[14:15], ttmp[14:15], 8
+  // Sign-extend bit 47 for canonical 48-bit addresses
+  s_bitcmp1_b32                         ttmp15, 0xF
+  s_cbranch_scc0                        .no_sign_ext_tma_gfx11
+  s_or_b32                              ttmp15, ttmp15, 0xFFFF0000
+.no_sign_ext_tma_gfx11:
+  v_mov_b32                             v0, 0xDEAD
+  global_store_b32                      v1, v0, ttmp[14:15] offset:0x08
+  s_waitcnt                             vmcnt(0)
+
+  // Restore v0/v1/exec
+  v_writelane_b32                       v0, ttmp2, 0
+  v_writelane_b32                       v1, ttmp3, 0
+  s_mov_b32                             exec_lo, ttmp4
+  s_mov_b32                             exec_hi, ttmp5
+
+  // Continue normal flow: load host_trap_buffers from TMA[0]
+  s_load_dwordx2                        ttmp[2:3], ttmp[14:15], 0 glc   // load host_trap_buffers from TMA[0]
+  s_bitset1_b32                         ttmp11, TTMP11_PCS_IS_HOSTTRAP
+  s_waitcnt                             lgkmcnt(0)
+  s_mov_b64                             ttmp[14:15], ttmp[2:3]          // ttmp[14:15] = host_trap_buffers
+  s_branch                              .profile_trap_handlers_gfx11
 .else
   // Ignore host traps.  They should be masked by the driver anyway.
   s_branch .not_s_trap
 .endif
 
 .if .amdgcn.gfx_generation_number == 11
-.profile_trap_handlers_gfx11:
   // ================================================================
-  // GFX11 PC Sampling Trap Handler — MINIMAL (Step 1 debug)
+  // GFX11 PC Sampling Trap Handler (VMEM-based)
   //
-  // No VMEM ops at all. Tests whether the fault comes from VMEM
-  // operations or from the trap save/restore mechanism itself.
+  // GFX11 has no SMEM stores or SMEM atomics (32-bit). All writes and
+  // atomics use GLOBAL_* (VMEM) instructions in SADDR mode:
+  //   global_store_b32 voffset, vdata, saddr offset:imm
+  //   global_atomic_add_u64 vdst, voffset, vdata, saddr glc
+  //
+  // Register state on entry:
+  //   ttmp[0:1]   = PC (return address for s_rfe_b64)
+  //   ttmp6       = DispatchPktIndx[24:0]
+  //   ttmp[8:10]  = WorkgroupId X/Y/Z
+  //   ttmp11      = WaveIdInWG[5:0], DebugEnabled[23], bit 22 = hosttrap
+  //   ttmp12      = SQ_WAVE_STATUS
+  //   ttmp[14:15] = host_trap_buffers pointer
+  //
+  // Saved state:
+  //   ttmp2  = saved v0 lane 0
+  //   ttmp3  = saved v1 lane 0
+  //   ttmp4  = saved exec_lo
+  //   ttmp5  = saved exec_hi
+  //   ttmp13 = saved ttmp6 (DispatchPktIndx), bit 31 = buf_to_use
+  //
+  // Available scratch: ttmp6, ttmp7
+  //
+  // VGPR usage (lane 0 only, exec=1):
+  //   v0 = data register for stores
+  //   v1 = voffset (byte offset from host_trap_buffers to sample slot)
+  //
+  // host_trap_buffers layout:
+  //   [0x00]  uint64_t buf_write_val
+  //   [0x08]  uint32_t buf_size
+  //   [0x0c]  uint32_t reserved0
+  //   [0x10]  uint32_t buf_written_val0
+  //   [0x14]  uint32_t buf_watermark0
+  //   [0x18]  hsa_signal_t done_sig0
+  //   [0x20]  uint32_t buf_written_val1
+  //   [0x24]  uint32_t buf_watermark1
+  //   [0x28]  hsa_signal_t done_sig1
+  //   [0x30]  uint8_t  reserved1[16]
+  //   [0x40]  sample_t buffer0[buf_size]
+  //   [0x40+(buf_size*64)] sample_t buffer1[buf_size]
   // ================================================================
 
+.profile_trap_handlers_gfx11:
   // --- Save state ---
-  s_mov_b32 ttmp13, ttmp6              // save dispatch ID
-  s_mov_b32 ttmp4, exec_lo             // save EXEC to TTMPs
-  s_mov_b32 ttmp5, exec_hi
-  s_mov_b64 exec, 1                    // narrow EXEC: only lane 0 active
-  v_readlane_b32 ttmp2, v0, 0          // save v0 lane 0
-  v_readlane_b32 ttmp3, v1, 0          // save v1 lane 0
+  s_mov_b32                             ttmp13, ttmp6                   // save DispatchPktIndx
+  s_mov_b32                             ttmp4, exec_lo                  // save EXEC
+  s_mov_b32                             ttmp5, exec_hi
+  s_mov_b64                             exec, 1                        // only lane 0 active
+  v_readlane_b32                        ttmp2, v0, 0                   // save v0 lane 0
+  v_readlane_b32                        ttmp3, v1, 0                   // save v1 lane 0
 
-  // --- NO VMEM OPS — just save and restore ---
+  // DEBUG: Write magic 0xDEAD to reserved0 (offset 0x0C) to verify handler reaches here
+  v_mov_b32                             v0, 0xDEAD
+  v_mov_b32                             v1, 0                          // voffset=0
+  global_store_b32                      v1, v0, ttmp[14:15] offset:0x0C
+  s_waitcnt                             vmcnt(0)
 
+  // Phase 1: Atomic increment buf_write_val (64-bit at offset 0x00)
+  // NOTE: Using v0 as voffset (separate from vdata v[1:2]) to avoid
+  // VGPR partial overlap between voffset(v1), vdata(v[0:1]), vdst(v[0:1])
+  v_mov_b32                             v0, 0                          // voffset=0
+  v_mov_b32                             v1, 1                          // lo32 of increment = 1
+  // hi32 of increment needs to be 0 — but we only have v0,v1.
+  // Use global_store_b32 to write 1 to buf_write_val as a simpler test first.
+  // TODO: replace with proper atomic once address is verified
+  global_store_b32                      v0, v1, ttmp[14:15] offset:0x00
+  s_waitcnt                             vmcnt(0)
+  // Fake the atomic result: v0=0 (index=0), v1=0 (buf_to_use=0)
+  v_mov_b32                             v0, 0
+  v_mov_b32                             v1, 0
+
+  // Phase 2: Extract buffer_id and bounds check
+  v_readlane_b32                        ttmp6, v1, 0                   // ttmp6 = high 32 bits
+  s_lshr_b32                            ttmp7, ttmp6, 31               // ttmp7 = buf_to_use
+  s_and_b32                             ttmp6, ttmp6, 0x7FFFFFFF       // high 31 bits must be 0
+  s_cmp_lg_u32                          ttmp6, 0
+  s_cbranch_scc1                        .skip_sample_gfx11             // overflow, skip
+
+  // Stash buf_to_use in bit 31 of ttmp13 (DispatchPktIndx uses only [24:0])
+  s_bitset0_b32                         ttmp13, 31
+  s_cmp_eq_u32                          ttmp7, 0
+  s_cbranch_scc1                        .skip_buf_id_set_gfx11
+  s_bitset1_b32                         ttmp13, 31
+.skip_buf_id_set_gfx11:
+
+  // Load buf_size
+  s_load_dword                          ttmp6, ttmp[14:15], 0x8
+  s_waitcnt                             lgkmcnt(0)
+
+  // Bounds check: index (in v0) < buf_size (in ttmp6)
+  v_readlane_b32                        ttmp7, v0, 0                   // ttmp7 = index
+  s_cmp_ge_u32                          ttmp7, ttmp6
+  s_cbranch_scc1                        .skip_sample_gfx11             // index >= buf_size
+
+  // Phase 3: Compute byte offset from host_trap_buffers to sample slot
+  // offset = ((buf_to_use * buf_size + index) * 64) + 0x40
+  // ttmp6 = buf_size, ttmp7 = index, buf_to_use in ttmp13 bit 31
+  s_lshr_b32                            ttmp7, ttmp13, 31              // ttmp7 = buf_to_use
+  s_mul_i32                             ttmp7, ttmp7, ttmp6            // buf_to_use * buf_size
+  v_readlane_b32                        ttmp6, v0, 0                   // ttmp6 = index
+  s_add_u32                             ttmp7, ttmp7, ttmp6            // + index
+  s_lshl_b32                            ttmp7, ttmp7, 6               // * 64
+  s_add_u32                             ttmp7, ttmp7, 0x40            // + header
+
+  // v1 = byte offset for all subsequent stores (saddr = ttmp[14:15] preserved)
+  v_mov_b32                             v1, ttmp7
+
+  // Phase 4: Fill sample data
+  // All stores: global_store_b32 v1, v0, ttmp[14:15] offset:field_offset
+  // address = ttmp[14:15] + v1 + field_offset = sample_slot + field
+
+  // Store PC at +0x00/+0x04
+  v_mov_b32                             v0, ttmp0
+  global_store_b32                      v1, v0, ttmp[14:15] offset:0x00
+  s_and_b32                             ttmp6, ttmp1, 0xFFFF           // PC_HI (clean, non-destructive)
+  v_mov_b32                             v0, ttmp6
+  global_store_b32                      v1, v0, ttmp[14:15] offset:0x04
+
+  // Store EXEC at +0x08/+0x0c (saved in ttmp4/ttmp5)
+  v_mov_b32                             v0, ttmp4
+  global_store_b32                      v1, v0, ttmp[14:15] offset:0x08
+  v_mov_b32                             v0, ttmp5
+  global_store_b32                      v1, v0, ttmp[14:15] offset:0x0C
+
+  // Store workgroup IDs at +0x10/+0x14/+0x18
+  v_mov_b32                             v0, ttmp8
+  global_store_b32                      v1, v0, ttmp[14:15] offset:0x10
+  v_mov_b32                             v0, ttmp9
+  global_store_b32                      v1, v0, ttmp[14:15] offset:0x14
+  v_mov_b32                             v0, ttmp10
+  global_store_b32                      v1, v0, ttmp[14:15] offset:0x18
+
+  // Store wave_in_wg at +0x1c (from ttmp11[5:0])
+  s_and_b32                             ttmp6, ttmp11, 0x3F
+  v_mov_b32                             v0, ttmp6
+  global_store_b32                      v1, v0, ttmp[14:15] offset:0x1C
+
+  // Store HW_ID at +0x20 (GFX11: use HW_REG_HW_ID1)
+  s_getreg_b32                          ttmp6, hwreg(HW_REG_HW_ID1)
+  v_mov_b32                             v0, ttmp6
+  global_store_b32                      v1, v0, ttmp[14:15] offset:0x20
+
+  // Get and store timestamp at +0x30/+0x34
+  s_sendmsg_rtn_b64                     ttmp[6:7], sendmsg(MSG_RTN_GET_REALTIME)
+  s_waitcnt                             lgkmcnt(0)
+  v_mov_b32                             v0, ttmp6
+  global_store_b32                      v1, v0, ttmp[14:15] offset:0x30
+  v_mov_b32                             v0, ttmp7
+  global_store_b32                      v1, v0, ttmp[14:15] offset:0x34
+
+  // Phase 5: Correlation ID at +0x38/+0x3c
+  // Lower 32 bits: DispatchPktIndx[24:0] from saved ttmp6 (in ttmp13[24:0])
+  s_and_b32                             ttmp6, ttmp13, 0x1FFFFFF
+  v_mov_b32                             v0, ttmp6
+  global_store_b32                      v1, v0, ttmp[14:15] offset:0x38
+  // Upper 32 bits: doorbell_id[9:0]
+  s_sendmsg_rtn_b32                     ttmp6, sendmsg(MSG_RTN_GET_DOORBELL)
+  s_waitcnt                             lgkmcnt(0)
+  s_and_b32                             ttmp6, ttmp6, DOORBELL_ID_MASK
+  v_mov_b32                             v0, ttmp6
+  global_store_b32                      v1, v0, ttmp[14:15] offset:0x3C
+
+  // Wait for all stores to complete
+  s_waitcnt                             vmcnt(0)
+
+  // Phase 6: Increment buf_written_val and check watermark
+  // ttmp[14:15] = host_trap_buffers (preserved), buf_to_use in ttmp13 bit 31
+  // buf_written_val0 at offset 0x10, buf_written_val1 at offset 0x20
+  s_lshr_b32                            ttmp6, ttmp13, 31              // ttmp6 = buf_to_use
+  s_mul_i32                             ttmp6, ttmp6, 0x10             // 0x00 or 0x10
+  s_add_u32                             ttmp6, ttmp6, 0x10             // 0x10 or 0x20
+  // Atomic increment buf_written_valX
+  v_mov_b32                             v0, 1
+  v_mov_b32                             v1, ttmp6                      // voffset = buf_written_valX offset
+  global_atomic_add_u32                 v0, v1, v0, ttmp[14:15] glc
+  s_waitcnt                             vmcnt(0)
+  // v0 = old buf_written_val (= 'done')
+
+  // Load watermark (offset = buf_written_val_offset + 4)
+  s_add_u32                             ttmp7, ttmp6, 4                // watermark offset
+  s_load_dword                          ttmp7, ttmp[14:15], ttmp7      // load watermark
+  s_waitcnt                             lgkmcnt(0)
+  v_readlane_b32                        ttmp6, v0, 0                   // ttmp6 = done
+  s_cmp_lg_u32                          ttmp6, ttmp7                   // done != watermark → exit
+  s_cbranch_scc1                        .pc_sampling_exit_gfx11
+
+  // Phase 7: Signal when watermark reached
+  // Load done_sig handle (offset = buf_written_val_offset + 8)
+  s_lshr_b32                            ttmp6, ttmp13, 31              // buf_to_use
+  s_mul_i32                             ttmp6, ttmp6, 0x10
+  s_add_u32                             ttmp6, ttmp6, 0x18             // done_sig offset (0x18 or 0x28)
+  s_load_dwordx2                        ttmp[6:7], ttmp[14:15], ttmp6  // load done_sig handle
+  s_waitcnt                             lgkmcnt(0)
+  // ttmp[6:7] = amd_signal_t*
+
+  // Load event_mailbox_ptr and event_id from amd_signal_t
+  s_load_dwordx2                        ttmp[14:15], ttmp[6:7], 0x10   // event_mailbox_ptr
+  s_load_dword                          ttmp7, ttmp[6:7], 0x18         // event_id
+  // Zero the signal value (at amd_signal_t + 0x08)
+  v_mov_b32                             v0, 0
+  v_mov_b32                             v1, 0
+  global_store_b32                      v1, v0, ttmp[6:7] offset:0x08  // zero value low
+  global_store_b32                      v1, v0, ttmp[6:7] offset:0x0C  // zero value high
+  s_waitcnt                             vmcnt(0) & lgkmcnt(0)
+
+  s_cmp_eq_u64                          ttmp[14:15], 0
+  s_cbranch_scc1                        .pc_sampling_exit_gfx11        // null mailbox
+  s_cmp_eq_u32                          ttmp7, 0
+  s_cbranch_scc1                        .pc_sampling_exit_gfx11        // no event_id
+
+  // Send event_id to mailbox
+  v_mov_b32                             v0, ttmp7
+  global_store_b32                      v1, v0, ttmp[14:15]            // store event_id at mailbox
+  s_waitcnt                             vmcnt(0)
+
+  // Send interrupt
+  s_mov_b32                             ttmp6, m0
+  s_mov_b32                             m0, ttmp7
+  s_nop                                 0x0
+  s_sendmsg                             sendmsg(MSG_INTERRUPT)
+  s_waitcnt                             lgkmcnt(0)
+  s_mov_b32                             m0, ttmp6
+
+.pc_sampling_exit_gfx11:
+.skip_sample_gfx11:
   // --- Restore state ---
-  v_writelane_b32 v0, ttmp2, 0         // restore v0 lane 0
-  v_writelane_b32 v1, ttmp3, 0         // restore v1 lane 0
-  s_mov_b32 exec_lo, ttmp4             // restore EXEC
-  s_mov_b32 exec_hi, ttmp5
-  s_mov_b32 ttmp6, ttmp13              // restore dispatch ID
+  v_writelane_b32                       v0, ttmp2, 0                   // restore v0 lane 0
+  v_writelane_b32                       v1, ttmp3, 0                   // restore v1 lane 0
+  s_mov_b32                             exec_lo, ttmp4                 // restore EXEC
+  s_mov_b32                             exec_hi, ttmp5
+  s_and_b32                             ttmp6, ttmp13, 0x1FFFFFF       // restore DispatchPktIndx (strip buf_to_use bit)
 
-  // --- Check for concurrent exceptions ---
+  // Check for concurrent exceptions during PC sampling
   s_getreg_b32                          ttmp2, hwreg(HW_REG_TRAPSTS)
   s_getreg_b32                          ttmp3, hwreg(HW_REG_MODE, SQ_WAVE_MODE_EXCP_EN_SHIFT, SQ_WAVE_MODE_EXCP_EN_SIZE)
   s_or_b32                              ttmp3, ttmp3, (1 << SQ_WAVE_TRAPSTS_MEM_VIOL_SHIFT | 1 << SQ_WAVE_TRAPSTS_ILLEGAL_INST_SHIFT | 1 << SQ_WAVE_TRAPSTS_XNACK_ERROR_SHIFT)

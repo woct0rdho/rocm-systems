@@ -3550,22 +3550,19 @@ hsa_status_t GpuAgent::PcSamplingFlushDeviceBuffers(
   buf_written_val[1] = reinterpret_cast<uint64_t>(&pcs_data->device_data->buf_written_val1);
   buf_size = pcs_data->device_data->buf_size;
 
-  if (false && (flush_call_count <= 5 || (flush_call_count % 100 == 0))) { /* test 21k: skip debug DmaCopy */
-    pcs_sampling_data_t header{};
-    if (DmaCopy(&header, pcs_data->device_data, sizeof(header)) == HSA_STATUS_SUCCESS) {
-      uint32_t reserved1_0 = 0;
-      uint32_t reserved1_1 = 0;
-      static_assert(sizeof(header.reserved1) >= 8, "reserved1 too small for debug");
-      std::memcpy(&reserved1_0, header.reserved1, sizeof(reserved1_0));
-      std::memcpy(&reserved1_1, header.reserved1 + sizeof(reserved1_0),
-                  sizeof(reserved1_1));
+  if (flush_call_count <= 5 || (flush_call_count % 100 == 0)) {
+    // APU shared memory: read device_data directly (no DmaCopy needed)
+    volatile pcs_sampling_data_t* dd = pcs_data->device_data;
+    fprintf(stderr,
+            "PcSamplingFlushDeviceBuffers: hdr write_val=%lu reserved0=0x%x written0=%u written1=%u buf_size=%u\n",
+            dd->buf_write_val, dd->reserved0, dd->buf_written_val0,
+            dd->buf_written_val1, dd->buf_size);
+    // DEBUG: Check if trap handler wrote magic to TMA region
+    if (trap_handler_tma_region_) {
+      volatile uint64_t* tma = (volatile uint64_t*)trap_handler_tma_region_;
       fprintf(stderr,
-              "PcSamplingFlushDeviceBuffers: hdr write_val=%lu reserved0=%u written0=%u written1=%u buf_size=%u done0=0x%lx done1=0x%lx rsvd1_0=0x%08x rsvd1_1=%u\n",
-              header.buf_write_val, header.reserved0, header.buf_written_val0,
-              header.buf_written_val1, header.buf_size,
-              header.done_sig0.handle, header.done_sig1.handle, reserved1_0, reserved1_1);
-    } else {
-      fprintf(stderr, "PcSamplingFlushDeviceBuffers: hdr DmaCopy failed\n");
+              "PcSamplingFlushDeviceBuffers: tma[0]=0x%lx tma[1]=0x%lx (expect tma[1]=0xDEAD if handler reached entry)\n",
+              tma[0], tma[1]);
     }
   }
 

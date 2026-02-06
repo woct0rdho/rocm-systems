@@ -368,6 +368,13 @@ trap_entry:
   s_sendmsg_rtn_b64                     ttmp[2:3], sendmsg(MSG_RTN_GET_TMA)
   s_waitcnt                             lgkmcnt(0)
   s_mov_b64                             ttmp[14:15], ttmp[2:3]
+  // Empirical gfx1151 behavior: GET_TMA returns SQ_SHADER_TMA-style addr>>8 encoding.
+  // Decode back to canonical VA before VMEM dereference.
+  s_lshl_b64                            ttmp[14:15], ttmp[14:15], 8
+  s_bitcmp1_b32                         ttmp15, 0xF
+  s_cbranch_scc0                        .gfx11_tma_no_sign_ext_isolation
+  s_or_b32                              ttmp15, ttmp15, 0xFFFF0000
+.gfx11_tma_no_sign_ext_isolation:
   s_branch                              .profile_trap_handlers_gfx11
 .else
   // Ignore host traps.  They should be masked by the driver anyway.

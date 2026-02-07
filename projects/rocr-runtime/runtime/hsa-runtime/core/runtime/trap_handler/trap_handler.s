@@ -313,13 +313,7 @@ trap_entry:
 
   // Extract trap_id from ttmp2
   s_bfe_u32                             ttmp2, ttmp1, SQ_WAVE_PC_HI_TRAP_ID_BFE
-.if .amdgcn.gfx_generation_number == 11
-  // Debug path for gfx11: host trap can appear with trap_id == 0.
-  // Route trap_id==0 through hosttrap handling path.
-  s_cbranch_scc0                        .is_host_trap_detected
-.else
   s_cbranch_scc0                        .not_s_trap                      // If trap_id == 0, it's not an s_trap nor host trap
-.endif
 
   // Check if the it was an host trap.
   s_bitcmp1_b32                         ttmp1, SQ_WAVE_PC_HI_HT_SHIFT
@@ -418,25 +412,9 @@ trap_entry:
   v_readlane_b32                        ttmp6, v2, 0
   v_readlane_b32                        ttmp7, v3, 0
 
-  // Isolation step C: run minimal VMEM marker path.
-
   // Null guard on TMA pointer.
   s_cmp_eq_u64                          ttmp[14:15], 0
   s_cbranch_scc1                        .pc_sampling_restore_gfx11
-
-  // Entry marker independent of host_trap_buffers:
-  // write TMA[1] = 0xDEAD so host can confirm trap handler entry.
-  s_add_u32                             ttmp0, ttmp14, 0x8
-  s_addc_u32                            ttmp1, ttmp15, 0
-  v_writelane_b32                       v0, ttmp0, 0
-  v_writelane_b32                       v1, ttmp1, 0
-  v_mov_b32                             v2, 0xDEAD
-  flat_store_dword                      v[0:1], v2 glc slc
-  s_waitcnt                             vmcnt(0) & lgkmcnt(0)
-
-  // Preserve the original TMA pointer so we can write back debug state.
-  s_mov_b32                             ttmp10, ttmp14
-  s_mov_b32                             ttmp11, ttmp15
 
   // Load host_trap_buffers = *(u64*)TMA using lane0 VMEM.
   // Avoid scalar s_load from trap context (can fault on gfx1151).
@@ -446,20 +424,6 @@ trap_entry:
   s_waitcnt                             vmcnt(0) & lgkmcnt(0)
   v_readlane_b32                        ttmp14, v2, 0
   v_readlane_b32                        ttmp15, v3, 0
-
-  // Write first computed host_trap_buffers pointer to TMA[1].
-  // States:
-  //   TMA[1] == 0x0     : handler never entered
-  //   TMA[1] == 0xDEAD  : entered, but failed before pointer load
-  //   otherwise         : loaded host_trap_buffers pointer value
-  s_add_u32                             ttmp0, ttmp10, 0x8
-  s_addc_u32                            ttmp1, ttmp11, 0
-  v_writelane_b32                       v0, ttmp0, 0
-  v_writelane_b32                       v1, ttmp1, 0
-  v_mov_b32                             v2, ttmp14
-  v_mov_b32                             v3, ttmp15
-  flat_store_dwordx2                    v[0:1], v[2:3] glc slc
-  s_waitcnt                             vmcnt(0) & lgkmcnt(0)
 
   // Null guard on host_trap_buffers.
   s_cmp_eq_u64                          ttmp[14:15], 0
@@ -511,15 +475,6 @@ trap_entry:
   s_and_b32                             ttmp10, ttmp9, 0xffff
   v_mov_b32                             v2, ttmp10
   flat_store_dword                      v[0:1], v2 glc slc
-
-  // Mark handler entry for debug.
-  s_add_u32                             ttmp0, ttmp14, 0x0c
-  s_addc_u32                            ttmp1, ttmp15, 0
-  v_writelane_b32                       v0, ttmp0, 0
-  v_writelane_b32                       v1, ttmp1, 0
-  v_mov_b32                             v2, 0xA1150001
-  flat_store_dword                      v[0:1], v2 glc slc
-  s_waitcnt                             vmcnt(0) & lgkmcnt(0)
 
   // Increment buf_written_val{0,1} according to current buffer bit.
   s_mul_i32                             ttmp0, ttmp11, 0x10

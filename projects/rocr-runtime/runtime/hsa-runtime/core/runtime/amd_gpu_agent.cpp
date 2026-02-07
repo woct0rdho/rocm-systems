@@ -376,7 +376,7 @@ void GpuAgent::AssembleShader(const char* func_name, AssembleTarget assemble_tar
         asic_shader = &compiled_shader_it->second.compute_10;
       break;
     case 11:
-      if (isa_->GetMinorVersion() == 5 && isa_->GetStepping() == 1)
+      if (isa_->GetMinorVersion() == 5)
         asic_shader = &compiled_shader_it->second.compute_1151;
       else
         asic_shader = &compiled_shader_it->second.compute_11;
@@ -2468,7 +2468,6 @@ void GpuAgent::SyncClocks() {
 }
 
 hsa_status_t GpuAgent::UpdateTrapHandlerWithPCS(pcs_sampling_data_t* pcs_hosttrap_buffers, pcs_sampling_data_t* pcs_stochastic_buffers) {
-  /* Test 21m: Re-enable UpdateTrapHandlerWithPCS */
   fprintf(stderr, "UpdateTrapHandlerWithPCS: hosttrap=%p stochastic=%p\n",
           (void*)pcs_hosttrap_buffers, (void*)pcs_stochastic_buffers);
   // Assemble the trap handler source code.
@@ -2977,10 +2976,8 @@ hsa_status_t GpuAgent::PcSamplingCreateFromId(HsaPcSamplingTraceId ioctlId,
   if (pcs_data->session)
     return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
 
-  /* Test 21: Full ROCr init (alloc+DmaCopy+DmaFill+MakeMemoryResident+allow_access)
-   * but UpdateTrapHandlerWithPCS stays disabled (early return).
-   * This tests: properly initialized device_data + PM4 flush, WITHOUT trap handler update. */
-  fprintf(stderr, "PcSamplingCreateFromId: test 21 — full init EXCEPT UpdateTrapHandlerWithPCS\n");
+  // Initialize device/host-side PC sampling buffers and trap metadata.
+  fprintf(stderr, "PcSamplingCreateFromId: initializing buffers\n");
 
   // TODO: For now, we can only have
                                                // 1 pc sampling session at a
@@ -3111,8 +3108,7 @@ hsa_status_t GpuAgent::PcSamplingCreateFromId(HsaPcSamplingTraceId ioctlId,
 
     // Allocate device memory for 2nd level trap handler TMA
     size_t deviceAllocSize = sizeof(pcs_sampling_data_t) + (2 * trap_buffer_size);
-    /* Test 21f: Use system_allocator instead of coarsegrain_allocator for device_data.
-     * ATOMIC_MEM faults on coarsegrain memory on GFX11.5 but works on system memory. */
+    // Use system allocator for device_data to avoid ATOMIC_MEM issues on gfx11.5.
     pcs_data->device_data =
         (pcs_sampling_data_t*)system_allocator()(deviceAllocSize, 0x1000, 0);
     if (!pcs_data->device_data) {
@@ -3120,25 +3116,25 @@ hsa_status_t GpuAgent::PcSamplingCreateFromId(HsaPcSamplingTraceId ioctlId,
       return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
     }
     pcs_data->device_data_size = deviceAllocSize;
-    fprintf(stderr, "pc sampling: test 21f — allocated device_data %zu bytes at %p (system)\n",
+    fprintf(stderr, "pc sampling: allocated device_data %zu bytes at %p (system)\n",
             deviceAllocSize, (void*)pcs_data->device_data);
 
-    // Re-enabled for test 21: allow_access for device_data
+    // Allow GPU and nearest CPU access to device_data.
     {
       auto cpuAgent = GetNearestCpuAgent()->public_handle();
       hsa_agent_t agents[2] = {cpuAgent, public_handle_};
       if (AMD::hsa_amd_agents_allow_access(2, agents, NULL, pcs_data->device_data) != HSA_STATUS_SUCCESS)
         return HSA_STATUS_ERROR;
-      fprintf(stderr, "pc sampling: test 21 — allow_access for device_data OK\n");
+      fprintf(stderr, "pc sampling: allow_access for device_data OK\n");
     }
 
-    // Re-enabled for test 21: DmaCopy + DmaFill
+    // Initialize device_data header and sample buffers.
     if (DmaCopy(pcs_data->device_data, device_datahost, sizeof(*device_datahost)) !=
         HSA_STATUS_SUCCESS) {
       debug_print("Failed to dmaCopy!\n");
       return HSA_STATUS_ERROR;
     }
-    fprintf(stderr, "pc sampling: test 21 — DmaCopy OK (%zu bytes)\n", sizeof(*device_datahost));
+    fprintf(stderr, "pc sampling: DmaCopy OK (%zu bytes)\n", sizeof(*device_datahost));
 
     {
       uint8_t* device_buf_ptr =
@@ -3151,11 +3147,10 @@ hsa_status_t GpuAgent::PcSamplingCreateFromId(HsaPcSamplingTraceId ioctlId,
         debug_print("Failed to dmaFill!\n");
         return HSA_STATUS_ERROR;
       }
-      fprintf(stderr, "pc sampling: test 21 — DmaFill OK (%zu dwords)\n", count_in_dwords);
+      fprintf(stderr, "pc sampling: DmaFill OK (%zu dwords)\n", count_in_dwords);
     }
 
     // Ensure device_data is resident/mapped for trap handler access.
-    // Re-enabled for test 21: MakeMemoryResident
     {
       HsaMemMapFlags map_flag = {};
       map_flag.ui32.HostAccess = 1;
@@ -3164,7 +3159,7 @@ hsa_status_t GpuAgent::PcSamplingCreateFromId(HsaPcSamplingTraceId ioctlId,
       hsa_status_t map_ret = driver().MakeMemoryResident(
           pcs_data->device_data, pcs_data->device_data_size, &alt_va, &map_flag, 1, &node);
       fprintf(stderr,
-              "pc sampling: test 21 — MakeMemoryResident(device_data) ret=%d alt_va=0x%lx map_flags=0x%x\n",
+              "pc sampling: MakeMemoryResident(device_data) ret=%d alt_va=0x%lx map_flags=0x%x\n",
               map_ret, alt_va, map_flag.Value);
       if (map_ret != HSA_STATUS_SUCCESS) {
         debug_print("pc sampling: MakeMemoryResident(device_data) failed\n");
@@ -3266,7 +3261,6 @@ hsa_status_t GpuAgent::PcSamplingStart(pcs::PcsRuntime::PcSamplingSession& sessi
   pcs_data->session = &session;
   pcs_data->session->start();
 
-#if 1 /* Test 21m: Re-enable ROCr thread */
   // Creating thread data
   struct ThreadData {
     GpuAgent* agent;
@@ -3300,7 +3294,6 @@ hsa_status_t GpuAgent::PcSamplingStart(pcs::PcsRuntime::PcSamplingSession& sessi
     throw AMD::hsa_exception(HSA_STATUS_ERROR_OUT_OF_RESOURCES,
                              "Failed to start PC Sampling thread.");
   }
-#endif
 
   // Start the sampling session in the kernel driver
   fprintf(stderr, "PcSamplingStart: calling hsaKmtPcSamplingStart node=%u thunkId=%d\n", node_id(), session.ThunkId());
@@ -3561,7 +3554,7 @@ hsa_status_t GpuAgent::PcSamplingFlushDeviceBuffers(
     if (trap_handler_tma_region_) {
       volatile uint64_t* tma = (volatile uint64_t*)trap_handler_tma_region_;
       fprintf(stderr,
-              "PcSamplingFlushDeviceBuffers: tma[0]=0x%lx tma[1]=0x%lx (expect tma[1]=0xDEAD if handler reached entry)\n",
+              "PcSamplingFlushDeviceBuffers: tma[0]=0x%lx tma[1]=0x%lx\n",
               tma[0], tma[1]);
     }
   }
@@ -3608,7 +3601,6 @@ hsa_status_t GpuAgent::PcSamplingFlushDeviceBuffers(
    *    done.
    */
 
-  /* Test 21l: Restore original ATOMIC_MEM + COPY_DATA (debug DmaCopy disabled) */
   cmd_data[i++] = PM4_HDR(PM4_HDR_IT_OPCODE_ATOMIC_MEM, atomic_ex_cmd_sz, isa_->GetMajorVersion());
   cmd_data[i++] = PM4_ATOMIC_MEM_DW1_ATOMIC(PM4_ATOMIC_MEM_GL2_OP_ATOMIC_SWAP_RTN_64);
   cmd_data[i++] = PM4_ATOMIC_MEM_DW2_ADDR_LO(buf_write_val);
@@ -3632,7 +3624,8 @@ hsa_status_t GpuAgent::PcSamplingFlushDeviceBuffers(
       PM4_PRED_EXEC_DW2_EXEC_COUNT(i - pred_exec_cmd_sz) | PM4_PRED_EXEC_DW2_VIRTUALXCCID_SELECT(0x1);
   }
 
-  fprintf(stderr, "pc sampling: test 21l — submitting batch 1 (%u dwords, original COPY_DATA restored)\n", i);
+  if (flush_call_count <= 5 || (flush_call_count % 100 == 0))
+    fprintf(stderr, "pc sampling: submitting batch 1 (%u dwords)\n", i);
 
   HSA::hsa_signal_store_screlease(exec_pm4_signal, 1);
 
@@ -3652,7 +3645,13 @@ hsa_status_t GpuAgent::PcSamplingFlushDeviceBuffers(
     fprintf(stderr, "PcSamplingFlushDeviceBuffers: old_val=%lu buf_size=%zu which_buffer=%u\n",
             *old_val, buf_size, which_buffer);
 
-  /* Test 21k: batch 2 re-enabled, debug DmaCopy disabled */
+  if (*old_val > 0 && (samples_debug_count <= 20 || (samples_debug_count % 100 == 0))) {
+    uint64_t first_ptr = reinterpret_cast<uint64_t>(buffer[which_buffer]);
+    uint64_t last_ptr = first_ptr + ((*old_val - 1) * session.sample_size());
+    fprintf(stderr,
+            "PcSamplingFlushDeviceBuffers: ptr_range first=0x%lx last=0x%lx sample_size=%zu count=%lu\n",
+            first_ptr, last_ptr, session.sample_size(), *old_val);
+  }
 
   /* If the number of entries in old_val is larger than buf_size, then there was a buffer overflow
    * and the 2nd level trap handler code will skip recording samples, causing lost samples

@@ -1,77 +1,86 @@
-# PC Sampling gfx1151 (Strix Halo) - Debug Plan
+# PC Sampling GFX1151 (Strix Halo APU) — Status & Plan
 
-## Goal
-- Host-trap PC sampling on `gfx1151` should generate non-empty `*pc_sampling_host_trap*.csv` without hangs/faults.
+## Platform
+- RDNA 3.5 APU, shared memory, CWSR disabled (`cwsr_enable=0`)
+- `system_allocator()` for `device_data` (finegrain returns NULL on APU)
+- MES manages VMIDs; TBA/TMA passed via `add_queue_mes`; `trap_en=1`
 
-## Current Blocker
-- `SQ_DEBUG_HOST_TRAP_STATUS.pending_count` latches to `1` right after first accepted SQ_CMD and never clears.
-- Trigger loop then always returns early (`skip SQ_CMD because pending_count=1`), so hosttrap buffer is never written and no CSV is produced.
+## Root Cause Found: MES Overwrites TBA/TMA Registers
 
-## What Is Already Proven
-- VMID resolution is working:
-  - `get_atc_vmid_pasid_mapping_info` is wired for gfx11.
-  - runtime resolves `owner_pasid=32770 -> target_vmid=8`.
-- Trap regs are programmed correctly for vmid 8:
-  - TBA/TMA intended vs readback match.
-  - `SPI_GDBG_PER_VMID_CNTL.TRAP_EN=1`.
-- Userspace trap blob path is not the current blocker:
-  - gfx11 TMA decode fix is applied.
-  - current failure is before userspace sees trap records.
+SRBM programming of SQ_SHADER_TBA/TMA succeeds (readback matches immediately after write), but MES overwrites them within milliseconds. By the time SQ_CMD fires, the trap handler reads TMA=0 via `s_sendmsg_rtn_b64 MSG_RTN_GET_TMA`, hits the null guard, and exits without writing samples.
 
-## Key Experiments (high signal only)
-| run_tag | policy | Key observation | Conclusion |
+### Evidence
+- `program_trap_handler_settings_v11`: readback matches intended values immediately after SRBM write
+- `tma_check` in trigger function (4ms later): `programmed_tma_reg=0x0`
+- `post_status=0x0` always — no trap fires because TMA is zero
+
+### Fix Applied
+In `kgd_gfx_v11_trigger_pc_sample_trap()`, reprogram TBA/TMA/GDBG via SRBM right before every SQ_CMD write. This counteracts MES overwriting the registers.
+
+## Kernel Changes (vs dkms baseline)
+
+### Needed for PC sampling
+- `get_atc_vmid_pasid_mapping_info_v11()` — VMID-to-PASID resolution (was NULL for GFX11)
+- `program_trap_handler_settings_v11()` — program TBA/TMA/GDBG via SRBM per-VMID
+- `kgd_gfx_v11_trigger_pc_sample_trap()` — SQ_CMD trigger with TBA/TMA reprogramming
+- `kgd_gfx_v11_get_hosttrap_status()` — pending_count check before SQ_CMD
+- Per-VMID address arrays for TBA/TMA reprogramming in trigger
+- kfd2kgd table wiring
+
+### Trigger function design (matches GFX9/GFX12)
+- Default policy: `MODE_SINGLE`, wave_id sweep 0-15, no `CHECK_VMID`, broadcast SE/SH
+- Pending_count skip (same as GFX9/GFX12)
+- TBA/TMA SRBM reprogramming before every SQ_CMD (GFX11-specific, counteracts MES)
+- `DATA=0x4` (HOSTTRAP trap ID, same as GFX9/GFX12)
+- Module params: `sqcmd_policy` (0=default, 1=broadcast, 2=noop), `post_status_delay_us`
+
+### Debug helpers (kept for future use)
+- `kgd_gfx_v11_dump_wave_trap_state()` — per-wave TRAPSTS/STATUS/HW_ID dump
+- `kgd_gfx_v11_log_runtime_trap_regs()` — SRBM readback of TBA/TMA (called on reset)
+- `kgd_gfx_v11_log_hosttrap_status_matrix()` — status across all SE/SH
+- `kgd_gfx_v11_log_tma_check()` — quick TMA readback
+
+## Key Experiments
+| Date | Policy | Key observation | Conclusion |
 |---|---:|---|---|
-| `20260207_132559` | 14 | `vmid=0` trigger path, zero trap regs | VMID resolution bug existed |
-| `20260207_141516` | 14 | `get_atc_vmid_pasid_mapping_info is NULL` | Missing callback wiring found |
-| `20260207_142958` | 14 | VMID resolves, still no samples | Problem moved to trigger/status path |
-| `20260207_174218` | 14 | `pending_count=1` sticky + repeated skip SQ_CMD | Primary blocker identified |
-| `20260207_184929` | 14 | Live queue/wave retarget (`queue 2`, `wave 0`) but immediate latch | Queue retarget alone insufficient |
-| `20260207_190106` | 14 | First accepted SQ_CMD then `post_status=0x1`; status seen on SH0+SH1 though target wave in SH1 | Strong hint SQ_CMD scope issue (`SE/SH=all`) |
+| 20260207 | 14 | `post_status=0x1` after first SQ_CMD, then latches | SQ_CMD scope issue (old policy) |
+| 20260208 | 14 | `programmed_tma_reg=0x0`, 1/4096 triggers found wave | MES overwrites TMA |
+| 20260208 | 2 | 4096 broadcast SQ_CMDs, all `post_status=0x0` | Confirms TMA=0 is the blocker |
 
-## Code State (only deltas that matter now)
-### Kernel (`~/amdgpu`)
-- `amdgpu_amdkfd_gfx_v11.c`
-  - VMID lookup callback and VMID-aware diagnostics added.
-  - Live target wave/queue picker added.
-  - **New fix candidate**: for `MODE_SINGLE`, SQ_CMD now targets selected `SE/SH` instead of broadcast-all.
-  - Added scope logs: `scope=single_se_sh|broadcast_all`, `scope_se`, `scope_sh`.
-  - Added first-latch context logs (`last_sqcmd`, status matrix, global wave summary).
-- `kfd_pc_sampling.c`
-  - hosttrap session now tracks `owner_pasid` and resolved `target_vmid`, with explicit start/thread logs.
+## Trap Handler State
+- Uses `flat_*` instructions (no SMEM stores on GFX11)
+- Saves/restores v0-v3, exec, ttmp registers
+- Null guards on TMA and host_trap_buffers
+- `flat_atomic_add_x2` for buf_write_val, `flat_atomic_add` for buf_written_val
+- `flat_store_dword` for sample.pc
+- TMA decode: `s_sendmsg_rtn_b64 MSG_RTN_GET_TMA` → shift left 8 → sign-extend if needed
 
-### Userspace (`~/rocm-systems/projects/rocr-runtime`)
-- `trap_handler.s`: gfx11 TMA decode fix kept; state-mutating trap debug writes removed.
+## Next Steps
+1. Rebuild + reinstall DKMS module with TBA/TMA reprogramming fix
+2. Reboot, run test (default policy 0 = GFX12-style)
+3. Expected: `tma_check` shows correct TMA, `post_status` non-zero, samples land
+4. If samples land: verify CSV output with correct PC/timestamp data
+5. Clean up debug logging (kernel + userspace)
 
-## Current Hypothesis
-- `pending_count` should clear only after host trap service.
-- With old behavior, `MODE_SINGLE` SQ_CMD was issued with `SE/SH=all`, potentially creating pending on non-target SHs with no service path.
-- Any non-clearing SH pending blocks all future SQ_CMD globally in current loop.
+## GFX11 ISA Constraints
+- No SMEM stores/atomics (`s_store_*`, `s_atomic_*`, `s_dcache_wb`)
+- Use `flat_*` or `global_*` (VMEM) for all stores/atomics
+- `HW_REG_HW_ID` → `HW_REG_HW_ID1`
+- Timestamp: `s_sendmsg_rtn_b64 MSG_RTN_GET_REALTIME`
+- Doorbell: `s_sendmsg_rtn_b32 MSG_RTN_GET_DOORBELL`
+- SQ_SHADER_TMA stores address >> 8
+- SQ_CMD is write-only (readback returns garbage)
 
-## Next Plan
-1. Rebuild + reinstall DKMS with current kernel changes (includes `SE/SH`-scoped SQ_CMD for `MODE_SINGLE`).
-2. Reboot once, keep policy `14`, run a short clean test (no stale `pc_sampling_test`/`rocprofv3`).
-3. Validate acceptance criteria:
-   - first accepted SQ_CMD log shows `scope=single_se_sh`;
-   - `pending_count` does not latch permanently right after first accepted SQ_CMD;
-   - hosttrap CSV appears.
-4. If still failing, do no-reboot A/B:
-   - `amdkfd_gfx11_pcs_sqcmd_cmd_override=-1` vs `4` (`TRAP_AFTER_INST`),
-   - `amdkfd_gfx11_pcs_single_wave_use_status_slot=0` vs `1`.
+## Key Files
+- `projects/rocr-runtime/.../trap_handler/trap_handler.s` — trap handler
+- `projects/rocr-runtime/.../runtime/amd_gpu_agent.cpp` — ROCr host-side PC sampling
+- `amdgpu/drivers/gpu/drm/amd/amdkfd/kfd_pc_sampling.c` — kernel session/thread/VMID
+- `amdgpu/.../amdgpu_amdkfd_gfx_v11.c` — SRBM programming + SQ_CMD trigger
 
-## Reboot/Run Checklist
-```bash
-echo 14 | sudo tee /sys/module/amdgpu/parameters/amdkfd_gfx11_pcs_sqcmd_policy
-echo 4096 | sudo tee /sys/module/amdgpu/parameters/amdkfd_gfx11_pcs_max_injected_traps
-echo 0 | sudo tee /sys/module/amdgpu/parameters/amdkfd_gfx11_pcs_post_status_delay_us
-echo 1 | sudo tee /sys/module/amdgpu/parameters/amdkfd_gfx11_pcs_wave_scan_on_reset
-echo 32 | sudo tee /sys/module/amdgpu/parameters/amdkfd_gfx11_pcs_wave_scan_max_waves
-echo 1 | sudo tee /sys/module/amdgpu/parameters/amdkfd_gfx11_pcs_wave_target_debug
-echo 1 | sudo tee /sys/module/amdgpu/parameters/amdkfd_gfx11_pcs_runtime_reg_readback_on_reset
-echo 0 | sudo tee /sys/module/amdgpu/parameters/amdkfd_gfx11_pcs_single_wave_use_status_slot
-echo -1 | sudo tee /sys/module/amdgpu/parameters/amdkfd_gfx11_pcs_sqcmd_cmd_override
-
-cd /home/wd/rocm-systems
-PCS_TIMEOUT_SEC=5 ./test_pc_sampling.sh
-
-dmesg | rg "trigger_pc_sample_trap: (SQ_CMD|post_status|skip SQ_CMD|pending latch|scope=|retarget)|pcs hosttrap: start resolved target_vmid|pc_sampling_host_trap"
+## Build & Test
+```
+# Kernel module (requires sudo):
+cd ~/amdgpu && sudo dkms build amdgpu/6.16.13 && sudo dkms install amdgpu/6.16.13 --force
+# Reboot, then:
+./test_pc_sampling.sh
 ```

@@ -387,20 +387,16 @@ trap_entry:
 
 .if .amdgcn.gfx_generation_number == 11
 .profile_trap_handlers_gfx11:
-  // ttmp[14:15] initially points to TMA.
-  // host_trap_buffers points to:
-  // [0x00] buf_write_val (u64: bit63=buffer id, low 63 bits=entry count)
-  // [0x08] buf_size (u32)
-  // [0x0c] reserved0 (u32)
-  // [0x10] buf_written_val0 (u32)
-  // [0x20] buf_written_val1 (u32)
-  // [0x40] sample0 in buffer0
-  // [0x40 + buf_size*64] sample0 in buffer1
+  // GFX11.5 (gfx1151) VMEM workaround:
+  // All memory operations (s_load, flat_*, global_*) hang in trap context
+  // on gfx1151.  Instead of writing PC samples from the trap handler, we
+  // hold the wave here with s_sleep so the kernel driver can read the
+  // original PC directly from TTMP0/TTMP1 via SQ_IND_INDEX/SQ_IND_DATA.
   //
-  // GFX11/RDNA3.5 does not support scalar stores used by gfx9 path.
-  // Use lane0 VMEM (flat_*) only.
+  // ttmp0/ttmp1 = original PC (saved by hardware at trap entry)
+  // Kernel reads ixSQ_WAVE_TTMP0 (0x026c) / ixSQ_WAVE_TTMP1 (0x026d)
 
-  // Save state.
+  // Save state that must be restored before returning to user code.
   s_mov_b32                             ttmp13, ttmp6
   s_mov_b32                             ttmp4, exec_lo
   s_mov_b32                             ttmp5, exec_hi
@@ -412,81 +408,14 @@ trap_entry:
   v_readlane_b32                        ttmp6, v2, 0
   v_readlane_b32                        ttmp7, v3, 0
 
-  // Null guard on TMA pointer.
-  s_cmp_eq_u64                          ttmp[14:15], 0
-  s_cbranch_scc1                        .pc_sampling_restore_gfx11
-
-  // Load host_trap_buffers = *(u64*)TMA using lane0 VMEM.
-  // Avoid scalar s_load from trap context (can fault on gfx1151).
-  v_writelane_b32                       v0, ttmp14, 0
-  v_writelane_b32                       v1, ttmp15, 0
-  flat_load_dwordx2                     v[2:3], v[0:1] glc slc
-  s_waitcnt                             vmcnt(0) & lgkmcnt(0)
-  v_readlane_b32                        ttmp14, v2, 0
-  v_readlane_b32                        ttmp15, v3, 0
-
-  // Null guard on host_trap_buffers.
-  s_cmp_eq_u64                          ttmp[14:15], 0
-  s_cbranch_scc1                        .pc_sampling_restore_gfx11
-
-  // Atomic increment on buf_write_val (64-bit). v[0:1] <- previous packed value.
-  v_writelane_b32                       v0, ttmp14, 0
-  v_writelane_b32                       v1, ttmp15, 0
-  v_mov_b32                             v2, 1
-  v_mov_b32                             v3, 0
-  flat_atomic_add_x2                    v[0:1], v[0:1], v[2:3] glc slc
-  s_waitcnt                             vmcnt(0) & lgkmcnt(0)
-  v_readlane_b32                        ttmp10, v0, 0
-  v_readlane_b32                        ttmp11, v1, 0
-  s_lshr_b32                            ttmp11, ttmp11, 31
-
-  // Load buf_size and bail out if local_entry is out of range.
-  s_add_u32                             ttmp0, ttmp14, 0x8
-  s_addc_u32                            ttmp1, ttmp15, 0
-  v_writelane_b32                       v0, ttmp0, 0
-  v_writelane_b32                       v1, ttmp1, 0
-  flat_load_dword                       v3, v[0:1] glc slc
-  s_waitcnt                             vmcnt(0) & lgkmcnt(0)
-  v_readlane_b32                        ttmp0, v3, 0
-  s_cmp_ge_u32                          ttmp10, ttmp0
-  s_cbranch_scc1                        .pc_sampling_restore_gfx11
-
-  // sample_addr = base + 0x40 + (buf_to_use * buf_size + local_entry) * 64
-  s_mul_hi_u32                          ttmp1, ttmp0, ttmp11
-  s_mul_i32                             ttmp0, ttmp0, ttmp11
-  s_lshl_b64                            ttmp[0:1], ttmp[0:1], 6
-  s_lshl_b32                            ttmp11, ttmp10, 6
-  s_add_u32                             ttmp0, ttmp0, ttmp11
-  s_addc_u32                            ttmp1, ttmp1, 0
-  s_add_u32                             ttmp0, ttmp0, 0x40
-  s_addc_u32                            ttmp1, ttmp1, 0
-  s_add_u32                             ttmp0, ttmp14, ttmp0
-  s_addc_u32                            ttmp1, ttmp15, ttmp1
-
-  // Write sample.pc (lo/hi) so parser can map to code object.
-  v_writelane_b32                       v0, ttmp0, 0
-  v_writelane_b32                       v1, ttmp1, 0
-  v_mov_b32                             v2, ttmp8
-  flat_store_dword                      v[0:1], v2 glc slc
-  s_add_u32                             ttmp0, ttmp0, 0x4
-  s_addc_u32                            ttmp1, ttmp1, 0
-  v_writelane_b32                       v0, ttmp0, 0
-  v_writelane_b32                       v1, ttmp1, 0
-  s_and_b32                             ttmp10, ttmp9, 0xffff
-  v_mov_b32                             v2, ttmp10
-  flat_store_dword                      v[0:1], v2 glc slc
-
-  // Increment buf_written_val{0,1} according to current buffer bit.
-  s_mul_i32                             ttmp0, ttmp11, 0x10
-  s_add_u32                             ttmp0, ttmp14, ttmp0
-  s_addc_u32                            ttmp1, ttmp15, 0
-  s_add_u32                             ttmp0, ttmp0, 0x10
-  s_addc_u32                            ttmp1, ttmp1, 0
-  v_writelane_b32                       v0, ttmp0, 0
-  v_writelane_b32                       v1, ttmp1, 0
-  v_mov_b32                             v2, 1
-  flat_atomic_add                       v3, v[0:1], v2 glc slc
-  s_waitcnt                             vmcnt(0) & lgkmcnt(0)
+  // Sleep ~1ms to give kernel time to read wave state.
+  // s_sleep(255) ≈ 255*64 clocks ≈ 8us at 2GHz.  128 iterations ≈ 1024us.
+  s_mov_b32                             ttmp10, 128
+.gfx11_pcs_sleep_loop:
+  s_sleep                               255
+  s_sub_u32                             ttmp10, ttmp10, 1
+  s_cmp_lg_u32                          ttmp10, 0
+  s_cbranch_scc1                        .gfx11_pcs_sleep_loop
 
 .pc_sampling_restore_gfx11:
   // Restore state.

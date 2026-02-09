@@ -1,100 +1,128 @@
 # PC Sampling GFX1151 (Strix Halo APU) — Status & Plan
 
 ## Platform
-- RDNA 3.5 APU, shared memory, CWSR disabled (`cwsr_enable=0`)
+- RDNA 3.5 APU (GFX11.5.1), shared memory, CWSR disabled (`cwsr_enable=0`)
+- 2 SEs, 2 SHs/SE, 80 SIMDs, 40 CUs, max_waves_per_simd=16, wave_front_size=32
 - MES manages VMIDs; TBA/TMA passed via `add_queue_mes`; `trap_en=1`
-- GFX11 SQ_CMD: no SIMD_ID field; WAVE_ID[20:16] is 5 bits (0-31)
+- GFX11 SQ_CMD: no SIMD_ID field; broadcast SE/SH targets all SIMDs
 
-## Root Causes Found
+## Confirmed Working
 
-### 1. MES had stale TBA/TMA=0 (FIXED)
-First 3 compute queues are created by ROCr BEFORE `UpdateTrapHandlerWithPCS` calls `SetTrapHandler`. At queue creation, `qpd->tma_addr=0`. MES caches TMA=0 from `add_queue_mes` and programs it into per-VMID registers on every remap, overwriting SRBM programming.
+### 1. MES TBA/TMA remap (FIXED)
+Early queues created before `SetTrapHandler` had TMA=0. Fixed by calling `remap_queue()` (remove+add all MES queues) in `kfd_pc_sample_start()` so MES re-reads updated `qpd->tba_addr`/`qpd->tma_addr`.
 
-**Fix**: In `remap_queue()`, added MES path: `remove_all_kfd_queues_mes()` + `add_all_kfd_queues_mes()` so MES re-reads updated `qpd->tba_addr`/`qpd->tma_addr`. Called from `kfd_pc_sample_start()` before trigger thread starts.
+### 2. SET_SHADER_DEBUGGER for TRAP_EN (FIXED)
+PC sampling path never called `kfd_dbg_set_mes_debug_mode()`, so MES didn't persistently set `SPI_GDBG_PER_VMID_CNTL.TRAP_EN=1`. Added call before remap in `kfd_pc_sampling.c`. Without this, SQ_CMD TRAP was ignored for ~9s until a race condition briefly enabled it.
 
-**Evidence**: After fix, `add_queue_mes` logs show correct TBA/TMA for all re-added queues. First-ever non-zero `post_status=0x3` observed at count=1966.
+### 3. SRBM reprogramming removed (FIXED)
+Removed ~40 lines of SRBM TBA/TMA/GDBG reprogramming from trigger path. No longer needed since MES has correct values via remap. Trigger now matches GFX12: lock mutex → broadcast SE/SH → write SQ_CMD → unlock.
 
-### 2. Trap handler doesn't write samples (CURRENT)
-Despite traps being delivered (`post_status=0x3`), `write_val=0` — the trap handler's `flat_atomic_add_x2` on `buf_write_val` never fires.
+### 4. Traps ARE being delivered (CONFIRMED)
+`post_status` shows 5-16 waves entering host trap handler. `SET_SHADER_DEBUGGER` was the key fix. Traps consistently appear ~10s into test (when GPU workload is running).
 
-**Hypothesis**: MES overwrites TMA register between SQ_CMD delivery and the trap handler's `MSG_RTN_GET_TMA` call. The trap handler gets TMA=0, hits the null guard (line 416-417 of `trap_handler.s`), and exits without writing.
+## Current Blocker: VMEM hangs in trap context on GFX11.5
 
-**Key question**: Does MES program TMA into per-VMID registers on remap, or only TBA? If MES ignores TMA, the SRBM-programmed value gets cleared on every remap.
+### Evidence
+- Waves enter trap handler (post_status=0x5/0xd/0x10) but stay stuck for ~2 seconds
+- Waves only exit when workload completes (queue cleanup kills them)
+- `buf_write_val` is never incremented — trap handler never reaches the atomic add
+- Tested both `flat_*` and `global_*` instructions — both hang identically
+- Known issue: `s_load` also faults in trap context on gfx1151 (comment in trap_handler.s)
+- **All three memory access methods (scalar, flat, global) fail in trap context on GFX11.5**
 
-## Trap Handler Flow (GFX11 path, `trap_handler.s`)
+### Trap handler flow (trap_handler.s, GFX11 path)
 ```
-trap_entry:
-  check HT bit in ttmp1 → .is_host_trap_detected
-  MSG_RTN_GET_TMA → ttmp[2:3]
-  shift left 8 → ttmp[14:15] = TMA byte address
-  sign-extend if bit 47 set
-
+trap_entry → check HT bit → .is_host_trap_detected
+  MSG_RTN_GET_TMA → shift left 8 → TMA VA in ttmp[14:15]
 .profile_trap_handlers_gfx11:
-  save exec, v0-v3; exec=1 (lane 0 only)
-  NULL GUARD: if TMA == 0 → skip to restore          ← likely failing here
-  flat_load_dwordx2 from TMA → host_trap_buffers
-  NULL GUARD: if host_trap_buffers == 0 → skip
-  flat_atomic_add_x2 on buf_write_val                 ← this is write_val
+  save state; exec=1 (lane 0)
+  NULL guard TMA → bail if 0
+  global_load_dwordx2 from TMA → host_trap_buffers    ← HANGS HERE
+  NULL guard host_trap_buffers → bail if 0
+  global_atomic_add_x2 on buf_write_val
   load buf_size, compute sample_addr
-  flat_store_dword sample.pc_lo, sample.pc_hi
-  flat_atomic_add on buf_written_val
-  restore exec, v0-v3
+  global_store_dword sample.pc_lo/hi
+  global_atomic_add on buf_written_val
+  restore state
 ```
 
-## Kernel Changes (vs dkms baseline)
+### Root cause hypothesis
+GPU page table walks do not complete in trap context on GFX11.5. The TMA/buffer memory is mapped and accessible from normal shaders, but TLB misses in trap context cause the wave to hang indefinitely. This is a hardware limitation.
 
-### Needed for PC sampling
+## Next Plan: Kernel-side PC readback
+
+Since the trap handler cannot access memory on GFX11.5, bypass it entirely. Read the trapped wave's PC directly from hardware registers in the kernel trigger function.
+
+### Approach
+When `post_status != 0` (waves are in trap handler), use `SQ_IND_INDEX`/`SQ_IND_DATA` to read wave state:
+
+1. After SQ_CMD, poll `SQ_DEBUG_HOST_TRAP_STATUS` for `PENDING_COUNT > 0`
+2. For each SE/SH with pending waves, iterate wave slots and read:
+   - `ixSQ_WAVE_STATUS` (0x0102) — check if wave is valid and trapped
+   - `ixSQ_WAVE_HW_ID2` (0x0118) — check VM_ID matches target
+   - `ixSQ_WAVE_PC_LO` (0x0108) / `ixSQ_WAVE_PC_HI` (0x0109) — current PC (trap handler PC)
+   - `ixSQ_WAVE_TTMP0` (0x026c) / `ixSQ_WAVE_TTMP1` (0x026d) — original PC saved at trap entry
+3. Write PC samples to a kernel-managed buffer (or directly to the userspace buffer via kernel mapping)
+4. The wave still needs to exit the trap handler — may need to modify trap handler to skip VMEM and just return
+
+### Key functions
+- `kgd_gfx_v11_wave_read_ind()` — reads wave state via SQ_IND_INDEX/SQ_IND_DATA
+- `kgd_gfx_v11_dump_wave_trap_state()` — existing wave dump (reads TRAPSTS, STATUS, HW_ID, PC, TTMPs)
+
+### Open questions
+1. Can we read TTMP0/TTMP1 (original PC) from waves stuck in the trap handler? The waves are hung on a VMEM instruction — are the TTMPs readable?
+2. How to make the trap handler exit without VMEM? Options:
+   - Modify trap handler to skip all VMEM in GFX11.5 path (just restore and exit)
+   - Use SQ_CMD to halt/kill the wave after reading PC (but this kills the user wave)
+   - Accept the 2s hang and let queue cleanup kill the waves (wasteful but functional)
+3. Buffer management: kernel writes PC samples — how to get them to userspace? Options:
+   - Write to a kernel-allocated buffer, copy to userspace on flush
+   - Map the userspace buffer into kernel space
+   - Use the existing hosttrap buffer format but write from kernel
+
+### Alternative: Fix trap handler with non-VMEM writes
+If there's a way to write to memory from trap context without VMEM (e.g., via `s_sendmsg` to write to a hardware queue, or via MMIO-mapped memory), the trap handler could still work. Research needed.
+
+## Kernel Changes (current state)
+
+### Core PC sampling support
 - `get_atc_vmid_pasid_mapping_info_v11()` — VMID-to-PASID resolution
-- `program_trap_handler_settings_v11()` — program TBA/TMA/GDBG via SRBM per-VMID
-- `kgd_gfx_v11_trigger_pc_sample_trap()` — SQ_CMD trigger with SRBM reprogramming
-- `kgd_gfx_v11_get_hosttrap_status()` — pending_count check before SQ_CMD
-- Per-VMID address arrays for TBA/TMA reprogramming in trigger
+- `program_trap_handler_settings_v11()` — program TBA/TMA/GDBG via SRBM
+- `kgd_gfx_v11_trigger_pc_sample_trap()` — SQ_CMD trigger (simplified, no SRBM)
+- `kgd_gfx_v11_get_hosttrap_status()` — pending_count check
+- `remap_queue()` MES path in `kfd_device_queue_manager.c`
+- `kfd_dbg_set_mes_debug_mode(pdd, true)` call in `kfd_pc_sampling.c`
 - kfd2kgd table wiring
-- `remap_queue()` MES path: remove+add all queues (forces MES to re-read TBA/TMA)
-- `kfd_pc_sample_start()`: call `remap_queue` before trigger thread starts
 
-### Trigger function design (matches GFX9/GFX12)
-- Default policy: `MODE_SINGLE`, wave_id sweep 0-15, no `CHECK_VMID`, broadcast SE/SH
-- `CMD=0x5` (SQ_IND_CMD_CMD_TRAP), `DATA=0x4` (HOSTTRAP trap ID)
-- Pending_count skip (same as GFX9/GFX12)
-- SRBM reprogramming of TBA/TMA before every SQ_CMD (may be removable once MES TMA issue resolved)
-- Module params: `sqcmd_policy` (0=default, 1=broadcast, 2=noop), `post_status_delay_us`
+### Diagnostics (in current module)
+- `kgd_gfx_v11_dump_wave_trap_state()` — per-wave register dump on first trap
+- `kgd_gfx_v11_log_runtime_trap_regs()` — SRBM readback of TBA/TMA/GDBG
+- FIRST post_status diagnostic with register readback
+- Status transition logging
 
-### Debug helpers
-- `kgd_gfx_v11_dump_wave_trap_state()` — per-wave TRAPSTS/STATUS/HW_ID dump
-- `kgd_gfx_v11_log_runtime_trap_regs()` — SRBM readback of TBA/TMA
-- `kgd_gfx_v11_log_hosttrap_status_matrix()` — status across all SE/SH
-- `kgd_gfx_v11_log_tma_check()` — quick TMA readback
+### Known bugs
+- Trigger thread doesn't stop when process exits (caused GPU reset in test 1)
+- `ever_trapped` static bool doesn't reset between sessions (FIRST diagnostic only fires once per module load)
 
-## Key Experiments
-| Date | Change | Key observation |
-|---|---|---|
-| 20260207 | Old 16-policy system | `post_status=0x1` after first SQ_CMD, then latches |
-| 20260208 | Simplified to 3 policies | `programmed_tma_reg=0x0`, MES overwrites TMA |
-| 20260208 | SRBM reprogram before SQ_CMD | Readback correct, but `post_status=0x0` still |
-| 20260208 | **remap_queue MES path** | `FIRST post_status=0x3` at count=1966 — traps delivered! |
-| 20260208 | But `write_val=0` | Trap handler executes but doesn't write samples |
-
-## Next Steps
-1. **Determine if MES programs TMA**: Read TMA register AFTER MES remap (without SRBM reprogramming) to see if MES preserves TMA or clears it
-2. **If MES doesn't program TMA**: Need alternative approach:
-   - Option A: Use `SET_SHADER_DEBUGGER` MES command (but it doesn't pass TMA)
-   - Option B: Store TMA in a GPU-accessible location the trap handler can read without MSG_RTN_GET_TMA
-   - Option C: Patch the trap handler to get TMA from a fixed/known address instead of the register
-3. **If MES does program TMA**: The issue is elsewhere — check flat_load faulting in trap context, or timing
-4. Once samples land: verify CSV output, clean up debug logging
+## Trap handler change (rocr-runtime)
+Changed `flat_*` → `global_*` in GFX11 path of `trap_handler.s` (lines 419-489). Did NOT fix the hang — both instruction types fail in trap context on GFX11.5. Change is still in place but irrelevant.
 
 ## Key Files
-- `projects/rocr-runtime/.../trap_handler/trap_handler.s` — trap handler (GFX11 path at line 364)
-- `projects/rocr-runtime/.../runtime/amd_gpu_agent.cpp` — `UpdateTrapHandlerWithPCS`, `BindTrapHandler`
-- `amdgpu/drivers/gpu/drm/amd/amdkfd/kfd_pc_sampling.c` — kernel session/thread/VMID, remap call
-- `amdgpu/.../amdgpu_amdkfd_gfx_v11.c` — SRBM programming + SQ_CMD trigger
-- `amdgpu/.../kfd_device_queue_manager.c` — `remap_queue` MES path, `add_queue_mes`
+- `projects/rocr-runtime/.../trap_handler/trap_handler.s` — GPU trap handler (GFX11 path line 388)
+- `amdgpu/.../amdgpu_amdkfd_gfx_v11.c` — trigger, wave dump, SRBM programming
+- `amdgpu/.../kfd_pc_sampling.c` — session management, set_mes_debug_mode call, remap
+- `amdgpu/.../kfd_device_queue_manager.c` — remap_queue MES path
 
 ## Build & Test
-```
-# Kernel module (requires sudo):
+```bash
+# Kernel module:
 cd ~/amdgpu && sudo dkms build amdgpu/6.16.13 && sudo dkms install amdgpu/6.16.13 --force
-# Reboot, then:
-./test_pc_sampling.sh
+# Reboot required (iGPU)
+
+# ROCr runtime (no reboot needed):
+bash build_rocr.sh
+
+# Test:
+PCS_TIMEOUT_SEC=15 bash test_pc_sampling.sh
+# Check: dmesg | grep -E "post_status|status transition|set_mes_debug"
 ```

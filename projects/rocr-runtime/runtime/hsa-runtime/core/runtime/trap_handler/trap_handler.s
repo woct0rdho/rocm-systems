@@ -408,11 +408,13 @@ trap_entry:
   v_readlane_b32                        ttmp6, v2, 0
   v_readlane_b32                        ttmp7, v3, 0
 
-  // Sleep ~1ms to give kernel time to read wave state.
-  // s_sleep(255) ≈ 255*64 clocks ≈ 8us at 2GHz.  128 iterations ≈ 1024us.
-  s_mov_b32                             ttmp10, 128
+  // Sleep ~2ms to give kernel time to read wave state via SQ_IND.
+  // s_sleep uses bits [6:0] of the immediate: 64 * (imm & 0x7F) clocks.
+  // s_sleep(127) = 64 * 127 = 8128 clocks ≈ 4us at 2GHz.
+  // 500 iterations × 4us ≈ 2ms.
+  s_mov_b32                             ttmp10, 500
 .gfx11_pcs_sleep_loop:
-  s_sleep                               255
+  s_sleep                               127
   s_sub_u32                             ttmp10, ttmp10, 1
   s_cmp_lg_u32                          ttmp10, 0
   s_cbranch_scc1                        .gfx11_pcs_sleep_loop

@@ -217,50 +217,6 @@
 .if .amdgcn.gfx_generation_number == 11
   // Bit to indicate that this is a host trap
   .set TTMP11_PCS_IS_HOSTTRAP                , 22
-
- .macro S_LOAD_DWORD_PCS_TTMP_REG1 base, offset
-     s_load_dword      ttmp13,\base, \offset
- .endm
-
- .macro S_BITSET0_B32_PCS_TTMP_REG2 bit_index
-     s_bitset0_b32     ttmp6, \bit_index
- .endm
-
- .macro S_BITSET1_B32_PCS_TTMP_REG2 bit_index
-     s_bitset1_b32    ttmp6, \bit_index
- .endm
-
- .macro S_CMP_GE_U32_PCS_TTMP_REG1 src0
-    s_cmp_ge_u32      \src0, ttmp13
- .endm
-
- .macro S_MOV_B32_SRC_PCS_TTMP_REG1 src0
-    s_mov_b32        ttmp13, \src0
- .endm
-
- .macro S_MOV_B32_DST_PCS_TTMP_REG1 dst
-    s_mov_b32       \dst, ttmp13
- .endm
-
- .macro S_LSHR_B32_PCS_TTMP_REG1_REG2 src1
-    s_lshr_b32       ttmp13, ttmp6, \src1
- .endm
-
- .macro  S_STORE_DWORD_PCS_TTMP_REG1 base, offset
-    s_store_dword    ttmp13, \base, \offset
- .endm
-
- .macro S_MULK_I32_PCS_TTMP_REG1 const_val
-    s_mulk_i32       ttmp13, \const_val
- .endm
-
- .macro S_ADD_U32_PCS_TTMP_REG1  dst, src0
-    s_add_u32        \dst, \src0, ttmp13
- .endm
-
- .macro S_CMP_LG_U32_PCS_TTMP_REG1 src0
-    s_cmp_lg_u32     \src0, ttmp13
- .endm
 .endif
 
 // ABI between first and second level trap handler:

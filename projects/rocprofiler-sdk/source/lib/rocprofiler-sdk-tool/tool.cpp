@@ -3138,23 +3138,16 @@ tool_fini(void* /*tool_data*/)
     client_identifier = nullptr;
     client_finalizer  = nullptr;
 
-    fprintf(stderr, "tool_fini: enter\n");
-
     auto _fini_timer = common::simple_timer{"[rocprofv3] tool finalization"};
 
     if(tool_metadata->process_end_ns == 0)
         rocprofiler_get_timestamp(&(tool_metadata->process_end_ns));
 
-    fprintf(stderr, "tool_fini: flush #1 start\n");
     flush();
-    fprintf(stderr, "tool_fini: flush #1 done, calling stop_context\n");
     rocprofiler_stop_context(get_client_ctx());
-    fprintf(stderr, "tool_fini: stop_context done, flush #2 start\n");
     flush();
-    fprintf(stderr, "tool_fini: flush #2 done, calling generate_output\n");
 
     generate_output(cleanup_mode::destroy);
-    fprintf(stderr, "tool_fini: generate_output done\n");
 
     if(destructors)
     {
@@ -3560,7 +3553,7 @@ rocprofiler_configure(uint32_t                 version,
     add_destructor(execution_profile);
 
     // in case main wrapper is not used
-    ::atexit([]() { fprintf(stderr, "atexit: calling finalize_rocprofv3\n"); finalize_rocprofv3("atexit"); fprintf(stderr, "atexit: finalize_rocprofv3 done\n"); });
+    ::atexit([]() { finalize_rocprofv3("atexit"); });
 
     tool::get_tmp_file_name_callback() = [](domain_type type) -> std::string {
         return compose_tmp_file_name(tool::get_config(), type);
@@ -3711,9 +3704,7 @@ rocprofv3_main(int argc, char** argv, char** envp)
     if(tool_metadata && tool_metadata->process_start_ns == 0)
         rocprofiler_get_timestamp(&(tool_metadata->process_start_ns));
 
-    fprintf(stderr, "rocprofv3_main: calling user main()\n");
     auto ret = CHECK_NOTNULL(get_main_function())(argc, argv, envp);
-    fprintf(stderr, "rocprofv3_main: user main() returned %d\n", ret);
 
     if(tool_metadata && tool_metadata->process_end_ns == 0)
         rocprofiler_get_timestamp(&(tool_metadata->process_end_ns));
@@ -3723,9 +3714,7 @@ rocprofv3_main(int argc, char** argv, char** envp)
     // reset so that it reports the timing
     if(_main_timer) _main_timer.reset();
 
-    fprintf(stderr, "rocprofv3_main: calling finalize_rocprofv3\n");
     finalize_rocprofv3(__FUNCTION__);
-    fprintf(stderr, "rocprofv3_main: finalize_rocprofv3 done\n");
 
     ROCP_INFO << "rocprofv3 finished. exit code: " << ret;
     return ret;

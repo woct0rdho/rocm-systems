@@ -975,48 +975,33 @@ finalize()
     // above returns true for all invocations after the first one
 
     ROCP_INFO << "finalizing rocprofiler (value=" << get_fini_status() << ")";
-    fprintf(stderr, "registration::finalize enter\n");
 
     static auto _once = std::once_flag{};
     std::call_once(_once, []() {
         auto num_clients = get_num_clients();
         set_fini_status(-1);
-        fprintf(stderr, "registration::finalize: async_copy_fini\n");
         hsa::async_copy_fini();
-        fprintf(stderr, "registration::finalize: counters_finalize\n");
         counters::device_counting_service_finalize();
-        fprintf(stderr, "registration::finalize: queue_controller_fini\n");
         hsa::queue_controller_fini();
-        fprintf(stderr, "registration::finalize: thread_trace_finalize\n");
         thread_trace::finalize();
-        fprintf(stderr, "registration::finalize: ompt_finalize\n");
         ompt::finalize_ompt();
-        fprintf(stderr, "registration::finalize: kfd_finalize\n");
         kfd::finalize();
 #if ROCPROFILER_SDK_HSA_PC_SAMPLING > 0
         // Stop the PcSamplingThread first so code_object::finalize can
         // acquire host_buffer_mutex without contention.
-        fprintf(stderr, "registration::finalize: pc_sampling_stop_threads\n");
         pc_sampling::stop_sampling_threads();
         // WARNING: this must precede `code_object::finalize()`
-        fprintf(stderr, "registration::finalize: pc_sampling_code_object_finalize\n");
         pc_sampling::code_object::finalize();
         // WARNING: this must follows queue_controller_fini.
-        fprintf(stderr, "registration::finalize: pc_sampling_service_fini\n");
         pc_sampling::service_fini();
-        fprintf(stderr, "registration::finalize: pc_sampling_service_fini done\n");
 #endif
-        fprintf(stderr, "registration::finalize: code_object_finalize\n");
         code_object::finalize();
-        fprintf(stderr, "registration::finalize: invoke_client_finalizers\n");
         context::correlation_id_finalize();
         if(get_init_status() > 0)
         {
             invoke_client_finalizers();
         }
-        fprintf(stderr, "registration::finalize: internal_threading_finalize\n");
         if(num_clients > 0) internal_threading::finalize();
-        fprintf(stderr, "registration::finalize: done\n");
         set_fini_status(1);
     });
 

@@ -29,7 +29,6 @@
 
 #include <sys/ioctl.h>
 
-#include <cstdlib>
 #include <fcntl.h>
 #include <unistd.h>
 #include <mutex>
@@ -178,11 +177,6 @@ get_pc_sampling_ioctl_version(uint32_t kfd_gpu_id, pcs_ioctl_version_t* pcs_ioct
     args.version         = 0;
 
     auto ret = ioctl(get_kfd_fd(), AMDKFD_IOC_PC_SAMPLE, &args);
-    fprintf(stderr,
-            "PCS ioctl version query: ret=%d gpu_id=%u version=0x%x\n",
-            ret,
-            kfd_gpu_id,
-            args.version);
 
     if(ret == -EBUSY)
     {
@@ -231,11 +225,6 @@ is_pc_sampling_supported()
     // Verify KFD 1.16 version
     rocprofiler_ioctl_version_info_t ioctl_version = {.major_version = 0, .minor_version = 0};
     auto                             status        = get_ioctl_version(ioctl_version);
-    fprintf(stderr,
-            "PCS ioctl version: status=%d kfd=%u.%u\n",
-            status,
-            ioctl_version.major_version,
-            ioctl_version.minor_version);
     if(status != ROCPROFILER_STATUS_SUCCESS)
         return status;
     else if(ioctl_version.major_version < 1 || ioctl_version.minor_version < 16)
@@ -405,12 +394,6 @@ ioctl_query_pc_sampling_capabilities(uint32_t  kfd_gpu_id,
     args.flags           = 0;
 
     ret = ioctl(get_kfd_fd(), AMDKFD_IOC_PC_SAMPLE, &args);
-    fprintf(stderr,
-            "PCS query caps: ret=%d gpu_id=%u req_sz=%u out_sz=%u\n",
-            ret,
-            kfd_gpu_id,
-            sample_info_sz,
-            args.num_sample_info);
 
     if(ret != 0)
     {

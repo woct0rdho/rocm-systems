@@ -2468,8 +2468,6 @@ void GpuAgent::SyncClocks() {
 }
 
 hsa_status_t GpuAgent::UpdateTrapHandlerWithPCS(pcs_sampling_data_t* pcs_hosttrap_buffers, pcs_sampling_data_t* pcs_stochastic_buffers) {
-  fprintf(stderr, "UpdateTrapHandlerWithPCS: hosttrap=%p stochastic=%p\n",
-          (void*)pcs_hosttrap_buffers, (void*)pcs_stochastic_buffers);
   // Assemble the trap handler source code.
   void* tma_addr = nullptr;
   uint64_t tma_size = 0;
@@ -2479,8 +2477,6 @@ hsa_status_t GpuAgent::UpdateTrapHandlerWithPCS(pcs_sampling_data_t* pcs_hosttra
 
   AssembleShader("TrapHandlerKfdExceptions", AssembleTarget::ISA, trap_code_buf_,
                  trap_code_buf_size_);
-  fprintf(stderr, "UpdateTrapHandlerWithPCS: trap_code_buf_=%p size=%zu\n",
-          trap_code_buf_, trap_code_buf_size_);
 
   /* pcs_hosttrap_buffers and pcs_stochastic_buffers are NULL until PC sampling is enabled */
   if (pcs_hosttrap_buffers || pcs_stochastic_buffers) {
@@ -2501,26 +2497,6 @@ hsa_status_t GpuAgent::UpdateTrapHandlerWithPCS(pcs_sampling_data_t* pcs_hosttra
       return info.agentBaseAddress ? info.agentBaseAddress : const_cast<void*>(ptr);
     };
 
-    auto log_ptr_info = [](const char* label, const void* ptr) {
-      if (!ptr) {
-        fprintf(stderr, "UpdateTrapHandlerWithPCS: %s=(nil)\n", label);
-        return;
-      }
-      hsa_amd_pointer_info_t info{};
-      info.size = sizeof(info);
-      if (AMD::hsa_amd_pointer_info(ptr, &info, nullptr, nullptr, nullptr) != HSA_STATUS_SUCCESS) {
-        fprintf(stderr, "UpdateTrapHandlerWithPCS: %s=%p (ptrinfo failed)\n", label, ptr);
-        return;
-      }
-      fprintf(stderr,
-              "UpdateTrapHandlerWithPCS: %s=%p type=%u host=%p gpu=%p size=0x%zx reg=%u\n",
-              label, ptr, static_cast<unsigned>(info.type), info.hostBaseAddress,
-              info.agentBaseAddress, info.sizeInBytes, info.registered ? 1 : 0);
-    };
-
-    log_ptr_info("hosttrap_ptr", pcs_hosttrap_buffers);
-    log_ptr_info("stochastic_ptr", pcs_stochastic_buffers);
-
     void* hosttrap_gpu = get_gpu_addr(pcs_hosttrap_buffers);
     void* stochastic_gpu = get_gpu_addr(pcs_stochastic_buffers);
     if (pcs_hosttrap_buffers && pcs_hosttrap_buffers == pcs_hosttrap_data_.device_data &&
@@ -2532,13 +2508,8 @@ hsa_status_t GpuAgent::UpdateTrapHandlerWithPCS(pcs_sampling_data_t* pcs_hosttra
       stochastic_gpu = reinterpret_cast<void*>(pcs_stochastic_data_.device_data_gpu_va);
     }
 
-    fprintf(stderr, "UpdateTrapHandlerWithPCS: hosttrap_gpu=%p stochastic_gpu=%p\n",
-            hosttrap_gpu, stochastic_gpu);
-
     ((uint64_t*)tma_region_host)[0] = (uint64_t)hosttrap_gpu;
     ((uint64_t*)tma_region_host)[1] = (uint64_t)stochastic_gpu;
-    fprintf(stderr, "UpdateTrapHandlerWithPCS: tma_host[0]=0x%lx tma_host[1]=0x%lx\n",
-            ((uint64_t*)tma_region_host)[0], ((uint64_t*)tma_region_host)[1]);
 
     if (!trap_handler_tma_region_) {
       trap_handler_tma_region_ = (uint64_t*)coarsegrain_allocator()(2 * sizeof(uint64_t), 0);
@@ -2568,15 +2539,11 @@ hsa_status_t GpuAgent::UpdateTrapHandlerWithPCS(pcs_sampling_data_t* pcs_hosttra
       hsa_status_t map_ret =
           driver().MakeMemoryResident(trap_handler_tma_region_, tma_size, &alt_va, &map_flag, 1,
                                       &node);
-      fprintf(stderr,
-              "UpdateTrapHandlerWithPCS: MakeMemoryResident(tma) ret=%d alt_va=0x%lx map_flags=0x%x\n",
-              map_ret, alt_va, map_flag.Value);
       if (map_ret != HSA_STATUS_SUCCESS) {
         return HSA_STATUS_ERROR;
       }
       if (alt_va != 0) tma_addr_gpu = reinterpret_cast<void*>(alt_va);
     }
-    log_ptr_info("tma_ptr", trap_handler_tma_region_);
   } else if (trap_handler_tma_region_) {
     driver().MakeMemoryUnresident(trap_handler_tma_region_);
     coarsegrain_deallocator()(trap_handler_tma_region_);
@@ -2584,13 +2551,9 @@ hsa_status_t GpuAgent::UpdateTrapHandlerWithPCS(pcs_sampling_data_t* pcs_hosttra
   }
 
   // Bind the trap handler to this node.
-  fprintf(stderr, "UpdateTrapHandlerWithPCS: SetTrapHandler node=%u code=%p size=%zu tma=%p tma_gpu=%p tma_size=%lu\n",
-          node_id(), trap_code_buf_, trap_code_buf_size_, tma_addr, tma_addr_gpu, tma_size);
   void* tma_for_kfd = (tma_addr_gpu != nullptr) ? tma_addr_gpu : tma_addr;
-  auto ret = driver().SetTrapHandler(node_id(), trap_code_buf_, trap_code_buf_size_, tma_for_kfd,
+  return driver().SetTrapHandler(node_id(), trap_code_buf_, trap_code_buf_size_, tma_for_kfd,
                                  tma_size);
-  fprintf(stderr, "UpdateTrapHandlerWithPCS: SetTrapHandler returned %d\n", ret);
-  return ret;
 }
 
 void GpuAgent::BindTrapHandler() {
@@ -2902,15 +2865,12 @@ hsa_status_t GpuAgent::PcSamplingIterateConfig(hsa_ven_amd_pcs_iterate_configura
    uint32_t size = 0;
 
   if (!core::Runtime::runtime_singleton_->KfdVersion().supports_exception_debugging) {
-    if (core::Runtime::runtime_singleton_->flag().debug())
-      fprintf(stderr, "PC sampling disabled: supports_exception_debugging == false\n");
+    debug_print("PC sampling disabled: supports_exception_debugging == false\n");
     return HSA_STATUS_ERROR;
   }
 
   // First query to get size of list needed
   HSAKMT_STATUS ret = HSAKMT_CALL(hsaKmtPcSamplingQueryCapabilities(node_id(), NULL, 0, &size));
-  if (core::Runtime::runtime_singleton_->flag().debug())
-    fprintf(stderr, "PC sampling query caps: ret=%d size=%u node_id=%u\n", ret, size, node_id());
   if (ret != HSAKMT_STATUS_SUCCESS || size == 0) return HSA_STATUS_ERROR;
 
   std::vector<HsaPcSamplingInfo> sampleInfoList(size);
@@ -2974,12 +2934,7 @@ hsa_status_t GpuAgent::PcSamplingCreateFromId(HsaPcSamplingTraceId ioctlId,
 
   // Ensure only one session is active at a time for the given method
   if (pcs_data->session)
-    return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
-
-  // Initialize device/host-side PC sampling buffers and trap metadata.
-  fprintf(stderr, "PcSamplingCreateFromId: initializing buffers\n");
-
-  // TODO: For now, we can only have
+    return HSA_STATUS_ERROR_OUT_OF_RESOURCES;  // TODO: For now, we can only have
                                                // 1 pc sampling session at a
                                                // time. As a final solution, we
                                                // want to be able to support
@@ -3112,12 +3067,9 @@ hsa_status_t GpuAgent::PcSamplingCreateFromId(HsaPcSamplingTraceId ioctlId,
     pcs_data->device_data =
         (pcs_sampling_data_t*)system_allocator()(deviceAllocSize, 0x1000, 0);
     if (!pcs_data->device_data) {
-      fprintf(stderr, "pc sampling: system_allocator failed for device_data (%zu bytes)\n", deviceAllocSize);
       return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
     }
     pcs_data->device_data_size = deviceAllocSize;
-    fprintf(stderr, "pc sampling: allocated device_data %zu bytes at %p (system)\n",
-            deviceAllocSize, (void*)pcs_data->device_data);
 
     // Allow GPU and nearest CPU access to device_data.
     {
@@ -3125,7 +3077,6 @@ hsa_status_t GpuAgent::PcSamplingCreateFromId(HsaPcSamplingTraceId ioctlId,
       hsa_agent_t agents[2] = {cpuAgent, public_handle_};
       if (AMD::hsa_amd_agents_allow_access(2, agents, NULL, pcs_data->device_data) != HSA_STATUS_SUCCESS)
         return HSA_STATUS_ERROR;
-      fprintf(stderr, "pc sampling: allow_access for device_data OK\n");
     }
 
     // Initialize device_data header and sample buffers.
@@ -3134,7 +3085,6 @@ hsa_status_t GpuAgent::PcSamplingCreateFromId(HsaPcSamplingTraceId ioctlId,
       debug_print("Failed to dmaCopy!\n");
       return HSA_STATUS_ERROR;
     }
-    fprintf(stderr, "pc sampling: DmaCopy OK (%zu bytes)\n", sizeof(*device_datahost));
 
     {
       uint8_t* device_buf_ptr =
@@ -3147,7 +3097,6 @@ hsa_status_t GpuAgent::PcSamplingCreateFromId(HsaPcSamplingTraceId ioctlId,
         debug_print("Failed to dmaFill!\n");
         return HSA_STATUS_ERROR;
       }
-      fprintf(stderr, "pc sampling: DmaFill OK (%zu dwords)\n", count_in_dwords);
     }
 
     // Ensure device_data is resident/mapped for trap handler access.
@@ -3158,9 +3107,6 @@ hsa_status_t GpuAgent::PcSamplingCreateFromId(HsaPcSamplingTraceId ioctlId,
       uint32_t node = node_id();
       hsa_status_t map_ret = driver().MakeMemoryResident(
           pcs_data->device_data, pcs_data->device_data_size, &alt_va, &map_flag, 1, &node);
-      fprintf(stderr,
-              "pc sampling: MakeMemoryResident(device_data) ret=%d alt_va=0x%lx map_flags=0x%x\n",
-              map_ret, alt_va, map_flag.Value);
       if (map_ret != HSA_STATUS_SUCCESS) {
         debug_print("pc sampling: MakeMemoryResident(device_data) failed\n");
         return HSA_STATUS_ERROR;
@@ -3231,12 +3177,10 @@ hsa_status_t GpuAgent::PcSamplingDestroy(pcs::PcsRuntime::PcSamplingSession& ses
 }
 
 hsa_status_t GpuAgent::PcSamplingStart(pcs::PcsRuntime::PcSamplingSession& session) {
-  fprintf(stderr, "PcSamplingStart: entry, isActive=%d\n", session.isActive());
   if (session.isActive()) return HSA_STATUS_SUCCESS;
 
 
   auto method = session.method();
-  fprintf(stderr, "PcSamplingStart: method=%d\n", method);
 
   pcs_data_t* pcs_data = nullptr;
   const char* thread_name = nullptr;
@@ -3296,9 +3240,7 @@ hsa_status_t GpuAgent::PcSamplingStart(pcs::PcsRuntime::PcSamplingSession& sessi
   }
 
   // Start the sampling session in the kernel driver
-  fprintf(stderr, "PcSamplingStart: calling hsaKmtPcSamplingStart node=%u thunkId=%d\n", node_id(), session.ThunkId());
   auto startRet = HSAKMT_CALL(hsaKmtPcSamplingStart(node_id(), session.ThunkId()));
-  fprintf(stderr, "PcSamplingStart: hsaKmtPcSamplingStart returned %d\n", startRet);
   if (startRet == HSAKMT_STATUS_SUCCESS)
     return HSA_STATUS_SUCCESS;
 
@@ -3314,17 +3256,13 @@ hsa_status_t GpuAgent::PcSamplingStart(pcs::PcsRuntime::PcSamplingSession& sessi
 }
 
 hsa_status_t GpuAgent::PcSamplingStop(pcs::PcsRuntime::PcSamplingSession& session) {
-  fprintf(stderr, "PcSamplingStop: enter isActive=%d\n", session.isActive());
   if (!session.isActive()) return HSA_STATUS_SUCCESS;
 
   // Stop the session
   session.stop();
-  fprintf(stderr, "PcSamplingStop: session.stop() done, isActive=%d\n", session.isActive());
 
   // Stop PC sampling in the kernel driver
-  fprintf(stderr, "PcSamplingStop: calling hsaKmtPcSamplingStop\n");
   HSAKMT_STATUS retKmt = HSAKMT_CALL(hsaKmtPcSamplingStop(node_id(), session.ThunkId()));
-  fprintf(stderr, "PcSamplingStop: hsaKmtPcSamplingStop returned %d\n", retKmt);
   if (retKmt != HSAKMT_STATUS_SUCCESS)
     throw AMD::hsa_exception(HSA_STATUS_ERROR, "Failed to stop PC Sampling session.");
 
@@ -3341,33 +3279,24 @@ hsa_status_t GpuAgent::PcSamplingStop(pcs::PcsRuntime::PcSamplingSession& sessio
     return HSA_STATUS_ERROR_INVALID_ARGUMENT;
   }
   // Wake up pcs_hosttrap_thread_ if it is waiting for data
-  fprintf(stderr, "PcSamplingStop: signaling threads\n");
   if (pcs_data->device_data) {
     HSA::hsa_signal_store_screlease(pcs_data->device_data->done_sig0, -1);
     HSA::hsa_signal_store_screlease(pcs_data->device_data->done_sig1, -1);
   }
 
   // Wait for the thread to finish and clean up
-  fprintf(stderr, "PcSamplingStop: waiting for thread (thread=%p)\n", pcs_data->thread);
   if (pcs_data->thread) {
     os::WaitForThread(pcs_data->thread);
-    fprintf(stderr, "PcSamplingStop: thread joined\n");
     os::CloseThread(pcs_data->thread);
     pcs_data->thread = nullptr;
   }
   pcs_data->session = nullptr;
-  fprintf(stderr, "PcSamplingStop: done\n");
 
   return HSA_STATUS_SUCCESS;
 }
 
 hsa_status_t GpuAgent::PcSamplingFlushDeviceBuffers(
     pcs::PcsRuntime::PcSamplingSession& session) {
-  static int flush_call_count = 0;
-  flush_call_count++;
-  if (flush_call_count <= 5 || (flush_call_count % 100 == 0))
-    fprintf(stderr, "PcSamplingFlushDeviceBuffers: entry #%d method=%d\n", flush_call_count, session.method());
-
   pcs_data_t* pcs_data = nullptr;
 
   if (session.method() == HSA_VEN_AMD_PCS_METHOD_HOSTTRAP_V1) {
@@ -3535,14 +3464,10 @@ hsa_status_t GpuAgent::PcSamplingFlushDeviceBuffers(
 
   if (!host_buffer_begin || host_buffer_size == 0 ||
       host_write_ptr < host_buffer_begin || host_write_ptr > host_buffer_end) {
-    fprintf(stderr,
-            "pc sampling: invalid host buffer pointers: begin=%p size=%zu write_ptr=%p\n",
-            host_buffer_begin, host_buffer_size, host_write_ptr);
     return HSA_STATUS_SUCCESS;
   }
 
   if (!pcs_data->device_data) {
-    fprintf(stderr, "pc sampling: device_data is NULL, skipping flush\n");
     return HSA_STATUS_SUCCESS;
   }
 
@@ -3550,22 +3475,6 @@ hsa_status_t GpuAgent::PcSamplingFlushDeviceBuffers(
   buf_written_val[0] = reinterpret_cast<uint64_t>(&pcs_data->device_data->buf_written_val0);
   buf_written_val[1] = reinterpret_cast<uint64_t>(&pcs_data->device_data->buf_written_val1);
   buf_size = pcs_data->device_data->buf_size;
-
-  if (flush_call_count <= 5 || (flush_call_count % 100 == 0)) {
-    // APU shared memory: read device_data directly (no DmaCopy needed)
-    volatile pcs_sampling_data_t* dd = pcs_data->device_data;
-    fprintf(stderr,
-            "PcSamplingFlushDeviceBuffers: hdr write_val=%lu reserved0=0x%x written0=%u written1=%u buf_size=%u\n",
-            dd->buf_write_val, dd->reserved0, dd->buf_written_val0,
-            dd->buf_written_val1, dd->buf_size);
-    // DEBUG: Check if trap handler wrote magic to TMA region
-    if (trap_handler_tma_region_) {
-      volatile uint64_t* tma = (volatile uint64_t*)trap_handler_tma_region_;
-      fprintf(stderr,
-              "PcSamplingFlushDeviceBuffers: tma[0]=0x%lx tma[1]=0x%lx\n",
-              tma[0], tma[1]);
-    }
-  }
 
   // Defensive clamp in case device-side memory got corrupted
   {
@@ -3576,9 +3485,6 @@ hsa_status_t GpuAgent::PcSamplingFlushDeviceBuffers(
                                                            : session.buffer_size() / 2;
     const size_t expected_buf_size = expected_trap_buffer_size / session.sample_size();
     if (buf_size == 0 || buf_size > expected_buf_size) {
-      fprintf(stderr,
-              "pc sampling: unexpected buf_size=%zu (expected<=%zu); clamping\n",
-              buf_size, expected_buf_size);
       buf_size = expected_buf_size;
     }
   }
@@ -3632,9 +3538,6 @@ hsa_status_t GpuAgent::PcSamplingFlushDeviceBuffers(
       PM4_PRED_EXEC_DW2_EXEC_COUNT(i - pred_exec_cmd_sz) | PM4_PRED_EXEC_DW2_VIRTUALXCCID_SELECT(0x1);
   }
 
-  if (flush_call_count <= 5 || (flush_call_count % 100 == 0))
-    fprintf(stderr, "pc sampling: submitting batch 1 (%u dwords)\n", i);
-
   HSA::hsa_signal_store_screlease(exec_pm4_signal, 1);
 
   queues_[QueuePCSampling]->ExecutePM4(
@@ -3647,20 +3550,6 @@ hsa_status_t GpuAgent::PcSamplingFlushDeviceBuffers(
   } while (true);
 
   *old_val &= (ULLONG_MAX >> 1);
-  static int samples_debug_count = 0;
-  samples_debug_count++;
-  if (*old_val > 0 || samples_debug_count <= 5 || (samples_debug_count % 100 == 0))
-    fprintf(stderr, "PcSamplingFlushDeviceBuffers: old_val=%lu buf_size=%zu which_buffer=%u\n",
-            *old_val, buf_size, which_buffer);
-
-  if (*old_val > 0 && (samples_debug_count <= 20 || (samples_debug_count % 100 == 0))) {
-    uint64_t first_ptr = reinterpret_cast<uint64_t>(buffer[which_buffer]);
-    uint64_t last_ptr = first_ptr + ((*old_val - 1) * session.sample_size());
-    fprintf(stderr,
-            "PcSamplingFlushDeviceBuffers: ptr_range first=0x%lx last=0x%lx sample_size=%zu count=%lu\n",
-            first_ptr, last_ptr, session.sample_size(), *old_val);
-  }
-
   /* If the number of entries in old_val is larger than buf_size, then there was a buffer overflow
    * and the 2nd level trap handler code will skip recording samples, causing lost samples
    */
@@ -3672,9 +3561,6 @@ hsa_status_t GpuAgent::PcSamplingFlushDeviceBuffers(
   to_copy = *old_val * session.sample_size();
 
   if (to_copy > host_buffer_size) {
-    fprintf(stderr,
-            "pc sampling: to_copy=%u exceeds host_buffer_size=%zu; skipping copy\n",
-            to_copy, host_buffer_size);
     return HSA_STATUS_SUCCESS;
   }
 
@@ -3803,16 +3689,17 @@ void GpuAgent::PcSamplingThread(pcs_data_t& pcs_data, const char* thread_name) {
 
     hsa_signal_t done_sig[] = {pcs_data.device_data->done_sig0, pcs_data.device_data->done_sig1};
 
-    int thread_loop_count = 0;
     while (pcs_data.session->isActive()) {
-      thread_loop_count++;
       // Wait for the signal to process the buffer.
-      // Use a short timeout (5ms) so we also pick up samples written
-      // directly by the kernel (direct-read path) without GPU signaling.
+      // For host_trap with kernel direct-read, use a short timeout (5ms) to
+      // pick up samples written by the kernel without GPU signaling.
+      // For stochastic/GPU-trap, wait indefinitely for done_sig.
       {
+        uint64_t wait_timeout = (session.method() == HSA_VEN_AMD_PCS_METHOD_HOSTTRAP_V1)
+            ? 5000000ULL /* 5ms in ns */ : UINT64_MAX;
         hsa_signal_value_t val = HSA::hsa_signal_wait_scacquire(
             done_sig[which_buffer], HSA_SIGNAL_CONDITION_LT, 1,
-            5000000 /* 5ms in ns */, HSA_WAIT_STATE_BLOCKED);
+            wait_timeout, HSA_WAIT_STATE_BLOCKED);
         if (val == -1) goto thread_exit;
         if (val == 0)
           HSA::hsa_signal_store_screlease(done_sig[which_buffer], 1);
@@ -3820,13 +3707,10 @@ void GpuAgent::PcSamplingThread(pcs_data_t& pcs_data, const char* thread_name) {
       }
 
       // Lock buffer to ensure thread-safe access
-      fprintf(stderr, "PcSamplingThread: loop=%d acquiring mutex isActive=%d\n", thread_loop_count, (int)pcs_data.session->isActive());
       std::lock_guard<std::mutex> lock(pcs_data.host_buffer_mutex);
-      fprintf(stderr, "PcSamplingThread: loop=%d got mutex, flushing device\n", thread_loop_count);
       // Flush device buffers
       if (PcSamplingFlushDeviceBuffers(session) != HSA_STATUS_SUCCESS)
 	    goto thread_exit;
-      fprintf(stderr, "PcSamplingThread: loop=%d device flushed, processing host buf\n", thread_loop_count);
 
       size_t bytes_before_wrap;
       size_t bytes_after_wrap;
@@ -3928,17 +3812,11 @@ void GpuAgent::PcSamplingThread(pcs_data_t& pcs_data, const char* thread_name) {
         // Handle non-wrapped buffer
         bytes_before_wrap = pcs_data.host_write_ptr - pcs_data.host_read_ptr;
 
-        int handle_count = 0;
         while (bytes_before_wrap >= session.buffer_size()) {
           assert(pcs_data.host_read_ptr >= host_buffer_begin &&
                  pcs_data.host_read_ptr + session.buffer_size() <= host_buffer_end);
-          fprintf(stderr, "PcSamplingThread: loop=%d HandleSampleData[%d] bytes=%zu buf_sz=%zu\n",
-                  thread_loop_count, handle_count, bytes_before_wrap, session.buffer_size());
           session.HandleSampleData(pcs_data.host_read_ptr, session.buffer_size(), nullptr, 0,
                                    pcs_data.lost_sample_count);
-          fprintf(stderr, "PcSamplingThread: loop=%d HandleSampleData[%d] done\n",
-                  thread_loop_count, handle_count);
-          handle_count++;
           pcs_data.host_read_ptr += session.buffer_size();
           bytes_before_wrap = pcs_data.host_write_ptr - pcs_data.host_read_ptr;
           pcs_data.lost_sample_count = 0;
@@ -3946,7 +3824,6 @@ void GpuAgent::PcSamplingThread(pcs_data_t& pcs_data, const char* thread_name) {
       }
 
       } // end stochastic/GPU-trap path
-      fprintf(stderr, "PcSamplingThread: loop=%d releasing mutex\n", thread_loop_count);
     }
 thread_exit:
   debug_print("%s::Exiting\n", thread_name);
@@ -3958,7 +3835,6 @@ thread_exit:
 }
 
 hsa_status_t GpuAgent::PcSamplingFlush(pcs::PcsRuntime::PcSamplingSession& session) {
-  fprintf(stderr, "PcSamplingFlush: enter\n");
   pcs_data_t* pcs_data = nullptr;
 
   if (session.method() == HSA_VEN_AMD_PCS_METHOD_HOSTTRAP_V1) {
@@ -3975,12 +3851,9 @@ hsa_status_t GpuAgent::PcSamplingFlush(pcs::PcsRuntime::PcSamplingSession& sessi
   size_t bytes_before_wrap;
   size_t bytes_after_wrap;
 
-  fprintf(stderr, "PcSamplingFlush: acquiring host_buffer_mutex\n");
   std::lock_guard<std::mutex> lock(pcs_data->host_buffer_mutex);
-  fprintf(stderr, "PcSamplingFlush: acquired host_buffer_mutex, calling FlushDeviceBuffers\n");
   // Flush device buffers
   if (PcSamplingFlushDeviceBuffers(session) != HSA_STATUS_SUCCESS) return HSA_STATUS_ERROR;
-  fprintf(stderr, "PcSamplingFlush: FlushDeviceBuffers done\n");
 
   assert(pcs_data->host_read_ptr >= host_buffer_begin && pcs_data->host_read_ptr < host_buffer_end);
   assert(pcs_data->host_write_ptr >= host_buffer_begin &&

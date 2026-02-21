@@ -1,0 +1,18 @@
+[unsloth.import_fixes|WARNING]Unsloth: transformers==5.15.0.dev0 declares dependencies that your environment does not satisfy:
+    tokenizers<=0.23.0,>=0.22.0 is required, but found tokenizers==0.23.2
+
+Upgrade the dependencies, not transformers:
+    pip install --upgrade "tokenizers<=0.23.0,>=0.22.0"
+
+transformers may suggest `pip install transformers -U` instead. Ignore that if you installed transformers from git main on purpose (for example with `pip install --no-deps git+https://github.com/huggingface/transformers.git` for a new model) - upgrading transformers would only undo the install you wanted. Set UNSLOTH_SKIP_TRANSFORMERS_DEPENDENCY_CHECK=1 to silence this.
+/home/wd/venv_torch/lib/python3.14/site-packages/unsloth/__init__.py:1556: UserWarning: WARNING: Unsloth should be imported before [trl, transformers, peft] to ensure all optimizations are applied. Your code may run slower or encounter memory issues without these optimizations.
+
+Please restructure your imports with 'import unsloth' at the top of your file.
+  from ._gpu_init import *
+[aiter] import [module_aiter_core] under /home/wd/venv_torch/lib/python3.14/site-packages/aiter/jit/module_aiter_core.so
+/home/wd/venv_torch/lib/python3.14/site-packages/unsloth/import_fixes.py:2189: FutureWarning: torch._dynamo.config.inline_inbuilt_nn_modules is deprecated and does not do anything, inline_inbuilt_nn_modules is always True. It will be removed in a future version of PyTorch.
+  original_setattr(self, name, value)
+🦥 Unsloth: Will patch your computer to enable 2x faster free finetuning.
+🦥 Unsloth Zoo will now patch everything to make training faster!
+full-late-import-order case completed before process finalization
+exit status: 0

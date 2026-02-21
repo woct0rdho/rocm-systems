@@ -1,0 +1,6 @@
+[311276.084520] amdgpu: pcs: thread started interval_us=1048576 vmid=8
+[311279.231139] amdgpu: pcs: thread exiting, sent 3 traps
+[311279.252074] amdgpu: pcs: thread started interval_us=1048576 vmid=8
+[311282.399173] amdgpu: pcs: thread exiting, sent 3 traps
+[311285.589643] amdgpu: pcs: thread started interval_us=5000 vmid=8
+[311285.895336] amdgpu: pcs: thread exiting, sent 61 traps

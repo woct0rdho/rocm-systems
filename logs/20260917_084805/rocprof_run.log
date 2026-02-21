@@ -1,0 +1,13 @@
+W0917 08:48:05.680130  201878 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.000984 sec
+W0917 08:48:05.680895  201878 simple_timer.cpp:55] [rocprofv3] '/home/wd/rocm-systems/pc_sampling_test' ::     0.000000 sec
+W0917 08:48:05.708073  201878 tool.cpp:3876] HSA version 1.21.0 initialized (instance=0)
+W0917 08:48:05.712733  201878 queue_controller.cpp:213] [queue-intercept] device-memory ring-buffer requested but profiling requires system-memory InterceptQueue; falling back to system-memory ring for agent 103506409369888 (priority and CU-mask from the descriptor are not preserved)
+W0917 08:48:06.010048  201878 simple_timer.cpp:55] [rocprofv3] '/home/wd/rocm-systems/pc_sampling_test' ::     0.329152 sec
+E0917 08:48:06.018470  201878 output_stream.cpp:110] Opened result file: /home/wd/rocm-systems/pc_sampling_test_out/x2/201878_pc_sampling_host_trap.csv
+E0917 08:48:06.021563  201878 output_stream.cpp:110] Opened result file: /home/wd/rocm-systems/pc_sampling_test_out/x2/201878_agent_info.csv
+W0917 08:48:06.022107  201878 simple_timer.cpp:55] [rocprofv3] output generation ::     0.005558 sec
+W0917 08:48:06.022211  201878 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.005693 sec
+W0917 08:48:06.022540  201881 tool.cpp:4766] [PPID=201854][PID=201878][TID=201881][signal_finalization_worker] rocprofv3 finalizing after signal 0...
+W0917 08:48:06.022699  201881 tool.cpp:4691] [PPID=201854][PID=201878][TID=201881][signal_finalization_worker] rocprofv3 waiting for 0 children to exit
+PCS workload config: N=1048576 launches=2000 inner_iters=128
+done: 258.62 elapsed_ms=124.768

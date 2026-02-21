@@ -1,0 +1,14 @@
+rocprof=/home/wd/venv_torch/lib/python3.14/site-packages/_rocm_sdk_devel/bin/rocprofv3
+bin=/home/wd/rocm-systems/pc_sampling_test
+out_dir=/home/wd/rocm-systems/pc_sampling_test_out
+pcs_interval_us=5000
+PCS_TIMEOUT_SEC=15
+PCS_TIMEOUT_KILL_AFTER_SEC=15
+uname=7.0.0-31-generic
+PCS_N=1048576
+PCS_KERNEL_LAUNCHES=2000
+PCS_INNER_ITERS=128
+amdgpu_module=/lib/modules/7.0.0-31-generic/updates/dkms/amdgpu.ko.zst
+amdkfd_gfx11_pcs_sqcmd_policy=<unavailable>
+amdkfd_gfx11_pcs_max_injected_traps=<unavailable>
+amdkfd_gfx11_pcs_post_status_delay_us=<unavailable>

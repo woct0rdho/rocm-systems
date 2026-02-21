@@ -17,12 +17,12 @@ handler assembly writes one 64-byte sample into the device buffer and increments
 `buf_written_val`. At the 80% watermark, GPU decrements `done_sig` to wake the ROCr
 `PcSamplingThread`. Samples trickle in at hardware-controlled rate.
 
-On GFX11.5, the **kernel thread** scans all running waves every 5ms via SQ_IND,
-producing ~900 samples per scan. The kernel writes directly to the device buffer
-from CPU via `kthread_use_mm`. There is no GPU signaling - `buf_written_val` is
-never set by the GPU (ROCr pre-sets it to satisfy PM4 WAIT_REG_MEM). The ROCr
-PcSamplingThread eager-drains any available data instead of waiting for a 4 MB
-threshold.
+On GFX11.5, the **kernel thread** scans all running waves at a user-specified
+interval via SQ_IND, producing ~900 samples per scan. The kernel writes directly
+to the device buffer from CPU via `kthread_use_mm`. There is no GPU signaling -
+`buf_written_val` is never set by the GPU (ROCr pre-sets it to satisfy PM4
+WAIT_REG_MEM). The ROCr PcSamplingThread eager-drains any available data instead
+of waiting for a 4 MB threshold.
 
 ### Wave Iteration (kernel: `read_wave_pcs`)
 
@@ -72,7 +72,7 @@ kthread_stop never called -> DEADLOCK
 
 ```
 Stage                          Size         Record    Capacity
-─────────────────────────────────────────────────────────────
+--------------------------------------------------------------
 Device buffer (trap_buffer)    2 MB         64 B      32,768 samples
 Host buffer (ROCr)             8 MB         64 B      131,072 samples
 HandleSampleData threshold     4 MB / any   64 B      65K / 1 sample (stochastic / host_trap)
@@ -183,6 +183,70 @@ Most likely a TMA memory mapping issue. CWSR handler's `s_load_dword` +
 `global_store_dword_addtid` work in PRIV mode on GFX11, but our TMA likely lacks
 valid GPU PTEs for data access (instruction fetch works at same VA range).
 
+## Sampling Rate and Quality vs GFX9/12
+
+### Interval Parameter
+
+The kernel thread (`kfd_pc_sample_thread`) uses the user-specified interval for
+both gfx9/12 and gfx1151. The ioctl `interval` field (in microseconds for
+host_trap) becomes `timeout` in `kfd_pc_sampling.c:190`, controlling
+`usleep_range` via `next_trap_time = ktime_add_us(ktime_get_raw(), timeout)`.
+No hardcoded 5ms - the scan frequency is fully user-controlled.
+
+The kernel advertises the same capabilities for all host_trap GPUs:
+interval_min=1 us, interval_max=~0ULL, no power-of-2 requirement.
+
+rocprofv3 requires `--pc-sampling-interval` (mandatory, no default). The
+internal SDK fallback is 1 (config.hpp:141). AMD's ROCm Compute Profiler docs
+recommend starting at 1048576 us (~1s) and lowering to 65536 us (~65ms).
+
+### Throughput per Interval
+
+The fundamental difference is what happens each interval tick:
+```
+GFX9/12 (trigger_pc_sample_trap):
+  SQ_CMD traps 1 random wave -> trap handler writes 1 sample
+
+GFX11.5 (read_wave_pcs):
+  SQ_IND scans ALL active waves -> kernel writes ~N samples (N = active waves)
+```
+
+At typical occupancy (~900 active waves on Strix Halo):
+```
+Interval     GFX9/12 host-trap    GFX11.5 direct-read
+5 ms         ~200 samples/sec     ~180K samples/sec
+65 ms        ~15 samples/sec      ~14K samples/sec
+1 s          ~1 sample/sec        ~900 samples/sec
+```
+
+GFX11.5 produces a complete wave snapshot per interval rather than a random
+single-wave sample. This is better for profiling (census vs random sampling)
+but generates more data.
+
+### Sample Quality
+
+The gfx9/12 trap handler assembly (.profile_trap_handlers_gfx9 in
+trap_handler.s) reads registers from inside the trapped wave context. GFX11.5
+reads from outside via SQ_IND.
+```
+Field             GFX9/12 host-trap       GFX11.5 direct-read    Notes
+pc                TTMP0/TTMP1 (HW saved)  SQ_IND PC_LO/PC_HI     Equivalent
+exec_mask         EXEC register           0                      SQ_IND can't read EXEC on gfx11
+workgroup_id      TTMP8/9/10 (SPI)        0                      TTMP reads return garbage via SQ_IND
+hw_id             HW_REG_HW_ID            SQ_IND HW_ID2          Equivalent (wave/simd/wgp/sa/se)
+timestamp         SQ timestamp counter    ktime_get_raw_ns()     CPU vs GPU clock; fine for statistics
+correlation_id    0 (SDK parser resolves) 0                      Both rely on SDK dispatch tracking
+chiplet_info      TTMP11 bits             0                      Single-chiplet on Strix Halo
+```
+
+Missing fields on gfx11.5 (exec_mask, workgroup_id) are hardware limitations
+of SQ_IND on GFX11 - TTMP/SGPR reads return zero ~80% of the time. Cannot be
+fixed without a different readout mechanism.
+
+For the primary use case (instruction-level hotspot profiling), pc + hw_id +
+timestamp is sufficient. exec_mask is needed for warp divergence analysis;
+workgroup_id for workgroup-level attribution.
+
 ## Key Files
 
 ### Kernel (`~/amdgpu/`)
@@ -220,7 +284,7 @@ cd ~/rocm-systems && bash build_rocr.sh
 # ROCProfiler (no reboot):
 cd ~/rocm-systems && bash build_rocprofiler.sh
 # Test:
-PCS_TIMEOUT_SEC=30 PCS_KERNEL_LAUNCHES=2000 bash test_pc_sampling.sh
+PCS_TIMEOUT_SEC=30 PCS_KERNEL_LAUNCHES=2000 python test_pc_sampling.py
 # Check kernel logs:
 dmesg | grep -E "pcs:"
 ```

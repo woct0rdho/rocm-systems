@@ -5,176 +5,342 @@
 - 2 SEs, 2 SHs/SE, 40 CUs (20 WGPs), 4 SIMDs/WGP, max_waves_per_simd=16, wave32
 - Linux 6.19, DKMS amdgpu module (6.16.13)
 
-## Current Approach: Direct PC Reading
+## Current Status: 100% Sample Retention, Full Pipeline Working
 
-Read PC_LO/PC_HI directly from running waves via SQ_IND control registers.
-No trapping, no SQ_CMD, no trap handler interaction during sampling.
+### What Works (verified 2026-02-21)
+- **Direct PC reading** via SQ_IND — ~900 VMID-matched samples/scan
+- **Kernel→userspace delivery** — kernel writes to `device_data` via `kthread_use_mm`
+- **ROCr picks up samples** — `PcSamplingFlushDeviceBuffers` reads samples
+- **Incremental delivery** — PcSamplingThread eager-drains host buffer for host_trap method
+- **Thread cleanup on process exit** — per-iteration mm acquire/release, no circular ref
+- **~20% sentinel corruption** filtered (pc_lo/pc_hi/hw_id2 == `0xbebebeef`)
+- **CSV output** — rocprofv3 writes decoded PC sampling CSV with instruction disassembly
+- **Clean shutdown** — no SIGKILL, finalization completes within timeout
+- **LOSSLESS buffer policy** — no dropped samples, no deadlocks
 
-### Wave iteration (per umr pattern)
+### Test Results (2026-02-21, after incremental delivery fix)
+```
+Kernel: total_delivered=20526 loops=36
+PcSamplingThread incremental delivery:
+  loop 5: 1,555 samples
+  loop 6: 4,129 samples
+  loop 7: 7,465 samples
+  shutdown flush: 7,377 samples
+CSV: 20,527 lines (20,526 samples + header)
+Instructions decoded: s_delay_alu, v_add_co_u32, s_cbranch_scc0, s_cmp_eq_u32, etc.
+Finalization: completes in <1s after user main() returns
+Sample retention: 100% (20,526 of 20,526) — 0 "buffer too small" errors
+```
+
+### Previous Test Results (before incremental delivery fix)
+```
+Kernel: total_delivered=19955 loops=28
+CSV: 699 lines (698 samples + header)
+Sample retention: ~3.5% (699 of ~20K) — all delivered at shutdown, SDK buffer overflow
+```
+
+### Bugs Fixed (2026-02-21)
+
+#### 1. LOSSLESS Buffer Deadlock
+**Symptom**: PcSamplingThread hangs in `buffer::emplace` when SDK buffer is full.
+**Root cause**: `ROCPROFILER_BUFFER_POLICY_LOSSLESS` blocks in emplace waiting for
+`buffer::flush` (via thread pool → `join()`), while PcSamplingThread holds
+`host_buffer_mutex`. Main thread's finalization path tries same mutex → deadlock.
+**Fix**: Changed to `ROCPROFILER_BUFFER_POLICY_DISCARD` in tool.cpp:1777.
+**Status**: Temporary workaround. Should revert to LOSSLESS once incremental delivery
+is fixed (see next steps).
+
+#### 2. Finalization Order Deadlock
+**Symptom**: `code_object::finalize()` → `PcSamplingFlush()` hangs acquiring
+`host_buffer_mutex` because PcSamplingThread is still running.
+**Root cause**: Finalization order called `code_object::finalize()` (needs mutex) before
+`invoke_client_finalizers()` (stops thread via `PcSamplingStop()`).
+**Fix**: Added `pc_sampling::stop_sampling_threads()` in registration.cpp, called before
+`code_object::finalize()`. Stops PcSamplingThread so flush can acquire mutex.
+
+#### 3. PM4 WAIT_REG_MEM Hang
+**Symptom**: `PcSamplingFlushDeviceBuffers` hangs on PM4 submission after finding samples.
+**Root cause**: PM4 `WAIT_REG_MEM` polls `buf_written_val` to equal `old_val`. The GPU trap
+handler normally increments `buf_written_val` per sample. But with kernel direct-read,
+the kernel writes samples directly from CPU — `buf_written_val` is never set.
+**Fix**: Pre-set `buf_written_val[which_buffer] = old_val` for host_trap method before
+PM4 submission (amd_gpu_agent.cpp).
+
+---
+
+## Why Sample Retention Is Low
+
+### How normal PC sampling works (GFX9/12)
+
+On supported architectures, the **GPU hardware** generates samples. SPI programs SQ to
+raise a trap every N instructions/cycles (interval 65536–1048576). When a trap fires,
+**one wave** generates **one 64-byte sample**. The GPU trap handler assembly code
+(`trap_handler.s` / `trap_handler_gfx12.s`) runs on the CU and writes the sample into
+the device buffer, atomically incrementing `buf_written_val`. When the buffer hits the
+80% watermark, the GPU decrements `done_sig`, which wakes the ROCr `PcSamplingThread`.
+
+The sample rate is **inherently throttled by the interval**. With 304 CUs at interval
+1M instructions, you get a few hundred to a few thousand samples per second. The
+reference CSV in the docs has 78 samples from a short kernel.
+
+### The buffer pipeline (sizes from code)
+
+```
+Stage                          Size         Record    Capacity
+─────────────────────────────────────────────────────────────
+Device buffer (trap_buffer)    2 MB         64 B      32,768 samples
+Host buffer (ROCr)             8 MB         64 B      131,072 samples
+HandleSampleData threshold     4 MB         64 B      65,536 samples (= session.buffer_size())
+SDK buffer (tool.cpp)          64 KB        88 B      744 records
+```
+
+Sources:
+- HSA buffer: `get_hsa_pcs_buffer_size()` = `64 * 1024 * 64` = 4 MB (utils.hpp:61)
+- Device buffer: `trap_buffer_size = session.buffer_size() / 2` = 2 MB (amd_gpu_agent.cpp:2894)
+- Host buffer: `2 * session.buffer_size()` = 8 MB (amd_gpu_agent.cpp:2895)
+- SDK buffer: `16 * page_size` = 64 KB (tool.cpp:1936)
+- SDK record: `rocprofiler_pc_sampling_record_host_trap_v0_t` = 88 bytes (pc_sampling.h:270)
+
+### On GFX9/12, the pipeline works because:
+
+1. Samples **trickle in** at the hardware-controlled rate
+2. Device buffer **signals watermark** via `done_sig` → wakes PcSamplingThread
+3. PcSamplingThread copies device→host via PM4 DMA, then calls `HandleSampleData`
+   when host buffer accumulates ≥ `session.buffer_size()` (4 MB = 65K samples)
+4. SDK buffer (744 records) **drains incrementally** via watermark flush callback
+5. `LOSSLESS` policy is safe — emplace blocks if buffer full, buffer flushes via
+   thread pool, emplace retries. No deadlock because the thread pool is independent
+   and the mutex isn't involved in the flush path during normal operation.
+
+### Our approach has three compounding problems:
+
+**Problem 1: HandleSampleData is never called during execution.**
+`PcSamplingThread` (amd_gpu_agent.cpp:3688) only calls `HandleSampleData` when:
+```cpp
+while (bytes_before_wrap >= session.buffer_size())  // 4 MB threshold
+```
+Our kernel delivers ~20K samples total = 1.25 MB. This **never reaches** the 4 MB
+threshold. So `HandleSampleData` is never called during the thread loop. All data
+sits in the host buffer until shutdown.
+
+**Problem 2: Burst delivery at shutdown.**
+`PcSamplingFlush` (amd_gpu_agent.cpp:3780) uses a different threshold:
+```cpp
+while (bytes_before_wrap > 0)  // drains everything
+```
+At shutdown, this delivers all ~20K samples to the SDK callback in a single burst.
+
+**Problem 3: SDK buffer overflow with DISCARD.**
+The SDK buffer is 64 KB = 744 records. When ~20K samples arrive in a burst, the
+first ~744 fill the buffer. With `DISCARD` policy, the remaining ~19,256 are silently
+dropped ("buffer too small (size=0)" errors). Result: **3.5% retention**.
+
+With the original `LOSSLESS` policy this would deadlock instead of drop: emplace
+blocks → buffer flush submits to thread pool → join() blocks → PcSamplingThread
+holds mutex → finalization needs mutex → deadlock (Bug #1 above).
+
+### Summary of architectural differences
+
+```
+                        Normal (GFX9/12)              Our approach (GFX11.5.1)
+────────────────────────────────────────────────────────────────────────────────
+Who generates samples   GPU hardware trap per wave    CPU kernel thread scans all waves
+Samples per event       1 (one wave trapped)          ~900 (all active waves scanned)
+Rate control            Hardware interval (65K–1M)    Scan interval (5ms, all waves)
+Device buffer signal    GPU decrements done_sig       No signaling (CPU writes)
+buf_written_val         GPU trap handler increments   Never set (had to pre-set it)
+HandleSampleData        4 MB threshold reached        Eager drain (any data, fixed)
+Delivery pattern        Steady trickle over lifetime  Incremental via eager drain (fixed)
+```
+
+---
+
+## Next Steps
+
+### ~~Step 1: Fix Incremental Delivery in PcSamplingThread~~ ✓ DONE
+
+Fixed in amd_gpu_agent.cpp. For `host_trap` method, PcSamplingThread now uses eager drain
+(`while (bytes > 0)` with `min(bytes, session.buffer_size())` chunks) instead of waiting
+for the 4 MB threshold. The stochastic/GPU-trap path is unchanged.
+
+### ~~Step 2: Revert DISCARD → LOSSLESS~~ ✓ DONE
+
+Reverted tool.cpp buffer policy back to `ROCPROFILER_BUFFER_POLICY_LOSSLESS`.
+With incremental delivery, the SDK buffer never overflows, so LOSSLESS doesn't block.
+
+### ~~Step 3: Verify Sample Counts End-to-End~~ ✓ DONE
+
+Verified with PCS_KERNEL_LAUNCHES=2000:
+- Kernel: 20,526 delivered → CSV: 20,526 samples (100% retention)
+- Zero "buffer too small" errors
+- Clean shutdown, no deadlocks
+
+### Step 4: Production Cleanup
+- Remove debug fprintf statements from:
+  - amd_gpu_agent.cpp (PcSamplingThread, PcSamplingFlush, PcSamplingStop, FlushDeviceBuffers)
+  - registration.cpp (finalize steps)
+  - tool.cpp (tool_fini, rocprofv3_main)
+  - code_object.cpp (finalize)
+  - hsa_adapter.cpp (flush_internal_agent_buffers)
+- Reduce kernel logging (`pr_warn` → `pr_debug`)
+- Remove dead code
+
+### Step 5: Verify with Larger Workloads
+- Test with PCS_KERNEL_LAUNCHES=200000 (longer GPU active time)
+- Verify sample distribution across instructions
+- Test with multiple concurrent workloads
+
+---
+
+## Architecture: Direct PC Reading
+
+Read PC_LO/PC_HI from running waves via SQ_IND. No trapping, no SQ_CMD.
+
+### Wave Iteration
 ```
 for se in 0..num_se:
   for sh in 0..num_sh:
     for wgp in 0..max_cu_per_sh/2:
       for simd in 0..3:
-        select_se_sh(se, sh, (wgp << 2) | simd)   # MANY_TO_INSTANCE
-        for wave in 0..max_waves_per_simd-1:       # 0..15
-          STATUS  → filter VALID, skip PRIV
-          HW_ID2  → filter by VMID
-          PC_LO/HI → sample
+        GRBM_GFX_INDEX: INSTANCE = (wgp << 2) | simd
+        for wave in 0..15:
+          STATUS → filter VALID, skip PRIV, skip corruption (bits 30-31)
+          HW_ID2 → filter by VMID, skip 0xbebebeef
+          PC_LO/HI → skip if either == 0xbebebeef
+          → fill kfd_pcs_sample: pc, hw_id=HW_ID2, timestamp=ktime_get_raw_ns()
 ```
 
-### Why this works
-- Control registers (STATUS, HW_ID, PC_LO/HI) read reliably via SQ_IND
-- TTMP/SGPR reads unreliable (~80% zero) on GFX11 — no FORCE_READ bit
-- No trapping → no stuck waves, no MES teardown hang
+### Thread Lifecycle (critical for correctness)
+```
+Init:
+  kfd_lookup_process_by_pasid → get_task_struct(lead_thread) → kfd_unref_process
+  get_task_mm → kthread_use_mm → read TMA[0], buf_size → kthread_unuse_mm → mmput
+  (NO long-lived mm or process ref — prevents circular dependency)
 
-## Key Register Details
+Loop:
+  read_wave_pcs(sample_buf) → if samples > 0:
+    get_task_mm(lead_thread) → if NULL: process died, break
+    kthread_use_mm → pcs_write_to_device_data → kthread_unuse_mm → mmput
 
-### SQ_WAVE_STATUS (ixSQ_WAVE_STATUS=0x0102)
+Exit triggers:
+  - kthread_should_stop() — normal stop via kfd_pc_sample_stop ioctl
+  - get_task_mm returns NULL — process exited (exit_mm set task->mm = NULL)
+  - amdgpu_in_reset — GPU reset
+```
 
-| Bit | Field | Notes |
-|-----|-------|-------|
-| 5 | PRIV | In trap handler — skip these (PC = handler, not user code) |
-| 13 | HALT | Ignored while PRIV=1 (ISA confirmed) |
-| 14 | TRAP | Trap **pending**, NOT active |
-| 16 | VALID | Wave slot occupied |
-| 22 | OREO_CONFLICT | Valid field |
-| 23 | FATAL_HALT | Valid field |
-| 24 | NO_VGPRS | Valid field |
-| 25 | LDS_PARAM_READY | Valid field |
-| 26 | MUST_GS_ALLOC | Valid field |
-| 27 | MUST_EXPORT | Valid field |
-| 28 | IDLE | No outstanding instructions |
-| 29 | SCRATCH_EN | Scratch enabled |
-| 30-31 | Reserved | Corruption mask: `0xC0000000` |
+### Why Per-Iteration MM Acquire/Release is Required
+Holding `mm_users` across iterations prevents the ONLY KFD cleanup path:
+```
+Thread holds mm_users → exit_mmap blocked → mmu_notifier_release blocked →
+kfd_process_notifier_release never fires → kfd_process_wq_release never runs →
+kfd_process_destroy_pdds never runs → kfd_pc_sample_release never called →
+kthread_stop never called → DEADLOCK
+```
+Fix: acquire/release mm per-iteration. When process exits, `get_task_mm` returns NULL.
 
-### SQ_IND_INDEX (regSQ_IND_INDEX=0x1118)
-- WAVE_ID [4:0]: wave slot within selected SIMD (0-15 used)
-- WORKITEM_ID [10:5]: thread selector
-- AUTO_INCR [11]: auto-increment INDEX on SQ_IND_DATA read
-- INDEX [16:31]: register offset
-- **No FORCE_READ** (was bit 13 on GFX9, removed on GFX10+)
+### Device Data Buffer Layout (`pcs_sampling_data_t`)
+```
+offset  field              size    notes
+0x00    buf_write_val      8       (buf_idx<<63) | sample_count
+0x08    buf_size           4       samples per buffer (observed: 32768)
+0x0C    reserved0          4
+0x10    buf_written_val0   4       Must be pre-set for host_trap method
+0x14    buf_watermark0     4
+0x18    done_sig0          8
+0x20    buf_written_val1   4       Must be pre-set for host_trap method
+0x24    buf_watermark1     4
+0x28    done_sig1          8
+0x30    reserved1          16
+0x40    buffer0[]          buf_size * 64 bytes
+        buffer1[]          buf_size * 64 bytes
+```
 
-### GRBM_GFX_INDEX — Wave Addressing on GFX10+
-- INSTANCE_INDEX (7 bits) encodes WGP + SIMD: `(wgp << 2) | simd`
-- INSTANCE_BROADCAST_WRITES is a **write-mode** flag — wrong for reads
-- Must iterate per-instance to read all SIMDs (confirmed by umr source)
+### Sample Format: `kfd_pcs_sample` / `perf_sample_hosttrap_v1_t` (64 bytes)
+```
+offset  field              source
+0x00    pc (u64)           SQ_IND PC_HI:PC_LO
+0x08    exec_mask (u64)    0 (can't read reliably)
+0x10    workgroup_id[3]    0 (TTMP unreliable)
+0x1C    chiplet_info       0
+0x20    hw_id (u32)        SQ_IND HW_ID2
+0x24    reserved0          0
+0x28    reserved1 (u64)    0
+0x30    timestamp (u64)    ktime_get_raw_ns()
+0x38    correlation_id     0
+```
 
-### SQ_CMD (regSQ_CMD=0x111b)
-- CMD [3:0], MODE [6:4], CHECK_VMID [7], DATA [11:8]
-- WAVE_ID [20:16] (5 bits), QUEUE_ID [26:24], VM_ID [31:28]
-- MODE=1 = BROADCAST, CMD=1 = SETHALT
-- No SIMD_ID field on GFX11 (unlike GFX9)
+### Shutdown Sequence (corrected)
+```
+registration::finalize:
+  async_copy_fini
+  counters_finalize
+  queue_controller_fini
+  thread_trace_finalize
+  ompt_finalize
+  kfd_finalize
+  pc_sampling::stop_sampling_threads()    ← NEW: stops PcSamplingThread
+    → PcSamplingStop → session.stop(), hsaKmtPcSamplingStop, signal -1, WaitForThread
+    → flush_internal_agent_buffers        ← flushes remaining samples
+  pc_sampling::code_object::finalize()    ← flushes again (no-op, thread stopped)
+  pc_sampling::service_fini()             ← flushes again (no-op)
+  code_object::finalize()
+  invoke_client_finalizers()              ← tool_fini → stop_context (PcSamplingStop no-op) → CSV
+  internal_threading::finalize()
+```
 
-### TBA/TMA Registers
-- regSQ_SHADER_TBA_LO/HI, regSQ_SHADER_TMA_LO/HI
-- Kernel stores address >> 8 (256-byte aligned)
-- TRAP_EN in TBA_HI bit 31
-- Trap handler reads TMA via `s_sendmsg_rtn_b64 MSG_RTN_GET_TMA` (0x82), then shifts left by 8
+## Known Limitations
+- **Race with ROCr flush** — kernel CPU writes vs ROCr PM4 GPU swaps on `buf_write_val`.
+  Benign for statistical sampling (may lose a few samples at swap boundaries).
+- **Single-XCC only** — `for_each_inst` loop overwrites `n_samples`. Fine for Strix Halo.
+- **`trigger_pc_sample_trap` is a no-op** — calls `read_wave_pcs(NULL, 0)`, returns 0.
+- **Dispatch_Id / Correlation_Id / Exec_Mask = 0** — expected for direct-read approach
+  (exec_mask can't be read reliably via SQ_IND, CID not assigned, dispatch not tracked).
 
-## VMEM Hang in PRIV=1 — Root Cause Analysis
+## VMEM Hang in PRIV=1 (for future reference)
 
-### Symptoms
-- All data ops (`s_load_dword`, `flat_*`, `global_*`) hang in trap handler context
-- Instruction fetch works fine (trap handler executes from TBA)
-- Workaround: trap handler does sleep-only loop; kernel reads PC via SQ_IND
+Most likely a **TMA memory mapping issue**, not a hardware bug.
+CWSR handler's `s_load_dword` + `global_store_dword_addtid` work in PRIV mode on GFX11
+(same `cwsr_trap_gfx11_hex` binary for all GFX11.x). Our TMA is separately allocated
+and likely lacks valid GPU PTEs for data access (instruction fetch works at same VA range).
 
-### Evidence That Data Ops SHOULD Work in PRIV Mode
-1. **ISA says no restrictions** — only TTMP writes and STATUS are PRIV-restricted
-2. **CWSR handler uses data ops in PRIV mode on GFX11** — `s_load_dword` (line 320)
-   and `global_store_dword_addtid` (lines 429, 461) in `cwsr_trap_handler_gfx10.asm`
-3. **Same CWSR binary used for all GFX11.x** including GFX11.5
-   (`kfd_device.c:552-557`: `IP_VERSION >= 11,0,0 && < 12,0,0` → `cwsr_trap_gfx11_hex`)
-4. **GFX11 SH_MEM_CONFIG has no RETRY_DISABLE field** — retry is not controlled
-   per-VMID, so the missing retry config in `set_cache_memory_policy_v11` is by design
-5. **SH_MEM_CONFIG IS configured** for the VMID via `program_sh_mem_settings` in
-   `allocate_vmid`, which is always called regardless of cwsr_enable
-6. **`update_qpd_v11` is intentionally empty** — GFX11 doesn't need per-QPD updates
+## Key Constraints
 
-### Most Likely Root Cause: TMA Memory Mapping
+### GFX11 SQ_IND — No FORCE_READ
+- Control registers (STATUS, HW_ID, PC) read reliably
+- TTMP/SGPR reads return zero ~80% of time — unusable
+- GRBM_GFX_INDEX INSTANCE = `(wgp << 2) | simd` (per-instance, not broadcast for reads)
 
-The CWSR handler and our handler allocate TMA differently:
-
-| | CWSR (cwsr_enable=1) | Our handler (cwsr_enable=0) |
-|---|---|---|
-| TBA alloc | `vm_mmap(RESERVED_MEM)` — KFD manages GPU PTEs | `system_allocator()` — kernarg pool |
-| TMA location | Same alloc as TBA (`tba + KFD_CWSR_TMA_OFFSET`) | Separate `coarsegrain_allocator()` alloc |
-| TMA mapping | Within TBA's mapped region — guaranteed accessible | `MakeMemoryResident()` + `allow_access()` |
-| s_load target | TMA+0x10 (within TBA allocation) | TMA+0 (separate allocation) |
-
-The CWSR handler's `s_load_dword` accesses TMA within the same allocation as TBA.
-Since TBA works for instruction fetch, TMA data access also works. Our handler's
-TMA is a separate `coarsegrain_allocator()` allocation that may lack valid GPU page
-table entries for the wave's VMID.
-
-### How to Verify
-1. **Test `s_load_dword` from TBA address** (not TMA) — TBA is definitely mapped.
-   If this works, PRIV mode data ops work and the hang is a TMA mapping issue.
-2. **Allocate TMA within TBA region** — put device_data pointer at a known offset
-   within the trap handler code buffer (like CWSR does).
-3. **Enable `cwsr_enable=1`** — if standard CWSR handler works, data ops in PRIV
-   mode work on GFX11.5 and the issue is mapping-specific.
-
-### KFD Trap Handler Setup Flow (cwsr_enable=0)
-1. ROCr `SetTrapHandler` → thunk `hsaKmtSetTrapHandler` → ioctl `SET_TRAP_HANDLER`
-2. KFD `kfd_process_set_trap_handler`: since `cwsr_kaddr==NULL`, stores as first-level
-   TBA/TMA in `qpd->tba_addr` / `qpd->tma_addr`
-3. `allocate_vmid` calls `program_sh_mem_settings` (always) but skips
-   `program_trap_handler_settings` (only if `cwsr_enabled`)
-4. Our code calls `program_trap_handler_settings_v11` directly to program SQ_SHADER_TBA/TMA
-
-## Proven Constraints
-
-### No FORCE_READ → SGPR/TTMP reads unreliable
-- ISA: wave must be "valid, halted and idle" for reliable SGPR reads
-- HALT ignored while PRIV=1 → can't halt trapped waves for reads
-- Control registers (STATUS, HW_ID, PC) read reliably regardless of wave state
-
-### GFX11 ISA constraints
+### GFX11 ISA
 - No SMEM stores (`s_store_*`, `s_atomic_*`, `s_dcache_wb`)
-- `HW_REG_HW_ID` → `HW_REG_HW_ID1`
-- Timestamp: `s_sendmsg_rtn_b64 MSG_RTN_GET_REALTIME` (0x83)
-- `s_sleep` uses bits [6:0] only — max 127
-- TTMP0:1 only registers initialized at trap entry; TTMP2-15 NOT auto-initialized
-- TBA/TMA must be read via `s_sendmsg_rtn_b64` (0x85/0x82), not `s_getreg`
-
-## Next Steps
-
-1. **Build & test** direct PC reading with per-instance wave iteration
-2. **Verify VMEM hang root cause** — test `s_load_dword` from TBA address in trap handler
-3. **Buffer management** — deliver samples to userspace
-4. **Clean teardown** — verify no MES timeout with direct-read approach
-5. **Reduce logging** — pr_warn → pr_debug for production
-6. **Future: IOMMU + CWSR** — test standard trap handler approach with `cwsr_enable=1`
-
-## Reference Documents
-- `rdna35_instruction_set_architecture.md` — ISA manual (31K lines)
-- `amdgpu_isa_rdna3_5.xml` — instruction encodings/opcodes (large)
-- `~/amdgpu/.../include/asic_reg/gc/gc_11_5_0_sh_mask.h` — register bit fields
-- `~/amdgpu/.../include/asic_reg/gc/gc_11_5_0_offset.h` — register offsets
-- `~/umr/` — umr debugger source; key files: `src/lib/scan_waves.c`,
-  `src/lib/sq_cmd_halt_waves.c`, `src/lib/mmio.c`
-
-All large reference files: search with Grep, never read directly (exhausts context).
+- `s_sleep` max 127; `HW_REG_HW_ID` → `HW_REG_HW_ID1`
 
 ## Key Files
-- `~/amdgpu/.../amdgpu_amdkfd_gfx_v11.c` — trigger, wave read, PC readback
-- `~/amdgpu/.../kfd_pc_sampling.c` — session management, sampling thread
-- `~/amdgpu/.../kfd_device_queue_manager.c` — remap_queue MES path
-- `~/amdgpu/.../kfd_device_queue_manager_v11.c` — SH_MEM_CONFIG setup, empty update_qpd
-- `~/amdgpu/.../kfd_process.c` — CWSR init, SetTrapHandler ioctl handler
-- `~/amdgpu/.../cwsr_trap_handler_gfx10.asm` — CWSR handler (uses s_load + global_store in PRIV)
-- `projects/rocr-runtime/.../trap_handler/trap_handler.s` — our trap handler (sleep-only workaround)
-- `projects/rocr-runtime/.../amd_gpu_agent.cpp` — TBA/TMA allocation, SetTrapHandler call
+- `~/amdgpu/.../amdgpu_amdkfd_gfx_v11.c` — `read_wave_pcs`, wave iteration
+- `~/amdgpu/.../kfd_pc_sampling.c` — sampling thread, delivery, session management
+- `~/amdgpu/.../kfd_priv.h` — `kfd_dev_pcs_hosttrap`
+- `~/amdgpu/.../include/kgd_kfd_interface.h` — `kfd_pcs_sample` struct, `read_wave_pcs` callback
+- `projects/rocr-runtime/.../amd_gpu_agent.cpp` — device_data alloc, TMA setup, flush logic
+- `projects/rocr-runtime/.../core/inc/amd_gpu_agent.h` — `pcs_sampling_data_t` struct
+- `projects/rocr-runtime/.../inc/hsa_ven_amd_pc_sampling.h` — `perf_sample_hosttrap_v1_t`
+- `projects/rocr-runtime/.../pcs/pcs_runtime.h` — `PcSamplingSession`, `buffer_size()`, `sample_size()`
+- `projects/rocprofiler-sdk/.../tool.cpp` — SDK buffer size (line 1936), buffer policy (line 1777)
+- `projects/rocprofiler-sdk/.../pc_sampling/utils.hpp` — HSA buffer size (4 MB)
+- `projects/rocprofiler-sdk/.../pc_sampling/service.cpp` — stop_sampling_threads()
+- `projects/rocprofiler-sdk/.../registration.cpp` — finalization order
+- `projects/rocprofiler-sdk/.../buffer.hpp` — LOSSLESS/DISCARD emplace logic (line 171)
+- `projects/rocr-runtime/.../trap_handler/trap_handler.s` — GPU trap handler (GFX9/9.4)
+- `projects/rocr-runtime/.../trap_handler/trap_handler_gfx12.s` — GPU trap handler (GFX12)
 
 ## Build & Test
 ```bash
-# Kernel (requires sudo + reboot):
+# Kernel (requires sudo + reboot — ask user):
 cd ~/amdgpu && sudo dkms build amdgpu/1.0 && sudo dkms install amdgpu/1.0 --force
 # ROCr (no reboot):
 cd ~/rocm-systems && bash build_rocr.sh
+# Rocprofiler-SDK (no reboot):
+cd ~/rocm-systems && bash build_rocprofiler.sh
 # Test:
-PCS_TIMEOUT_SEC=25 PCS_KERNEL_LAUNCHES=200000 bash test_pc_sampling.sh
-# Check:
-dmesg | grep -E "pcs_sample|read_pcs|trigger_pc|post_status"
+PCS_TIMEOUT_SEC=30 PCS_KERNEL_LAUNCHES=2000 bash test_pc_sampling.sh
+# Check kernel logs:
+dmesg | grep -E "pcs|read_pcs|delivery"
 ```

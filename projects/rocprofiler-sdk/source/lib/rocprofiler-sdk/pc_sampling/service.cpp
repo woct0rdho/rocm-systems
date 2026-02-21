@@ -320,6 +320,16 @@ service_fini()
     flush_all_agent_buffers();
 }
 
+void
+stop_sampling_threads()
+{
+    auto* service = get_configured_pc_sampling_service().load();
+    if(service && is_hsa_initialized().load())
+    {
+        hsa::pc_sampling_service_stop(service);
+    }
+}
+
 }  // namespace pc_sampling
 }  // namespace rocprofiler
 

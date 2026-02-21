@@ -3314,13 +3314,17 @@ hsa_status_t GpuAgent::PcSamplingStart(pcs::PcsRuntime::PcSamplingSession& sessi
 }
 
 hsa_status_t GpuAgent::PcSamplingStop(pcs::PcsRuntime::PcSamplingSession& session) {
+  fprintf(stderr, "PcSamplingStop: enter isActive=%d\n", session.isActive());
   if (!session.isActive()) return HSA_STATUS_SUCCESS;
 
   // Stop the session
   session.stop();
+  fprintf(stderr, "PcSamplingStop: session.stop() done, isActive=%d\n", session.isActive());
 
   // Stop PC sampling in the kernel driver
+  fprintf(stderr, "PcSamplingStop: calling hsaKmtPcSamplingStop\n");
   HSAKMT_STATUS retKmt = HSAKMT_CALL(hsaKmtPcSamplingStop(node_id(), session.ThunkId()));
+  fprintf(stderr, "PcSamplingStop: hsaKmtPcSamplingStop returned %d\n", retKmt);
   if (retKmt != HSAKMT_STATUS_SUCCESS)
     throw AMD::hsa_exception(HSA_STATUS_ERROR, "Failed to stop PC Sampling session.");
 
@@ -3337,18 +3341,22 @@ hsa_status_t GpuAgent::PcSamplingStop(pcs::PcsRuntime::PcSamplingSession& sessio
     return HSA_STATUS_ERROR_INVALID_ARGUMENT;
   }
   // Wake up pcs_hosttrap_thread_ if it is waiting for data
+  fprintf(stderr, "PcSamplingStop: signaling threads\n");
   if (pcs_data->device_data) {
     HSA::hsa_signal_store_screlease(pcs_data->device_data->done_sig0, -1);
     HSA::hsa_signal_store_screlease(pcs_data->device_data->done_sig1, -1);
   }
 
   // Wait for the thread to finish and clean up
+  fprintf(stderr, "PcSamplingStop: waiting for thread (thread=%p)\n", pcs_data->thread);
   if (pcs_data->thread) {
     os::WaitForThread(pcs_data->thread);
+    fprintf(stderr, "PcSamplingStop: thread joined\n");
     os::CloseThread(pcs_data->thread);
     pcs_data->thread = nullptr;
   }
   pcs_data->session = nullptr;
+  fprintf(stderr, "PcSamplingStop: done\n");
 
   return HSA_STATUS_SUCCESS;
 }
@@ -3681,6 +3689,15 @@ hsa_status_t GpuAgent::PcSamplingFlushDeviceBuffers(
   if (properties_.NumXcc > 1) i+= pred_exec_cmd_sz;
   memset(cmd_data, 0, cmd_data_sz);
 
+  // For host_trap method, the kernel writes samples directly to the buffer
+  // from the CPU side and does not increment buf_written_val. Pre-set it
+  // so the WAIT_REG_MEM below passes immediately.
+  if (session.method() == HSA_VEN_AMD_PCS_METHOD_HOSTTRAP_V1) {
+    volatile uint32_t* bwv = reinterpret_cast<volatile uint32_t*>(buf_written_val[which_buffer]);
+    *bwv = static_cast<uint32_t>(*old_val);
+    std::atomic_thread_fence(std::memory_order_release);
+  }
+
   /*
    * Do the WAIT_REG_MEM, DMA_DATA(s) and WRITE_DATA
    *
@@ -3786,21 +3803,30 @@ void GpuAgent::PcSamplingThread(pcs_data_t& pcs_data, const char* thread_name) {
 
     hsa_signal_t done_sig[] = {pcs_data.device_data->done_sig0, pcs_data.device_data->done_sig1};
 
+    int thread_loop_count = 0;
     while (pcs_data.session->isActive()) {
-      // Wait for the signal to process the buffer
-      do {
+      thread_loop_count++;
+      // Wait for the signal to process the buffer.
+      // Use a short timeout (5ms) so we also pick up samples written
+      // directly by the kernel (direct-read path) without GPU signaling.
+      {
         hsa_signal_value_t val = HSA::hsa_signal_wait_scacquire(
-            done_sig[which_buffer], HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
+            done_sig[which_buffer], HSA_SIGNAL_CONDITION_LT, 1,
+            5000000 /* 5ms in ns */, HSA_WAIT_STATE_BLOCKED);
         if (val == -1) goto thread_exit;
-        if (val == 0) break;
-      } while (true);
-      HSA::hsa_signal_store_screlease(done_sig[which_buffer], 1);
+        if (val == 0)
+          HSA::hsa_signal_store_screlease(done_sig[which_buffer], 1);
+        // val == 1 means timeout — flush anyway to pick up direct-read samples
+      }
 
       // Lock buffer to ensure thread-safe access
+      fprintf(stderr, "PcSamplingThread: loop=%d acquiring mutex isActive=%d\n", thread_loop_count, (int)pcs_data.session->isActive());
       std::lock_guard<std::mutex> lock(pcs_data.host_buffer_mutex);
+      fprintf(stderr, "PcSamplingThread: loop=%d got mutex, flushing device\n", thread_loop_count);
       // Flush device buffers
       if (PcSamplingFlushDeviceBuffers(session) != HSA_STATUS_SUCCESS)
 	    goto thread_exit;
+      fprintf(stderr, "PcSamplingThread: loop=%d device flushed, processing host buf\n", thread_loop_count);
 
       size_t bytes_before_wrap;
       size_t bytes_after_wrap;
@@ -3809,6 +3835,59 @@ void GpuAgent::PcSamplingThread(pcs_data_t& pcs_data, const char* thread_name) {
       assert(pcs_data.host_write_ptr >= host_buffer_begin && pcs_data.host_write_ptr < host_buffer_end);
       assert(pcs_data.host_buffer_wrap_pos ? (pcs_data.host_read_ptr > pcs_data.host_write_ptr)
                                            : (pcs_data.host_read_ptr <= pcs_data.host_write_ptr));
+
+      // For host_trap with kernel direct-read, process any available samples
+      // immediately instead of waiting for buffer_size() (4 MB) worth of data.
+      // The GPU trap handler path signals done_sig when the device buffer hits
+      // the watermark, naturally filling buffer_size() chunks over time. Our
+      // kernel writes directly from the CPU without signaling, producing small
+      // bursts (~900 samples = 56 KB) that never reach the 4 MB threshold.
+      // Use the same drain-everything logic as PcSamplingFlush.
+      if (session.method() == HSA_VEN_AMD_PCS_METHOD_HOSTTRAP_V1) {
+        if (pcs_data.host_buffer_wrap_pos) {
+          assert(pcs_data.host_buffer_wrap_pos <= host_buffer_end &&
+                 pcs_data.host_buffer_wrap_pos > host_buffer_begin);
+          assert(pcs_data.host_read_ptr <= pcs_data.host_buffer_wrap_pos);
+
+          bytes_before_wrap = pcs_data.host_buffer_wrap_pos - pcs_data.host_read_ptr;
+          bytes_after_wrap = pcs_data.host_write_ptr - host_buffer_begin;
+
+          while (bytes_before_wrap > 0) {
+            size_t chunk = std::min(bytes_before_wrap, session.buffer_size());
+            session.HandleSampleData(pcs_data.host_read_ptr, chunk, nullptr, 0,
+                                     pcs_data.lost_sample_count);
+            pcs_data.host_read_ptr += chunk;
+            bytes_before_wrap = pcs_data.host_buffer_wrap_pos - pcs_data.host_read_ptr;
+            pcs_data.lost_sample_count = 0;
+          }
+
+          pcs_data.host_buffer_wrap_pos = 0;
+          pcs_data.host_read_ptr = host_buffer_begin;
+
+          while (bytes_after_wrap > 0) {
+            size_t chunk = std::min(bytes_after_wrap, session.buffer_size());
+            session.HandleSampleData(pcs_data.host_read_ptr, chunk, nullptr, 0,
+                                     pcs_data.lost_sample_count);
+            pcs_data.host_read_ptr += chunk;
+            bytes_after_wrap = pcs_data.host_write_ptr - pcs_data.host_read_ptr;
+            pcs_data.lost_sample_count = 0;
+          }
+        } else {
+          bytes_before_wrap = pcs_data.host_write_ptr - pcs_data.host_read_ptr;
+
+          while (bytes_before_wrap > 0) {
+            size_t chunk = std::min(bytes_before_wrap, session.buffer_size());
+            session.HandleSampleData(pcs_data.host_read_ptr, chunk, nullptr, 0,
+                                     pcs_data.lost_sample_count);
+            pcs_data.host_read_ptr += chunk;
+            bytes_before_wrap = pcs_data.host_write_ptr - pcs_data.host_read_ptr;
+            pcs_data.lost_sample_count = 0;
+          }
+        }
+      } else {
+        // Stochastic / GPU-trap path: batch at buffer_size() chunks.
+        // The GPU signals done_sig when the device buffer watermark is reached,
+        // so buffer_size() worth of data accumulates naturally.
 
       if (pcs_data.host_buffer_wrap_pos) {
         assert(pcs_data.host_buffer_wrap_pos <= host_buffer_end &&
@@ -3849,16 +3928,25 @@ void GpuAgent::PcSamplingThread(pcs_data_t& pcs_data, const char* thread_name) {
         // Handle non-wrapped buffer
         bytes_before_wrap = pcs_data.host_write_ptr - pcs_data.host_read_ptr;
 
+        int handle_count = 0;
         while (bytes_before_wrap >= session.buffer_size()) {
           assert(pcs_data.host_read_ptr >= host_buffer_begin &&
                  pcs_data.host_read_ptr + session.buffer_size() <= host_buffer_end);
+          fprintf(stderr, "PcSamplingThread: loop=%d HandleSampleData[%d] bytes=%zu buf_sz=%zu\n",
+                  thread_loop_count, handle_count, bytes_before_wrap, session.buffer_size());
           session.HandleSampleData(pcs_data.host_read_ptr, session.buffer_size(), nullptr, 0,
                                    pcs_data.lost_sample_count);
+          fprintf(stderr, "PcSamplingThread: loop=%d HandleSampleData[%d] done\n",
+                  thread_loop_count, handle_count);
+          handle_count++;
           pcs_data.host_read_ptr += session.buffer_size();
           bytes_before_wrap = pcs_data.host_write_ptr - pcs_data.host_read_ptr;
           pcs_data.lost_sample_count = 0;
         }
       }
+
+      } // end stochastic/GPU-trap path
+      fprintf(stderr, "PcSamplingThread: loop=%d releasing mutex\n", thread_loop_count);
     }
 thread_exit:
   debug_print("%s::Exiting\n", thread_name);
@@ -3870,6 +3958,7 @@ thread_exit:
 }
 
 hsa_status_t GpuAgent::PcSamplingFlush(pcs::PcsRuntime::PcSamplingSession& session) {
+  fprintf(stderr, "PcSamplingFlush: enter\n");
   pcs_data_t* pcs_data = nullptr;
 
   if (session.method() == HSA_VEN_AMD_PCS_METHOD_HOSTTRAP_V1) {
@@ -3886,9 +3975,12 @@ hsa_status_t GpuAgent::PcSamplingFlush(pcs::PcsRuntime::PcSamplingSession& sessi
   size_t bytes_before_wrap;
   size_t bytes_after_wrap;
 
+  fprintf(stderr, "PcSamplingFlush: acquiring host_buffer_mutex\n");
   std::lock_guard<std::mutex> lock(pcs_data->host_buffer_mutex);
+  fprintf(stderr, "PcSamplingFlush: acquired host_buffer_mutex, calling FlushDeviceBuffers\n");
   // Flush device buffers
   if (PcSamplingFlushDeviceBuffers(session) != HSA_STATUS_SUCCESS) return HSA_STATUS_ERROR;
+  fprintf(stderr, "PcSamplingFlush: FlushDeviceBuffers done\n");
 
   assert(pcs_data->host_read_ptr >= host_buffer_begin && pcs_data->host_read_ptr < host_buffer_end);
   assert(pcs_data->host_write_ptr >= host_buffer_begin &&

@@ -80,6 +80,9 @@ flush_pc_sampling_buffers(const rocprofiler::code_object::hsa::code_object& code
     auto agent_id = code_object.rocp_data.rocp_agent;
     if(!is_pc_sample_service_configured(agent_id)) return;
 
+    fprintf(stderr, "flush_pc_sampling_buffers: agent=%lu configured, flushing\n",
+            (unsigned long)agent_id.handle);
+
     // The PC sampling service is configured on the agent,
     // so flush its PC sampling buffer
     // TODO: Creating a function that gives the buffer_id based on the agent_id?
@@ -88,7 +91,10 @@ flush_pc_sampling_buffers(const rocprofiler::code_object::hsa::code_object& code
     auto        agent_buffer_id = agent_session->buffer_id;
 
     // flush internal PC sampling buffers
+    fprintf(stderr, "flush_pc_sampling_buffers: calling flush_internal_agent_buffers buf=%lu\n",
+            (unsigned long)agent_buffer_id.handle);
     flush_internal_agent_buffers(agent_buffer_id);
+    fprintf(stderr, "flush_pc_sampling_buffers: done\n");
 }
 
 hsa_status_t
@@ -154,10 +160,16 @@ initialize(HsaApiTable* table)
 void
 finalize()
 {
+    fprintf(stderr, "pc_sampling::code_object::finalize: enter\n");
+    int co_count = 0;
     rocprofiler::code_object::iterate_loaded_code_objects(
         [&](const rocprofiler::code_object::hsa::code_object& code_object) {
+            fprintf(stderr, "pc_sampling::code_object::finalize: code_object %d agent=%lu\n",
+                    co_count, (unsigned long)code_object.rocp_data.rocp_agent.handle);
             flush_pc_sampling_buffers(code_object);
+            co_count++;
         });
+    fprintf(stderr, "pc_sampling::code_object::finalize: done (%d code objects)\n", co_count);
 }
 
 }  // namespace code_object

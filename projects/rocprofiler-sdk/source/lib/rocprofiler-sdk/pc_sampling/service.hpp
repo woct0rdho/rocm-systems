@@ -73,6 +73,12 @@ service_sync();
 
 void
 service_fini();
+
+// Stop HSA-level PC sampling (threads + kernel driver) before code_object::finalize.
+// Must be called before any finalization flush that needs host_buffer_mutex,
+// since the PcSamplingThread holds that mutex while running.
+void
+stop_sampling_threads();
 }  // namespace pc_sampling
 }  // namespace rocprofiler
 

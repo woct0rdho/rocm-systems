@@ -392,7 +392,9 @@ flush_internal_agent_buffers(const PCSAgentSession* agent_session)
 
     auto hsa_pcs_handle = agent_session->hsa_pc_sampling;
     // Explicitly flush ROCr's buffers and sync completed CIDs.
+    fprintf(stderr, "hsa::flush_internal_agent_buffers: calling manage_cids_explicit\n");
     agent_session->cid_manager->manage_cids_explicit([=]() {
+        fprintf(stderr, "hsa::flush_internal_agent_buffers: inside lambda, calling pcs_flush\n");
         // TODO: investigate whether the ROCr should maintain an extra buffer
         // beyond the 2nd level trap handler buffers.
         if(pc_sampling_table_->hsa_ven_amd_pcs_flush_fn(hsa_pcs_handle) != HSA_STATUS_SUCCESS)
@@ -400,7 +402,9 @@ flush_internal_agent_buffers(const PCSAgentSession* agent_session)
             // TODO: Think if it is possible to recover from this error.
             std::runtime_error("Fail to flush ROCr's buffer explicitly");
         }
+        fprintf(stderr, "hsa::flush_internal_agent_buffers: pcs_flush returned\n");
     });
+    fprintf(stderr, "hsa::flush_internal_agent_buffers: manage_cids_explicit done\n");
     return ROCPROFILER_STATUS_SUCCESS;
 }
 }  // namespace hsa

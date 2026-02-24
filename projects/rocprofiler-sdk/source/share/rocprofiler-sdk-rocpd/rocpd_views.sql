@@ -137,3 +137,10 @@ SELECT
     *
 FROM
     `rocpd_memory_allocate{{uuid}}`;
+
+CREATE VIEW IF NOT EXISTS
+    `rocpd_pc_sampling` AS
+SELECT
+    *
+FROM
+    `rocpd_pc_sampling{{uuid}}`;

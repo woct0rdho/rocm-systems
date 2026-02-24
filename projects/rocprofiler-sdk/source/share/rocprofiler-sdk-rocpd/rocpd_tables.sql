@@ -365,6 +365,19 @@ CREATE TABLE IF NOT EXISTS
         FOREIGN KEY (event_id) REFERENCES `rocpd_event{{uuid}}` (id) ON UPDATE CASCADE
     );
 
+-- PC sampling records (host_trap and stochastic)
+CREATE TABLE IF NOT EXISTS
+    `rocpd_pc_sampling{{uuid}}` (
+        "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+        "guid" TEXT DEFAULT "{{guid}}" NOT NULL,
+        "timestamp" BIGINT NOT NULL,
+        "exec_mask" BIGINT NOT NULL,
+        "dispatch_id" BIGINT NOT NULL,
+        "instruction" TEXT,
+        "instruction_comment" TEXT,
+        "correlation_id" BIGINT NOT NULL
+    );
+
 INSERT INTO
     `rocpd_metadata{{uuid}}` ("tag", "value")
 VALUES

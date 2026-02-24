@@ -667,7 +667,9 @@ write_rocpd(
     const generator<tool_buffer_tracing_kfd_record_t>&                      kfd_gen,
     const generator<rocprofiler_buffer_tracing_rccl_api_record_t>&          rccl_api_gen,
     const generator<rocprofiler_buffer_tracing_rocdecode_api_ext_record_t>& rocdecode_api_gen,
-    const generator<tool_counter_record_t>&                                 counter_collection_gen)
+    const generator<tool_counter_record_t>&                                 counter_collection_gen,
+    const generator<rocprofiler_tool_pc_sampling_host_trap_record_t>&       pc_sampling_host_trap_gen,
+    const generator<rocprofiler_tool_pc_sampling_stochastic_record_t>&      pc_sampling_stochastic_gen)
 {
     static auto get_simple_timer = [](std::string_view label) {
         return common::simple_timer{fmt::format("SQLite3 generation :: {:24}", label)};
@@ -1689,6 +1691,51 @@ write_rocpd(
         auto _sqlgenperf_rocpd = get_simple_timer("rocpd_memory_allocate");
         insert_memory_alloc_data(memory_alloc_gen);
         insert_memory_alloc_data(scratch_memory_gen);
+    }
+
+    // PC sampling data (host_trap and stochastic share the same table schema)
+    {
+        auto _sqlgenperf_rocpd = get_simple_timer("rocpd_pc_sampling");
+
+        auto insert_pc_sampling = [&conn, &tool_metadata](const auto& _gen) {
+            for(auto pitr : _gen)
+            {
+                auto _deferred = sql::deferred_transaction{conn};
+                for(const auto& record : _gen.get(pitr))
+                {
+                    std::string inst;
+                    std::string inst_comment;
+                    if(record.inst_index == -1)
+                    {
+                        inst_comment =
+                            "Unrecognized code object id, physical virtual address of PC:" +
+                            std::to_string(record.pc_sample_record.pc.code_object_offset);
+                    }
+                    else
+                    {
+                        inst         = tool_metadata.get_instruction(record.inst_index);
+                        inst_comment = tool_metadata.get_comment(record.inst_index);
+                    }
+
+                    auto stmt = get_insert_statement(
+                        "rocpd_pc_sampling{{uuid}}",
+                        {
+                            insert_value("timestamp", record.pc_sample_record.timestamp),
+                            insert_value("exec_mask", record.pc_sample_record.exec_mask),
+                            insert_value("dispatch_id", record.pc_sample_record.dispatch_id),
+                            insert_value("instruction", inst),
+                            insert_value("instruction_comment", inst_comment),
+                            insert_value("correlation_id",
+                                         record.pc_sample_record.correlation_id.internal),
+                        });
+
+                    execute_raw_sql_statements(conn, stmt);
+                }
+            }
+        };
+
+        insert_pc_sampling(pc_sampling_host_trap_gen);
+        insert_pc_sampling(pc_sampling_stochastic_gen);
     }
 
     {

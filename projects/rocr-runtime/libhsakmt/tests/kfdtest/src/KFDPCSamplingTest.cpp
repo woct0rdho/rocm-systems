@@ -60,6 +60,104 @@ void KFDPCSamplingTest::TearDown() {
     ROUTINE_END
 }
 
+static bool IsGfx1151(const HsaNodeProperties *props) {
+    return props && GetGfxVersion(props) == 0x000b0501;
+}
+
+static bool IsValidPcSamplingUnit(HSA_PC_SAMPLING_UNIT_INTERVAL units) {
+    return units == HSA_PC_SAMPLING_UNIT_INTERVAL_MICROSECONDS ||
+           units == HSA_PC_SAMPLING_UNIT_INTERVAL_CYCLES ||
+           units == HSA_PC_SAMPLING_UNIT_INTERVAL_INSTRUCTIONS;
+}
+
+static const HsaPcSamplingInfo *FindPcSamplingMethod(
+        const std::vector<HsaPcSamplingInfo> &samples,
+        HSA_PC_SAMPLING_METHOD_KIND method) {
+    for (const HsaPcSamplingInfo &sample : samples) {
+        if (sample.method == method)
+            return &sample;
+    }
+    return nullptr;
+}
+
+static void ValidatePcSamplingMethodInfo(const HsaPcSamplingInfo &sample) {
+    EXPECT_TRUE(IsValidPcSamplingUnit(sample.units));
+    EXPECT_LE(sample.value_min, sample.value_max);
+    EXPECT_GT(sample.value_max, 0u);
+}
+
+static bool QueryPcSamplingCapabilities(HSAuint32 gpuNode,
+                                        std::vector<HsaPcSamplingInfo> *samples) {
+    HSAuint32 num_sample_info = 0;
+    HSAuint32 return_num_sample_info = 0;
+    HSAKMT_STATUS ret = hsaKmtPcSamplingQueryCapabilities(gpuNode, NULL,
+                                        num_sample_info, &return_num_sample_info);
+
+    if (ret == HSAKMT_STATUS_NOT_SUPPORTED) {
+        LOG() << "Skipping test: This GPU does not support PC Sampling." << std::endl;
+        return false;
+    }
+
+    if (ret != HSAKMT_STATUS_SUCCESS && ret != HSAKMT_STATUS_BUFFER_TOO_SMALL) {
+        ADD_FAILURE() << "Failed to query PC sampling capability count. Status: " << ret;
+        return false;
+    }
+    if (return_num_sample_info < 1) {
+        ADD_FAILURE() << "PC sampling capability list is empty.";
+        return false;
+    }
+
+    samples->assign(return_num_sample_info, HsaPcSamplingInfo{});
+    ret = hsaKmtPcSamplingQueryCapabilities(gpuNode, samples->data(),
+                                        samples->size(), &return_num_sample_info);
+    if (ret != HSAKMT_STATUS_SUCCESS) {
+        ADD_FAILURE() << "Failed to query PC sampling capabilities. Status: " << ret;
+        return false;
+    }
+    if (return_num_sample_info < 1) {
+        ADD_FAILURE() << "PC sampling capability list is empty.";
+        return false;
+    }
+    samples->resize(return_num_sample_info);
+    return true;
+}
+
+TEST_F(KFDPCSamplingTest, Gfx1151HostTrapAndStochasticCapability) {
+    TEST_REQUIRE_ENV_CAPABILITIES(ENVCAPS_64BITLINUX);
+    TEST_START(TESTPROFILE_RUNALL);
+
+    if (hsaKmtPcSamplingSupport() != HSAKMT_STATUS_SUCCESS) {
+        LOG() << "Skipping test: PC Sampling KFD support is unavailable." << std::endl;
+        return;
+    }
+
+    int defaultGPUNode = m_NodeInfo.HsaDefaultGPUNode();
+    ASSERT_GE(defaultGPUNode, 0) << "Failed to get default GPU Node.";
+
+    const HsaNodeProperties *props = m_NodeInfo.GetNodeProperties(defaultGPUNode);
+    ASSERT_NOTNULL(props);
+    if (!IsGfx1151(props)) {
+        LOG() << "Skipping test: default GPU node is not gfx1151." << std::endl;
+        return;
+    }
+
+    std::vector<HsaPcSamplingInfo> samples;
+    if (!QueryPcSamplingCapabilities(defaultGPUNode, &samples))
+        return;
+
+    const HsaPcSamplingInfo *hosttrap =
+        FindPcSamplingMethod(samples, HSA_PC_SAMPLING_METHOD_KIND_HOSTTRAP_V1);
+    ASSERT_NOTNULL(hosttrap) << "gfx1151 missing HOSTTRAP_V1 PC sampling capability.";
+    ValidatePcSamplingMethodInfo(*hosttrap);
+
+    const HsaPcSamplingInfo *stochastic =
+        FindPcSamplingMethod(samples, HSA_PC_SAMPLING_METHOD_KIND_STOCHASTIC_V1);
+    ASSERT_NOTNULL(stochastic) << "gfx1151 missing STOCHASTIC_V1 PC sampling capability.";
+    ValidatePcSamplingMethodInfo(*stochastic);
+
+    TEST_END;
+}
+
 TEST_F(KFDPCSamplingTest, BasicTest) {
     TEST_REQUIRE_ENV_CAPABILITIES(ENVCAPS_64BITLINUX);
     TEST_START(TESTPROFILE_RUNALL);

@@ -123,6 +123,8 @@ GpuAgent::GpuAgent(HSAuint32 node, const HsaNodeProperties& node_props, bool xna
       scratch_cache_(
           [this](void* base, size_t size, bool large) { ReleaseScratch(base, size, large); }),
       trap_handler_tma_region_(NULL),
+      trap_handler_tma_gpu_va_(0),
+      trap_handler_tma_resident_(false),
       rec_sdma_eng_override_(false),
       pcs_hosttrap_data_(),
       pcs_stochastic_data_(),
@@ -345,6 +347,7 @@ void GpuAgent::AssembleShader(const char* func_name, AssembleTarget assemble_tar
     ASICShader compute_1010;
     ASICShader compute_10;
     ASICShader compute_11;
+    ASICShader compute_1151;
     ASICShader compute_12;
     ASICShader compute_1250;
   };
@@ -360,6 +363,7 @@ void GpuAgent::AssembleShader(const char* func_name, AssembleTarget assemble_tar
            {kCodeTrapHandler1010, sizeof(kCodeTrapHandler1010), 2, 4},      // gfx1010
            {kCodeTrapHandler10, sizeof(kCodeTrapHandler10), 2, 4},          // gfx10
            {NULL, 0, 0, 0},                                                 // gfx11
+           {NULL, 0, 0, 0},                                                 // gfx1151
            // GFX12_TODO: Using one for GFX10 for now.
            //             If NULL is used (like GFX11), get an assert.
            {kCodeTrapHandler10, sizeof(kCodeTrapHandler10), 2, 4},          // gfx12
@@ -374,6 +378,7 @@ void GpuAgent::AssembleShader(const char* func_name, AssembleTarget assemble_tar
            {kCodeTrapHandlerV2_1010, sizeof(kCodeTrapHandlerV2_1010), 2, 4},// gfx1010
            {kCodeTrapHandlerV2_10, sizeof(kCodeTrapHandlerV2_10), 2, 4},    // gfx10
            {kCodeTrapHandlerV2_11, sizeof(kCodeTrapHandlerV2_11), 2, 4},    // gfx11
+           {kCodeTrapHandlerV2_1151, sizeof(kCodeTrapHandlerV2_1151), 2, 4},// gfx1151
            {kCodeTrapHandlerV2_12, sizeof(kCodeTrapHandlerV2_12), 2, 4},    // gfx12
            {kCodeTrapHandlerV2_1250, sizeof(kCodeTrapHandlerV2_1250), 2, 4},  // gfx1250
        }},
@@ -387,6 +392,7 @@ void GpuAgent::AssembleShader(const char* func_name, AssembleTarget assemble_tar
            {kCodeCopyAligned10, sizeof(kCodeCopyAligned10), 32, 12},        // gfx1010
            {kCodeCopyAligned10, sizeof(kCodeCopyAligned10), 32, 12},        // gfx10
            {kCodeCopyAligned11, sizeof(kCodeCopyAligned11), 32, 12},        // gfx11
+           {kCodeCopyAligned11, sizeof(kCodeCopyAligned11), 32, 12},        // gfx1151
            {kCodeCopyAligned12, sizeof(kCodeCopyAligned12), 32, 12},        // gfx12
            {kCodeCopyAligned1250, sizeof(kCodeCopyAligned1250), 32, 12},    // gfx1250
        }},
@@ -400,6 +406,7 @@ void GpuAgent::AssembleShader(const char* func_name, AssembleTarget assemble_tar
            {kCodeCopyMisaligned10, sizeof(kCodeCopyMisaligned10), 23, 10},  // gfx1010
            {kCodeCopyMisaligned10, sizeof(kCodeCopyMisaligned10), 23, 10},  // gfx10
            {kCodeCopyMisaligned11, sizeof(kCodeCopyMisaligned11), 23, 10},  // gfx11
+           {kCodeCopyMisaligned11, sizeof(kCodeCopyMisaligned11), 23, 10},  // gfx1151
            {kCodeCopyMisaligned12, sizeof(kCodeCopyMisaligned12), 23, 10},  // gfx12
            {kCodeCopyMisaligned1250, sizeof(kCodeCopyMisaligned1250), 23, 10},  // gfx1250
        }},
@@ -413,6 +420,7 @@ void GpuAgent::AssembleShader(const char* func_name, AssembleTarget assemble_tar
            {kCodeFill10, sizeof(kCodeFill10), 19, 8},                       // gfx1010
            {kCodeFill10, sizeof(kCodeFill10), 19, 8},                       // gfx10
            {kCodeFill11, sizeof(kCodeFill11), 19, 8},                       // gfx11
+           {kCodeFill11, sizeof(kCodeFill11), 19, 8},                       // gfx1151
            {kCodeFill12, sizeof(kCodeFill12), 19, 8},                       // gfx12
            {kCodeFill1250, sizeof(kCodeFill1250), 19, 8},                   // gfx1250
        }}};
@@ -446,6 +454,9 @@ void GpuAgent::AssembleShader(const char* func_name, AssembleTarget assemble_tar
         asic_shader = &compiled_shader_it->second.compute_10;
       break;
     case 11:
+      if (supported_isas()[0]->GetMinorVersion() == 5)
+        asic_shader = &compiled_shader_it->second.compute_1151;
+      else
         asic_shader = &compiled_shader_it->second.compute_11;
       break;
     case 12:
@@ -3342,44 +3353,91 @@ hsa_status_t GpuAgent::UpdateTrapHandlerWithPCS(pcs_sampling_data_t* pcs_hosttra
 
   /* pcs_hosttrap_buffers and pcs_stochastic_buffers are NULL until PC sampling is enabled */
   if (pcs_hosttrap_buffers || pcs_stochastic_buffers) {
-    // ON non-large BAR systems, we cannot access device memory so we create a host copy
-    // and then do a DmaCopy to device memory
-    pcs_tma2_t* tma_region_host = (pcs_tma2_t*)system_allocator()(sizeof(pcs_tma2_t), 0x1000, 0);
+    // On non-large BAR systems, we cannot access device memory so we create a host copy
+    // and then do a DmaCopy to device memory.
+    pcs_tma2_t* tma_region_host =
+        (pcs_tma2_t*)system_allocator()(sizeof(pcs_tma2_t), 0x1000, 0);
     if (tma_region_host == nullptr) return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
 
     MAKE_SCOPE_GUARD([&]() { system_deallocator()(tma_region_host); });
     std::memset(tma_region_host, 0, sizeof(pcs_tma2_t));
 
-    // Populate TMA2 structure
-    tma_region_host->host_trap_buffers = pcs_hosttrap_buffers;
-    tma_region_host->stochastic_trap_buffers = pcs_stochastic_buffers;
+    auto get_gpu_addr = [](const void* ptr) -> void* {
+      if (!ptr) return nullptr;
+      hsa_amd_pointer_info_t info{};
+      info.size = sizeof(info);
+      if (AMD::hsa_amd_pointer_info(ptr, &info, nullptr, nullptr, nullptr) !=
+          HSA_STATUS_SUCCESS) {
+        return const_cast<void*>(ptr);
+      }
+      return info.agentBaseAddress ? info.agentBaseAddress : const_cast<void*>(ptr);
+    };
+
+    // Populate TMA2 with GPU-visible base addresses. The trap handler adds the XCC stride.
+    tma_region_host->host_trap_buffers = reinterpret_cast<pcs_sampling_data_t*>(
+        get_gpu_addr(pcs_hosttrap_buffers));
+    tma_region_host->stochastic_trap_buffers = reinterpret_cast<pcs_sampling_data_t*>(
+        get_gpu_addr(pcs_stochastic_buffers));
     tma_region_host->per_xcc_size = per_xcc_size;
 
+    bool allocated_tma = false;
     if (!trap_handler_tma_region_) {
-      trap_handler_tma_region_ = (uint64_t*)finegrain_allocator()(sizeof(pcs_tma2_t), 0);
+      trap_handler_tma_region_ = coarsegrain_allocator()(sizeof(pcs_tma2_t), 0);
       if (trap_handler_tma_region_ == nullptr) return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
+      allocated_tma = true;
 
-      // NearestCpuAgent owns pool returned system_allocator()
-      auto cpuAgent = GetNearestCpuAgent()->public_handle();
+      auto cpu_agent = GetNearestCpuAgent()->public_handle();
+      hsa_agent_t agents[2] = {cpu_agent, public_handle_};
+      hsa_status_t allow_ret =
+          AMD::hsa_amd_agents_allow_access(2, agents, nullptr, trap_handler_tma_region_);
+      if (allow_ret != HSA_STATUS_SUCCESS) {
+        coarsegrain_deallocator()(trap_handler_tma_region_);
+        trap_handler_tma_region_ = nullptr;
+        return allow_ret;
+      }
 
-      [[maybe_unused]] hsa_status_t allow_ret =
-          AMD::hsa_amd_agents_allow_access(1, &cpuAgent, NULL, trap_handler_tma_region_);
-      assert(allow_ret == HSA_STATUS_SUCCESS);
+      HsaMemFlags map_flag = {};
+      map_flag.ui32.HostAccess = 1;
+      uint64_t alternate_va = 0;
+      uint32_t node = node_id();
+      hsa_status_t map_ret =
+          driver().MakeMemoryResident(trap_handler_tma_region_, sizeof(pcs_tma2_t),
+                                      &alternate_va, &map_flag, 1, &node);
+      if (map_ret != HSA_STATUS_SUCCESS) {
+        coarsegrain_deallocator()(trap_handler_tma_region_);
+        trap_handler_tma_region_ = nullptr;
+        return map_ret;
+      }
+      trap_handler_tma_resident_ = true;
+      trap_handler_tma_gpu_va_ =
+          alternate_va ? alternate_va
+                       : reinterpret_cast<uint64_t>(get_gpu_addr(trap_handler_tma_region_));
     }
 
-    /* On non-large BAR systems, we may not be able to access device memory, so do a DmaCopy */
+    /* On non-large BAR systems, we may not be able to access device memory, so do a DmaCopy. */
     if (DmaCopy(trap_handler_tma_region_, tma_region_host, sizeof(pcs_tma2_t)) !=
         HSA_STATUS_SUCCESS) {
-      finegrain_deallocator()(trap_handler_tma_region_);
-      trap_handler_tma_region_ = nullptr;
+      // Preserve an existing TMA that may still be used by the other sampling method.
+      if (allocated_tma) {
+        if (trap_handler_tma_resident_)
+          driver().MakeMemoryUnresident(trap_handler_tma_region_);
+        coarsegrain_deallocator()(trap_handler_tma_region_);
+        trap_handler_tma_region_ = nullptr;
+        trap_handler_tma_gpu_va_ = 0;
+        trap_handler_tma_resident_ = false;
+      }
       return HSA_STATUS_ERROR;
     }
 
     tma_size = sizeof(pcs_tma2_t);
-    tma_addr = trap_handler_tma_region_;
+    tma_addr = reinterpret_cast<void*>(trap_handler_tma_gpu_va_);
   } else if (trap_handler_tma_region_) {
-    finegrain_deallocator()(trap_handler_tma_region_);
-    trap_handler_tma_region_ = NULL;
+    if (trap_handler_tma_resident_)
+      driver().MakeMemoryUnresident(trap_handler_tma_region_);
+    coarsegrain_deallocator()(trap_handler_tma_region_);
+    trap_handler_tma_region_ = nullptr;
+    trap_handler_tma_gpu_va_ = 0;
+    trap_handler_tma_resident_ = false;
   }
 
   // Bind the trap handler to this node.
@@ -3705,8 +3763,10 @@ hsa_status_t GpuAgent::PcSamplingIterateConfig(hsa_ven_amd_pcs_iterate_configura
                                                void* cb_data) {
    uint32_t size = 0;
 
-  if (!core::Runtime::runtime_singleton_->KfdVersion().supports_exception_debugging)
+  if (!core::Runtime::runtime_singleton_->KfdVersion().supports_exception_debugging) {
+    debug_print("PC sampling disabled: supports_exception_debugging == false\n");
     return HSA_STATUS_ERROR;
+  }
 
   // First query to get size of list needed
   HSAKMT_STATUS ret = HSAKMT_CALL(hsaKmtPcSamplingQueryCapabilities(node_id(), NULL, 0, &size));

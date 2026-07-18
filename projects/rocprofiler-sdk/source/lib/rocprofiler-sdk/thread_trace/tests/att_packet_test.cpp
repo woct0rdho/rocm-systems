@@ -38,6 +38,7 @@
 #include "lib/common/logging.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -70,6 +71,7 @@ test_init()
         rocprofiler::hsa::copy_table(table.amd_ext_, 0);
         agent::construct_agent_cache(&table);
         hsa::get_queue_controller()->init(get_api_table(), get_ext_table());
+        thread_trace::initialize(&table);
         return true;
     };
     [[maybe_unused]] static bool run_once = init();
@@ -531,6 +533,98 @@ TEST(thread_trace, triple_buffer_multiple_shader)
         ROCPROFILER_AGENT_INFO_VERSION_0, configure_agents, sizeof(rocprofiler_agent_t), &ctx);
     ASSERT_EQ(status, ROCPROFILER_STATUS_ERROR_INVALID_ARGUMENT);
 
+    context::pop_client(1);
+}
+
+TEST(thread_trace, resource_deinit_drains_active_device_trace)
+{
+    ASSERT_EQ(hsa_init(), HSA_STATUS_SUCCESS);
+    test_init();
+
+    registration::init_logging();
+    registration::set_init_status(-1);
+    context::push_client(1);
+
+    rocprofiler_context_id_t ctx{0};
+    ROCPROFILER_CALL(rocprofiler_create_context(&ctx), "context creation failed");
+
+    auto agents = hsa::get_queue_controller()->get_supported_agents();
+    ASSERT_GT(agents.size(), 0);
+    const auto& agent = agents.begin()->second;
+
+    auto parameters = std::vector<rocprofiler_thread_trace_parameter_t>{};
+    parameters.push_back({ROCPROFILER_THREAD_TRACE_PARAMETER_TARGET_CU, {1}});
+    parameters.push_back({ROCPROFILER_THREAD_TRACE_PARAMETER_SHADER_ENGINE_MASK, {1}});
+    parameters.push_back({ROCPROFILER_THREAD_TRACE_PARAMETER_BUFFER_SIZE, {0x100000}});
+
+    auto callback_count = std::atomic<size_t>{0};
+    auto userdata       = rocprofiler_user_data_t{.ptr = &callback_count};
+    ROCPROFILER_CALL(
+        rocprofiler_configure_device_thread_trace_service(
+            ctx,
+            agent.get_rocp_agent()->id,
+            parameters.data(),
+            parameters.size(),
+            [](rocprofiler_thread_trace_shader_data_t, rocprofiler_user_data_t data) {
+                static_cast<std::atomic<size_t>*>(data.ptr)->fetch_add(1);
+            },
+            userdata),
+        "configure device ATT");
+
+    auto* registered_context = context::get_mutable_registered_context(ctx);
+    ASSERT_NE(registered_context, nullptr);
+    auto* tracer = registered_context->device_thread_trace.get();
+    ASSERT_NE(tracer, nullptr);
+
+    tracer->resource_init();
+
+    ASSERT_FALSE(tracer->get_agents().empty());
+    for(const auto& [_, agent_tracer] : tracer->get_agents())
+    {
+        const auto has_all_vmids = std::any_of(
+            agent_tracer->factory->aql_params.begin(),
+            agent_tracer->factory->aql_params.end(),
+            [](const auto& parameter) {
+                return parameter.parameter_name ==
+                           static_cast<hsa_ven_amd_aqlprofile_parameter_name_t>(
+                               AQLPROFILE_ATT_PARAMETER_NAME_ALL_VMIDS) &&
+                       parameter.value == 1;
+            });
+        EXPECT_TRUE(has_all_vmids);
+
+        auto queue_enable_packet = agent_tracer->get_queue_enable_packet();
+        ASSERT_NE(queue_enable_packet, nullptr);
+        queue_enable_packet->populate_before();
+        EXPECT_EQ(queue_enable_packet->before_krn_pkt.size(), 1);
+        EXPECT_TRUE(queue_enable_packet->after_krn_pkt.empty());
+
+        if(agent_tracer->requires_application_queue_control())
+        {
+            auto queue_start_packet = agent_tracer->get_queue_start_packet();
+            ASSERT_NE(queue_start_packet, nullptr);
+            EXPECT_TRUE(queue_start_packet->before_krn_pkt.empty());
+            queue_start_packet->populate_before();
+            EXPECT_FALSE(queue_start_packet->before_krn_pkt.empty());
+            EXPECT_TRUE(queue_start_packet->after_krn_pkt.empty());
+        }
+    }
+
+    ROCPROFILER_CALL(rocprofiler_start_context(ctx), "context start failed");
+    // The production HSA-table registration path performs this replay after
+    // queue infrastructure initialization. The unit fixture installs those
+    // tables directly, so model the same handoff explicitly.
+    thread_trace::start_active_contexts();
+    for(const auto& [_, agent_tracer] : tracer->get_agents())
+        EXPECT_EQ(agent_tracer->active_trace_count(), 1);
+
+    // Exercise the process-finalization invariant directly: resource teardown
+    // must wait for the stop packet and perform final iteration before agents
+    // are destroyed.
+    tracer->resource_deinit();
+    EXPECT_TRUE(tracer->get_agents().empty());
+    EXPECT_GT(callback_count.load(), 0);
+
+    ROCPROFILER_CALL(rocprofiler_stop_context(ctx), "context stop failed");
     context::pop_client(1);
 }
 

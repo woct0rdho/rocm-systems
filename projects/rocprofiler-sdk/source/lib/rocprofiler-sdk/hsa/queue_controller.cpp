@@ -662,15 +662,21 @@ QueueController::init(CoreApiTable& core_table, AmdExtTable& ext_table)
 const Queue*
 QueueController::get_queue(const hsa_queue_t& _hsa_queue) const
 {
+    return get_queue(_hsa_queue.id);
+}
+
+const Queue*
+QueueController::get_queue(uint64_t hsa_queue_id) const
+{
     return _queues.rlock(
-        [](const queue_map_t& _data, const hsa_queue_t& _inp) -> const Queue* {
+        [](const queue_map_t& _data, uint64_t _inp) -> const Queue* {
             for(const auto& itr : _data)
             {
-                if(itr.first->id == _inp.id) return itr.second.get();
+                if(itr.first->id == _inp) return itr.second.get();
             }
             return nullptr;
         },
-        _hsa_queue);
+        hsa_queue_id);
 }
 
 common::Synchronized<hsa::profiler_serializer>&

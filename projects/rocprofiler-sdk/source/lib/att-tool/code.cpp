@@ -37,6 +37,9 @@ namespace att_wrapper
 {
 using csv_encoder = rocprofiler::tool::csv::csv_encoder<8>;
 
+std::string
+demangle(std::string_view line);
+
 // Builds a json filetree by recursively inserting "path" into the json object.
 void
 navigate(nlohmann::json& json, std::vector<std::string>& path, const std::string& filename)
@@ -62,8 +65,108 @@ CodeFile::addCodeobj(uint64_t id)
         codeobj_ids.emplace_back(id);
 }
 
+void
+CodeFile::addFallbackPC(pcinfo_t pc)
+{
+    if(pc.code_object_id == 0 && pc.address == 0) return;
+    fallback_pcs.emplace_back(pc);
+}
+
+void
+CodeFile::addZeroHitDisassembly()
+{
+    if(!isa_map.empty() || !table) return;
+
+    auto emit_symbol = [this](uint64_t codeobj_id, const auto& symbol) {
+        if(symbol.mem_size == 0) return false;
+
+        bool emitted = false;
+        auto symbol_pc = pcinfo_t{.address = symbol.vaddr, .code_object_id = codeobj_id};
+        if(kernel_names.find(symbol_pc) == kernel_names.end())
+        {
+            auto name = KernelName{symbol.name, demangle(symbol.name)};
+            kernel_names.emplace(symbol_pc, std::move(name));
+        }
+
+        for(auto addr = symbol.vaddr; addr < symbol.vaddr + symbol.mem_size;)
+        {
+            auto info = pcinfo_t{.address = addr, .code_object_id = codeobj_id};
+            if(isa_map.find(info) != isa_map.end()) break;
+
+            auto code_line = table->get(codeobj_id, addr);
+            if(!code_line || code_line->size == 0) break;
+
+            auto& cline = *(isa_map.emplace(info, std::make_unique<CodeLine>()).first->second);
+
+            cline.line_number  = isa_map.size() + kernel_names.size() - 1;
+            cline.code_line    = std::move(code_line);
+            line_numbers[info] = cline.line_number;
+            emitted            = true;
+
+            addr += cline.code_line->size;
+        }
+
+        return emitted;
+    };
+
+    auto emit_for_pc = [this, &emit_symbol](pcinfo_t pc) {
+        if(pc.code_object_id == 0) return false;
+
+        const auto& symbols = table->getSymbolMap(pc.code_object_id);
+        if(auto itr = symbols.find(pc.address); itr != symbols.end())
+            return emit_symbol(pc.code_object_id, itr->second);
+
+        for(const auto& [_, symbol] : symbols)
+        {
+            if(pc.address >= symbol.vaddr && pc.address < symbol.vaddr + symbol.mem_size)
+                return emit_symbol(pc.code_object_id, symbol);
+        }
+
+        return false;
+    };
+
+    bool emitted_any = false;
+    for(auto pc : fallback_pcs)
+    {
+        try
+        {
+            emitted_any |= emit_for_pc(pc);
+        } catch(std::exception& e)
+        {
+            ROCP_INFO << "Unable to emit zero-hit ATT disassembly for occupancy PC "
+                      << pc.code_object_id << ":" << pc.address << ": " << e.what();
+        }
+    }
+
+    for(auto codeobj_id : codeobj_ids)
+    {
+        if(emitted_any) break;
+
+        try
+        {
+            for(auto& [vaddr, symbol] : table->getSymbolMap(codeobj_id))
+            {
+                emitted_any |= emit_symbol(codeobj_id, symbol);
+            }
+        } catch(std::exception& e)
+        {
+            ROCP_INFO << "Unable to emit zero-hit ATT disassembly for code object " << codeobj_id
+                      << ": " << e.what();
+        }
+    }
+
+    if(emitted_any)
+    {
+        ROCP_WARNING << "ATT decode produced no target CU/SIMD wave instruction records; "
+                     << "emitting zero-hit disassembly only. For instruction timing data, rerun "
+                     << "with a larger workload or a different --att-target-cu/--att-simd-select.";
+    }
+}
+
 CodeFile::~CodeFile()
 {
+    addZeroHitDisassembly();
+
     std::vector<std::pair<pcinfo_t, std::unique_ptr<CodeLine>>> vec;
     vec.reserve(isa_map.size());
 
@@ -133,7 +236,7 @@ CodeFile::~CodeFile()
                   return a.second->line_number < b.second->line_number;
               });
 
-    nlohmann::json jcode;
+    nlohmann::json jcode = nlohmann::json::array();
 
     std::unordered_set<std::string> snapshots{};
 

@@ -142,6 +142,7 @@ struct config : output_config
     bool   att_no_intercept              = get_env("ROCPROF_ATT_NO_INTERCEPT", false);
     bool   att_serialize_all             = get_env("ROCPROF_ATT_PARAM_SERIALIZE_ALL", false);
     bool   att_no_detail                 = get_env("ROCPROF_ATT_PARAM_NO_DETAIL", false);
+    bool   att_triple_buffer             = get_env("ROCPROF_ATT_PARAM_TRIPLE_BUFFER", false);
     bool   enable_signal_handlers        = get_env("ROCPROF_SIGNAL_HANDLERS", true);
     bool   enable_process_sync           = get_env("ROCPROF_PROCESS_SYNC", false);
     bool   selected_regions              = get_env("ROCPROF_SELECTED_REGIONS", false);
@@ -232,6 +233,7 @@ config::get_attach_invariants() const
                            att_no_intercept,
                            att_serialize_all,
                            att_no_detail,
+                           att_triple_buffer,
                            att_param_shader_engine_mask,
                            att_param_buffer_size,
                            att_param_simd_select,
@@ -345,6 +347,7 @@ config::save(ArchiveT& ar) const
     CFG_SERIALIZE_MEMBER(att_no_intercept);
     CFG_SERIALIZE_MEMBER(att_serialize_all);
     CFG_SERIALIZE_MEMBER(att_no_detail);
+    CFG_SERIALIZE_MEMBER(att_triple_buffer);
     CFG_SERIALIZE_MEMBER(att_param_shader_engine_mask);
     CFG_SERIALIZE_MEMBER(att_param_buffer_size);
     CFG_SERIALIZE_MEMBER(att_param_simd_select);

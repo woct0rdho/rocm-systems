@@ -133,6 +133,10 @@ public:
                                  TraceConfig*  config,
                                  TraceControl& control,
                                  int           se_id) = 0;
+    // COMPUTE_THREAD_TRACE_ENABLE is queue context state. Device-wide ATT uses
+    // this packet on application queues while global SQTT state is owned by an
+    // internal control queue.
+    virtual void BuildQueueThreadTraceEnable(CmdBuffer* cmd_buffer, bool enable) = 0;
 
     virtual void InsertTimestampMarker(CmdBuffer* cmd_buffer, uint64_t* addr){};
 
@@ -195,6 +199,12 @@ public:
     {
         auto sh0 = Primitives::grbm_se_sh_index_value(se_index, 0);
         builder.BuildWriteUConfigRegPacket(cmd_buffer, Primitives::GRBM_GFX_INDEX_ADDR, sh0);
+    }
+
+    void BuildQueueThreadTraceEnable(CmdBuffer* cmd_buffer, bool enable) override
+    {
+        builder.BuildWriteShRegPacket(
+            cmd_buffer, Primitives::COMPUTE_THREAD_TRACE_ENABLE_ADDR, enable ? 1 : 0);
     }
 
     void StartPerfMon(CmdBuffer* cmd_buffer, TraceConfig* config)
@@ -360,9 +370,10 @@ public:
                     Primitives::SQ_THREAD_TRACE_SIZE_ADDR,
                     Primitives::sqtt_buffer_size_value(base_step, 0));
                 // Program the thread trace ctrl register
-                builder.BuildWriteUConfigRegPacket(cmd_buffer,
-                                                   Primitives::SQ_THREAD_TRACE_CTRL_ADDR,
-                                                   Primitives::sqtt_ctrl_value(true, false));
+                builder.BuildWriteUConfigRegPacket(
+                    cmd_buffer,
+                    Primitives::SQ_THREAD_TRACE_CTRL_ADDR,
+                    Primitives::sqtt_ctrl_value(true, false, config->trace_all_vmids));
                 // Issue a CSPartialFlush cmd including cache flush
                 builder.BuildWriteWaitIdlePacket(cmd_buffer);
                 // Program the thread trace mode register, mode ON
@@ -423,7 +434,8 @@ public:
                     if(sqtt_size == 0) continue;
 
                     const bool double_buffer = bMaskedIn && !config->buffer_data.empty();
-                    uint32_t   ctrl_val      = Primitives::sqtt_ctrl_value(true, double_buffer);
+                    uint32_t ctrl_val = Primitives::sqtt_ctrl_value(
+                        true, double_buffer, config->trace_all_vmids);
 
                     Select_GRBM_SE_SH0(cmd_buffer, local_se);
                     builder.BuildPrimeL2(cmd_buffer, base_addr);
@@ -633,9 +645,10 @@ public:
                                                Primitives::SQ_THREAD_TRACE_SIZE_ADDR,
                                                Primitives::sqtt_zero_size_value());
             // Program the thread trace ctrl register
-            builder.BuildWriteUConfigRegPacket(cmd_buffer,
-                                               Primitives::SQ_THREAD_TRACE_CTRL_ADDR,
-                                               Primitives::sqtt_ctrl_value(true, false));
+            builder.BuildWriteUConfigRegPacket(
+                cmd_buffer,
+                Primitives::SQ_THREAD_TRACE_CTRL_ADDR,
+                Primitives::sqtt_ctrl_value(true, false, config->trace_all_vmids));
             // Issue a CSPartialFlush cmd including cache flush
             builder.BuildWriteWaitIdlePacket(cmd_buffer);
         }
@@ -658,7 +671,8 @@ public:
 
             {
                 // Stop SQTT before taking the final WPTR snapshot.
-                const uint32_t ctrl_val = Primitives::sqtt_ctrl_value(false, false);
+                const uint32_t ctrl_val =
+                    Primitives::sqtt_ctrl_value(false, false, config->trace_all_vmids);
                 WriteConfigPacket(cmd_buffer, Primitives::SQ_THREAD_TRACE_CTRL_ADDR, ctrl_val);
 
                 // Wait until SQTT_BUSY is 0

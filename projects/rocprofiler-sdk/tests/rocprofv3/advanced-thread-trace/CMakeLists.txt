@@ -458,11 +458,20 @@ rocprofiler_add_integration_execute_test(
 
 set(ATT_NO_INTERCEPT_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/att-no-intercept-out")
 
+add_test(
+    NAME tests.integration.execute.rocprofv3-test-att-no-intercept-clean
+    COMMAND ${CMAKE_COMMAND} -E rm -rf ${ATT_NO_INTERCEPT_OUT_DIR})
+set_tests_properties(
+    tests.integration.execute.rocprofv3-test-att-no-intercept-clean
+    PROPERTIES LABELS "integration-tests;thread-trace"
+               FIXTURES_SETUP rocprofv3-test-att-no-intercept-clean)
+
 rocprofiler_add_integration_execute_test(
     rocprofv3-test-att-no-intercept
     COMMAND
         $<TARGET_FILE:rocprofiler-sdk::rocprofv3> -d ${ATT_NO_INTERCEPT_OUT_DIR}
-        --att-no-intercept --kernel-include-regex looping_lds_kernel --output-format json
+        --att-no-intercept --att-target-cu 1 --att-buffer-size 1048576
+        --kernel-include-regex looping_lds_kernel --output-format json
         --log-level env -o out -- $<TARGET_FILE:thread-trace-test-app>
     DEPENDS thread-trace-test-app
     LABELS "integration-tests;thread-trace"
@@ -470,6 +479,7 @@ rocprofiler_add_integration_execute_test(
     DISABLED ${IS_DISABLED}
     ENVIRONMENT "ROCPROF_ATT_LIBRARY_PATH=${attdecoder_LIB_DIR}"
     FAIL_REGULAR_EXPRESSION "${ROCPROFILER_DEFAULT_FAIL_REGEX}"
+    FIXTURES_REQUIRED rocprofv3-test-att-no-intercept-clean
     FIXTURES_SETUP rocprofv3-test-att-no-intercept)
 
 rocprofiler_add_integration_validate_test(

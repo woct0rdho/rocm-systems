@@ -1774,9 +1774,11 @@ att_shader_data_callback(rocprofiler_thread_trace_shader_data_t shader_data,
 
     // Multi-buffer callbacks can arrive out of order. Drain only the contiguous
     // prefix so the .att file remains in GPU emission order.
-    while(auto itr = file_state.pending_chunks.find(file_state.next_chunk_index);
-          itr != file_state.pending_chunks.end())
+    for(;;)
     {
+        auto itr = file_state.pending_chunks.find(file_state.next_chunk_index);
+        if(itr == file_state.pending_chunks.end()) break;
+
         auto mode = std::ios::binary | std::ios::out |
                     (file_state.created ? std::ios::app : std::ios::trunc);
         auto output_stream = get_output_stream(tool::get_config(), filename.str(), ".att", mode);
@@ -1854,6 +1856,8 @@ att_dispatch_consecutive_kernel_callback(rocprofiler_callback_tracing_record_t r
                     ROCPROFILER_CALL(rocprofiler_start_context(att_device_context),
                                      "context start");
                     isprofiling.store(true);
+                    if(tool::get_config().att_no_intercept)
+                        tool::att_no_intercept::mark_started();
                 }
                 const auto local_count = num_consecutive_kernels++;
                 if(isprofiling && local_count < _consecutive_kernels)
@@ -2256,6 +2260,8 @@ finalize_rocprofv3(std::string_view context)
     if(client_finalizer && client_identifier)
     {
         ROCP_INFO << "finalizing rocprofv3: caller='" << context << "'...";
+        if(tool::get_config().advanced_thread_trace && tool::get_config().att_no_intercept)
+            tool::att_no_intercept::finalize();
         client_finalizer(*client_identifier);
         client_finalizer  = nullptr;
         client_identifier = nullptr;
@@ -3093,12 +3099,26 @@ tool_init(rocprofiler_client_finalize_t fini_func, void* tool_data)
                                  0,
                                  callbacks.att_dispatch_consecutive_kernel,
                                  static_cast<void*>(&tool::get_config().att_consecutive_kernels)),
-                             "dispatch tracing service configure");
+                              "dispatch tracing service configure");
         }
 
         if(att_no_intercept)
+        {
+            ROCPROFILER_CALL(rocprofiler_create_context(&att_device_context),
+                             "ATT no-intercept context creation");
             tool::att_no_intercept::configure(callbacks.att_shader_data,
                                               tool::get_config().kernel_filter_range);
+            static uint64_t no_intercept_capture_length =
+                std::numeric_limits<uint64_t>::max();
+            ROCPROFILER_CALL(rocprofiler_configure_callback_tracing_service(
+                                 get_client_ctx(),
+                                 ROCPROFILER_CALLBACK_TRACING_KERNEL_DISPATCH,
+                                 nullptr,
+                                 0,
+                                 callbacks.att_dispatch_consecutive_kernel,
+                                 &no_intercept_capture_length),
+                             "ATT no-intercept dispatch-start tracing configure");
+        }
 
         for(auto& [id, agent] : tool_metadata->agents_map)
         {
@@ -3112,7 +3132,7 @@ tool_init(rocprofiler_client_finalize_t fini_func, void* tool_data)
             if(att_no_intercept)
             {
                 auto trace_config = tool::att_no_intercept::configure_agent(
-                    id, tool::get_config().att_consecutive_kernels);
+                    id, tool::get_config().att_consecutive_kernels, att_device_context);
                 ROCPROFILER_CALL(rocprofiler_configure_device_thread_trace_service(
                                      trace_config.context,
                                      id,

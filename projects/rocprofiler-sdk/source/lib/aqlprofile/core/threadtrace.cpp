@@ -123,6 +123,17 @@ _internal_aqlprofile_att_iterate_data(aqlprofile_handle_t            handle,
         const auto raw_wptr    = control_ptr[se_index].wptr & wptr_mask;
         size_t     sample_size = raw_wptr * sqttbuilder->GetWritePtrBlk();
 
+        AQL_CI_LOG(TRACE) << "ATT final snapshot: agent=" << memorymgr->GetAgent().handle
+                          << ", gpu_id=" << static_cast<int>(gpu_id) << ", se=" << se_index
+                          << ", status=" << std::showbase << std::hex
+                          << control_ptr[se_index].status
+                          << ", status2=" << control_ptr[se_index].status2
+                          << ", cntr=" << control_ptr[se_index].cntr
+                          << ", wptr=" << control_ptr[se_index].wptr << std::noshowbase
+                          << std::dec << ", base=" << sample_ptr
+                          << ", capacity=" << sample_capacity
+                          << ", double_buffer=" << double_buffer;
+
         // In double-buffer mode, a zero final WPTR is either an empty partial
         // buffer or an exactly full buffer. Use STATUS2 to distinguish them
         // instead of treating zero as an address-relative wrap.

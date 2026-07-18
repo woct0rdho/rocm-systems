@@ -36,6 +36,7 @@
 
 #include <vector>
 #include <atomic>
+#include <cstring>
 #include <mutex>
 #include <unordered_map>
 #include <memory>
@@ -298,6 +299,7 @@ public:
         flags.host_access = flags.device_access = true;
         flags.memory_hint                       = AQLPROFILE_MEMORY_HINT_HOST;
         trace_control_buf                       = AllocMemory(size, flags);
+        std::memset(trace_control_buf.get(), 0, size);
     }
 
     const std::vector<hsa_ven_amd_aqlprofile_parameter_t>& GetATTParams() const

@@ -58,7 +58,11 @@ public:
     virtual ~Gfx115xFactory();
 
 protected:
-    static const GpuBlockInfo* block_table_[AQLPROFILE_BLOCKS_NUMBER];
+    Gfx115xFactory(const AgentInfo* agent_info, const GpuBlockInfo** block_table);
+
+private:
+    static const GpuBlockInfo** CreateBlockTable();
+    const GpuBlockInfo**        block_table_ = nullptr;
 };
 
 }  // namespace aql_profile

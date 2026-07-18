@@ -104,6 +104,56 @@ get_original_table()
     return _v;
 }
 
+bool
+attach_queue_to_controller(const hsa_queue_t* queue)
+{
+    if(!queue) return false;
+
+    auto* qc = get_queue_controller();
+    if(!qc) return false;
+
+    if(qc->get_queue(*queue)) return true;
+
+    auto* ext_table = get_amd_ext_table();
+    if(!ext_table || !ext_table->hsa_amd_queue_get_info_fn) return false;
+
+    auto agent = hsa_agent_t{};
+    if(ext_table->hsa_amd_queue_get_info_fn(const_cast<hsa_queue_t*>(queue),
+                                            HSA_AMD_QUEUE_INFO_AGENT,
+                                            &agent) != HSA_STATUS_SUCCESS)
+    {
+        ROCP_WARNING << "Could not query owning HSA agent for dynamically discovered queue "
+                     << queue;
+        return false;
+    }
+
+    for(const auto& [_, agent_info] : qc->get_supported_agents())
+    {
+        if(agent_info.get_hsa_agent().handle == agent.handle)
+        {
+            auto new_queue = std::make_unique<Queue>(
+                agent_info,
+                qc->get_core_table(),
+                qc->get_ext_table(),
+                const_cast<hsa_queue_t*>(queue),
+                [](hsa_amd_queue_intercept_handler, void*) {});
+
+            qc->serializer(new_queue.get()).wlock([&](auto& serializer) {
+                auto* mutable_queue = const_cast<hsa_queue_t*>(queue);
+                serializer.add_queue(&mutable_queue, *new_queue);
+            });
+            qc->add_queue(const_cast<hsa_queue_t*>(queue), std::move(new_queue));
+            ROCP_INFO << "Adding dynamically discovered queue for HSA agent handle "
+                      << agent.handle;
+            return true;
+        }
+    }
+
+    ROCP_WARNING << "Could not find supported agent " << agent.handle
+                 << " for dynamically discovered queue " << queue;
+    return false;
+}
+
 // Saved next-in-chain function pointers (tracing functors or raw HSA, depending on
 // when install_intercept is called). Our wrappers chain through these for untracked
 // queues and for the final doorbell ring on tracked queues.
@@ -133,7 +183,8 @@ lookup_queue_state(const hsa_queue_t* queue, bool create_if_missing)
     // if create_if_missing is true, create a new state. this is for dynamic discovery of queues.
     if(!_state && create_if_missing)
     {
-        return create_queue_state(queue, true);
+        _state = create_queue_state(queue, true);
+        attach_queue_to_controller(queue);
     }
 
     return _state;

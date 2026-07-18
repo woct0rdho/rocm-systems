@@ -41,6 +41,8 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <set>
 #include <shared_mutex>
 #include <string>
 #include <tuple>
@@ -111,10 +113,17 @@ public:
 
     /// Acquire a copy of the control packet bundle for a dispatch boundary.
     std::unique_ptr<hsa::TraceControlAQLPacket> get_start_packet();
+    /// Build the deferred device-mode SQTT start state for the first application queue
+    /// without changing active-trace ownership.
+    std::unique_ptr<hsa::TraceControlAQLPacket> get_queue_start_packet();
     /// Relay data buffers produced by the ATT to the user-mode callback.
     void iterate_data(aqlprofile_handle_t handle, rocprofiler_user_data_t data);
     /// Same as above but for device mode, using the internal data structures
     void iterate_data();
+    /// Queue-local COMPUTE_THREAD_TRACE_ENABLE packet used by device ATT.
+    std::unique_ptr<hsa::QueueThreadTraceEnableAQLPacket> get_queue_enable_packet() const;
+    /// Submit queue-local ATT activation directly and return its completion signal.
+    signal_ptr_t activate_application_queue(hsa_queue_t* application_queue) const;
 
     thread_trace_parameter_pack  params;
     const rocprofiler_agent_id_t agent_id;
@@ -124,8 +133,18 @@ public:
     /// Start the trace and spawn helper threads when triple buffering is used.
     std::shared_ptr<hsa_signal_t> start_thread_trace(
         std::shared_ptr<std::atomic<int>> running_flag);
+    /// Reserve single-buffer trace ownership; the start packet is injected on
+    /// the first application queue dispatch.
+    void prepare_queue_thread_trace(std::shared_ptr<std::atomic<int>> running_flag);
     /// Stop the trace and flush the outstanding hardware packets.
     signal_ptr_t stop_thread_trace();
+    /// Submit the single-buffer stop packet on an application queue so queue-context
+    /// SQTT state and the final write pointer are snapshotted in the same context.
+    signal_ptr_t stop_thread_trace(hsa_queue_t* application_queue);
+
+    bool uses_single_buffer() const { return params.num_buffers <= 1; }
+    bool requires_application_queue_control() const { return application_queue_control; }
+    int  active_trace_count() const { return active_traces.load(std::memory_order_acquire); }
 
 private:
     /// Acquire a copy of the control packet, with optional increment to active_traces
@@ -135,8 +154,11 @@ private:
 
     std::atomic<int> active_traces{0};
     std::mutex       trace_resources_mut{};
+    bool             application_queue_control{false};
 
     std::unique_ptr<hsa::TraceControlAQLPacket>           control_packet{nullptr};
+    hsa_ext_amd_aql_pm4_packet_t                          queue_enable_packet{};
+    bool                                                  queue_enable_packet_valid{false};
     std::unique_ptr<code_object::CodeobjCallbackRegistry> codeobj_reg{nullptr};
 
     std::vector<std::thread>          consumers{};
@@ -207,24 +229,26 @@ public:
         std::unique_lock<std::mutex> lk(agent_mut);
         return params.find(id) != params.end();
     }
-    bool requires_queue_intercept()
-    {
-        std::unique_lock<std::mutex> lk(agent_mut);
-        for(const auto& [_, pack] : params)
-            if(pack.perfcounter_ctrl != 0 && !pack.perfcounters.empty()) return true;
-        return false;
-    }
+    bool requires_queue_intercept();
 
     const auto& get_agents() const { return agents; }
 
     friend void flush_and_stop();
 
 private:
+    hsa::write_packet_t pre_kernel_call(const hsa::Queue& queue);
+    void                register_queue_callback();
+    void                remove_queue_callback();
+
     std::map<rocprofiler_agent_id_t, std::unique_ptr<ThreadTracerAgent>> agents{};
     std::map<rocprofiler_agent_id_t, thread_trace_parameter_pack>        params{};
+    std::set<rocprofiler_agent_id_t>                                     application_queue_start_pending{};
+    std::map<rocprofiler_agent_id_t, uint64_t>                            application_queue_ids{};
 
     std::mutex                        agent_mut;
     std::shared_ptr<std::atomic<int>> worker_flag{nullptr};
+    std::atomic<bool>                 queue_activation_enabled{false};
+    std::optional<int64_t>            queue_callback_id{};
 };
 
 /// Install the thread trace service for newly created contexts (builds per-agent

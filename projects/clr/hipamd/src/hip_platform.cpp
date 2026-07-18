@@ -214,11 +214,6 @@ void __hipRegisterFunction(void** modules, const void* hostFunction, char* devic
                            const char* deviceName, unsigned int threadLimit, uint3* tid, uint3* bid,
                            dim3* blockDim, dim3* gridDim, int* wSize) {
   auto* fat_binary_modules = reinterpret_cast<hip::FatBinaryInfo**>(modules);
-  
-  static const bool enable_deferred_loading = []() {
-    const char* var = getenv("HIP_ENABLE_DEFERRED_LOADING");
-    return var ? atoi(var) != 0 : true;
-  }();
 
   // Compiler might share same hostFunction, so avoid creating duplicate hip::Function.
   // hip::Function is stored in map with hostFunction as key to prevent leaks.
@@ -229,15 +224,9 @@ void __hipRegisterFunction(void** modules, const void* hostFunction, char* devic
     guarantee(hip_error == hipSuccess, "Cannot register Static function, error: %d", hip_error);
   }
 
-  if (!enable_deferred_loading) {
-    HIP_INIT_VOID();
-    
-    for (size_t dev_idx = 0; dev_idx < g_devices.size(); ++dev_idx) {
-      hipFunction_t hfunc = nullptr;
-      hipError_t hip_error = platform.StatCO().GetFunc(&hfunc, hostFunction, dev_idx);
-      guarantee(hip_error == hipSuccess, "Cannot retrieve Static function, error: %d", hip_error);
-    }
-  }
+  // Registration callbacks can run from a late dlopen constructor. Keep them metadata-only even
+  // when HIP_ENABLE_DEFERRED_LOADING=0; resolving a function here can digest a partially registered
+  // module while the dynamic loader is still running its constructor.
 }
 
 // ================================================================================================
@@ -332,26 +321,15 @@ void __hipRegisterTexture(
 
 // ================================================================================================
 void __hipUnregisterFatBinary(void** modules) {
-  auto* fat_binary_modules = reinterpret_cast<hip::FatBinaryInfo**>(modules);
-  static std::once_flag unregister_device_sync;
-  // If SKIP ABORT is set and GPU is in error, dont need to sync streams.
-  if (!HIP_SKIP_ABORT_ON_GPU_ERROR || !amd::Device::IsGPUInError()) {
-    std::call_once(unregister_device_sync, []() {
-      for (const auto& hipDevice : g_devices) {
-        hipDevice->SyncAllStreams(true);
-        // SyncAllStreams only guarantees the GPU finished and the host observed
-        // the completion signals — the HSA async-handler thread can still be
-        // inside a completion callback.  That callback reports kernel names that
-        // point into the Kernel objects RemoveFatBinary is about to destroy, so
-        // the handlers have to be drained too, not just the streams.
-        for (auto* device : hipDevice->devices()) {
-          device->WaitForHsaAsyncHandlersIdle();
-        }
-      }
-    });
+  if (modules == nullptr) {
+    return;
   }
-  hipError_t err = PlatformState::Instance().StatCO().RemoveFatBinary(fat_binary_modules);
-  guarantee((err == hipSuccess), "Cannot Unregister Fat Binary, error:%d", err);
+
+  auto* fat_binary_modules = reinterpret_cast<hip::FatBinaryInfo**>(modules);
+
+  // RemoveFatBinary is idempotent: unknown and already-removed handles are harmless destructor-time
+  // no-ops. Compiler-generated finalizers must not abort the process over cleanup bookkeeping.
+  std::ignore = PlatformState::Instance().StatCO().RemoveFatBinary(fat_binary_modules);
 }
 
 // ================================================================================================

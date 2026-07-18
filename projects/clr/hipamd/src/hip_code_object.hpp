@@ -194,6 +194,21 @@ class StatCO : public CodeObject {
   void ForEachFatBinaryBlob(void (*cb)(const void*)) const;
 
  private:
+  struct FatBinaryCleanup {
+    std::vector<Function*> functions;
+    std::vector<Var*> vars;
+    std::vector<Var*> managed_vars;
+    std::vector<FatBinaryInfo*> fat_binaries;
+  };
+
+  // Detach registry ownership while sclock_ is held, then synchronize/reclaim outside the lock.
+  bool DetachFatBinaryLocked(FatBinaryInfo** module, FatBinaryCleanup& cleanup);
+  void DestroyFatBinaryCleanup(FatBinaryCleanup& cleanup);
+
+  // Load a registered module on first actual symbol use. Caller-visible lookups use this helper so
+  // unregister cannot be undone by an unchecked module_to_hostModule_ operator[] insertion.
+  hipError_t EnsureFatBinaryLoaded(FatBinaryInfo** module);
+
   mutable std::recursive_mutex sclock_;    //!< Guards Static Code object
   const PlatformState& owner_;             //!< Reference to owning PlatformState
   //! Populated during __hipRegisterFatBinary

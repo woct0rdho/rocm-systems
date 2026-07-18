@@ -522,6 +522,10 @@ XdnaDriver::XdnaDriver(std::string devnode_name)
     : core::Driver(core::DriverType::XDNA, std::move(devnode_name)) {}
 
 hsa_status_t XdnaDriver::DiscoverDriver(std::unique_ptr<core::Driver>& driver) {
+  if (rocr::os::GetEnvVar("HSA_DISABLE_XDNA") == "1") {
+    return HSA_STATUS_ERROR;
+  }
+
   for (uint32_t i = 0; i < devnode_max_minor_num; ++i) {
     auto tmp_driver = std::make_unique<XdnaDriver>(std::string(devnode_prefix) + std::to_string(i));
     if (tmp_driver->Open() == HSA_STATUS_SUCCESS) {

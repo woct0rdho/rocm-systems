@@ -78,6 +78,9 @@ mock_submit(const att_queue_t&, hsa_ext_amd_aql_pm4_packet_t*, hsa_signal_t*)
 void
 copy_data_mock(void* dst, const void* src, hsa_agent_t, hsa_agent_t, size_t size, hsa_signal_t*)
 {
+    // Empty END chunks must bypass the async-copy callback; real HSA zero-byte
+    // copies are not guaranteed to signal completion.
+    EXPECT_GT(size, 0u);
     std::memcpy(dst, src, size);
 }
 
@@ -283,10 +286,51 @@ TEST(thread_trace, multiple_calls)
     threads.flag->store(rocprofiler::thread_trace::WORKER_FLAG_STOP);
     threads.join_all();
 
-    // The producer always emits a 32-byte warmup header at chunk_index 0 before
-    // any GPU-sourced buffers, so user-visible bytes include that header.
-    constexpr size_t HEADER_BYTES = 4 * sizeof(uint64_t);
-    EXPECT_EQ(data_received.load(), status_called.load() * BUFFER_SIZE + HEADER_BYTES);
+    // Some architectures expose an optional 32-byte decoder warmup header while
+    // gfx115x reports no header. In either case, every GPU status result must
+    // contribute one complete buffer and any extra framing must be exactly the header.
+    constexpr size_t HEADER_BYTES    = 4 * sizeof(uint64_t);
+    const auto       payload_bytes   = status_called.load() * BUFFER_SIZE;
+    const auto       received_bytes  = data_received.load();
+    ASSERT_GE(received_bytes, payload_bytes);
+    const auto framing_bytes = received_bytes - payload_bytes;
+    EXPECT_TRUE(framing_bytes == 0 || framing_bytes == HEADER_BYTES);
+}
+
+TEST(thread_trace, reduced_gpu_buffer_capacity)
+{
+    rocprofiler::thread_trace::test_init();
+    constexpr size_t REPORTED_SIZE = rocprofiler::thread_trace::MOCK_BUFFER_SIZE - (63 * 4096);
+
+    auto reported_size_received = std::atomic<bool>{false};
+    auto fetch_cb = [](rocprofiler_thread_trace_shader_data_t shader_data,
+                       rocprofiler_user_data_t                userdata) {
+        if(shader_data.data_size == REPORTED_SIZE)
+            static_cast<std::atomic<bool>*>(userdata.ptr)->store(true);
+    };
+
+    auto input_buffer = std::vector<std::byte>(REPORTED_SIZE);
+    auto status_sent  = std::atomic<bool>{false};
+    auto return_reduced_status = [&]() -> std::optional<rocprofiler::hsa::sqtt_buffer_status_t> {
+        if(status_sent.exchange(true)) return std::nullopt;
+
+        auto status = rocprofiler::hsa::sqtt_buffer_status_t{};
+        status.data = input_buffer.data();
+        status.size = REPORTED_SIZE;
+        return status;
+    };
+
+    auto userdata = rocprofiler_user_data_t{.ptr = &reported_size_received};
+    auto threads  = rocprofiler::thread_trace::start_threads(
+        fetch_cb, return_reduced_status, userdata);
+
+    while(!reported_size_received.load())
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+    threads.flag->store(rocprofiler::thread_trace::WORKER_FLAG_STOP);
+    threads.join_all();
+
+    EXPECT_TRUE(reported_size_received.load());
 }
 
 TEST(thread_trace, read_offset)
@@ -299,7 +343,7 @@ TEST(thread_trace, read_offset)
 
     auto fetch_cb = [](rocprofiler_thread_trace_shader_data_t shader_data,
                        rocprofiler_user_data_t                userdata) {
-        if(shader_data.chunk_index > 0 && shader_data.read_offset != 0)
+        if(shader_data.read_offset != 0)
             static_cast<std::atomic<uint64_t>*>(userdata.ptr)->store(shader_data.read_offset);
     };
 
@@ -386,25 +430,31 @@ TEST(thread_trace, data_integrity)
     threads.flag->store(rocprofiler::thread_trace::WORKER_FLAG_STOP);
     threads.join_all();
 
-    // The producer always emits a 32-byte warmup header at chunk_index 0 ahead
-    // of the GPU-sourced chunks; the test verifies the trailing real chunks.
+    // The decoder warmup header is architecture-dependent. Classify callbacks by
+    // size instead of assuming chunk_index 0 is framing: on gfx115x, chunk 0 is
+    // the first real GPU buffer.
     constexpr size_t HEADER_BYTES = 4 * sizeof(uint64_t);
 
-    size_t total_words = 0;
-    for(const auto& [idx, chunk] : state.chunks)
+    size_t total_words   = 0;
+    size_t framing_bytes = 0;
+    for(const auto& [_, chunk] : state.chunks)
     {
-        if(idx == 0) continue;  // warmup header, not a GPU chunk
-        total_words += chunk.size();
+        const auto chunk_bytes = chunk.size() * sizeof(size_t);
+        if(chunk_bytes == BUFFER_SIZE)
+            total_words += chunk.size();
+        else
+            framing_bytes += chunk_bytes;
     }
     EXPECT_EQ(total_words * sizeof(size_t), status_called.load() * BUFFER_SIZE);
-    EXPECT_EQ(state.chunks.at(0).size() * sizeof(size_t), HEADER_BYTES);
+    EXPECT_TRUE(framing_bytes == 0 || framing_bytes == HEADER_BYTES);
 
-    // std::map iterates in chunk_index order; skipping the header chunk, the
-    // reassembled stream must be the strictly increasing sequence 0, 1, 2, ...
+    // std::map iterates in chunk_index order. Reassembling only full GPU chunks
+    // must produce the strictly increasing sequence 0, 1, 2, ... regardless of
+    // whether an optional header occupied chunk_index 0.
     size_t expected = 0;
-    for(const auto& [idx, chunk] : state.chunks)
+    for(const auto& [_, chunk] : state.chunks)
     {
-        if(idx == 0) continue;
+        if(chunk.size() * sizeof(size_t) != BUFFER_SIZE) continue;
         for(size_t v : chunk)
         {
             ASSERT_EQ(expected, v);

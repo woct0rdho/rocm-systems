@@ -1019,6 +1019,9 @@ finalize()
         ompt::finalize_ompt();
         kfd::finalize();
 #if ROCPROFILER_SDK_HSA_PC_SAMPLING > 0
+        // Stop the PcSamplingThread first so code_object::finalize can
+        // acquire host_buffer_mutex without contention.
+        pc_sampling::stop_sampling_threads();
         // WARNING: this must precede `code_object::finalize()`
         pc_sampling::code_object::finalize();
         // WARNING: this must follows queue_controller_fini.

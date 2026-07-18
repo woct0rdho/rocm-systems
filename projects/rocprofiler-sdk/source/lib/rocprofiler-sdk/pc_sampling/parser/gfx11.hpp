@@ -77,3 +77,47 @@ public:
     static constexpr uint32_t gfx_ip_major = 11;
     static constexpr uint32_t gfx_ip_minor = 0;
 };
+
+class GFX1151
+{
+public:
+    enum inst_type_issued
+    {
+        TYPE_VALU = 0,
+        TYPE_MATRIX,
+        TYPE_SCALAR,
+        TYPE_TEX,
+        TYPE_LDS,
+        TYPE_LDS_DIRECT,
+        TYPE_FLAT,
+        TYPE_EXPORT,
+        TYPE_MESSAGE,
+        TYPE_BARRIER,
+        TYPE_BRANCH_NOT_TAKEN,
+        TYPE_BRANCH_TAKEN,
+        TYPE_JUMP,
+        TYPE_OTHER,
+        TYPE_NO_INST,
+        TYPE_DUAL_VALU,
+        TYPE_LAST
+    };
+
+    enum reason_not_issued
+    {
+        REASON_NO_INSTRUCTION_AVAILABLE = 0,
+        REASON_ALU_DEPENDENCY,
+        REASON_WAITCNT,
+        REASON_ARBITER_NOT_WIN,
+        REASON_SLEEP_WAIT,
+        REASON_BARRIER_WAIT,
+        REASON_ARBITER_WIN_EX_STALL,
+        REASON_INTERNAL_INSTRUCTION,
+        REASON_LAST,
+        REASON_OTHER_WAIT = 31,
+    };
+
+    // max number of waves per CU on gfx115-level stochastic validation
+    static constexpr size_t   max_wave_cnt = 32;
+    static constexpr uint32_t gfx_ip_major = 11;
+    static constexpr uint32_t gfx_ip_minor = 5;
+};

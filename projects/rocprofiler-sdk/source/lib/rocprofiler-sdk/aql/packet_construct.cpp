@@ -180,6 +180,11 @@ ThreadTraceAQLPacketFactory::ThreadTraceAQLPacketFactory(const hsa::AgentCache& 
     if(params.no_detail_simd)
         aql_params.push_back({HSA_VEN_AMD_AQLPROFILE_PARAMETER_NAME_OCCUPANCY_MODE, {1}});
 
+    if(params.all_vmids)
+        aql_params.push_back({static_cast<hsa_ven_amd_aqlprofile_parameter_name_t>(
+                                  AQLPROFILE_ATT_PARAMETER_NAME_ALL_VMIDS),
+                              {1}});
+
     if(perf_ctrl != 0 && !params.perfcounters.empty())
     {
         for(const auto& perf_counter : params.perfcounters)

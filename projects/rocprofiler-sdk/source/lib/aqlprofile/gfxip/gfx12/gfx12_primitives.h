@@ -700,7 +700,7 @@ public:
     static uint32_t sqtt_zero_size_value() { return 0; }
 
     // Thread trace ctrl register value
-    static uint32_t sqtt_ctrl_value(bool on, bool double_buffer)
+    static uint32_t sqtt_ctrl_value(bool on, bool double_buffer, bool)
     {
         uint32_t sq_thread_trace_ctrl{0};
         sq_thread_trace_ctrl =

@@ -259,6 +259,10 @@ _internal_aqlprofile_att_create_packets(aqlprofile_handle_t*                  ha
                     if(p->value < 1) return HSA_STATUS_ERROR_INVALID_ARGUMENT;
                     buffer_num = p->value;
                     break;
+                case AQLPROFILE_ATT_PARAMETER_NAME_ALL_VMIDS:
+                    trace_config.trace_all_vmids = p->value != 0;
+                    trace_config.vmIdMask        = trace_config.trace_all_vmids ? 1 : 0;
+                    break;
                 case HSA_VEN_AMD_AQLPROFILE_PARAMETER_NAME_PERFCOUNTER_MASK:
                     trace_config.perfMASK = p->value;
                     break;
@@ -473,6 +477,31 @@ aqlprofile_att_update_buffer_status(aqlprofile_att_buffer_status_t* out,
         out->read_offset = sizeof(uint16_t) * (control.wptr_doublebuffer >> 30);
     }
 
+    return HSA_STATUS_SUCCESS;
+}
+
+PUBLIC_API hsa_status_t
+aqlprofile_att_get_queue_control_packet(hsa_ext_amd_aql_pm4_packet_t* packet,
+                                        aqlprofile_handle_t            handle,
+                                        int                            enable)
+{
+    if(packet == nullptr) return HSA_STATUS_ERROR_INVALID_ARGUMENT;
+
+    auto generic_manager = MemoryManager::GetManager(handle.handle);
+    auto* manager        = dynamic_cast<TraceMemoryManager*>(generic_manager.get());
+    if(manager == nullptr) return HSA_STATUS_ERROR_INVALID_ARGUMENT;
+
+    aql_profile::Pm4Factory*  pm4_factory = aql_profile::Pm4Factory::Create(manager->GetAgent());
+    pm4_builder::SqttBuilder* sqttbuilder = pm4_factory->GetSqttBuilder();
+    pm4_builder::CmdBuilder*  cmd_writer  = pm4_factory->GetCmdBuilder();
+    pm4_builder::CmdBuffer    commands;
+
+    sqttbuilder->BuildQueueThreadTraceEnable(&commands, enable != 0);
+    if(commands.Size() == 0) return HSA_STATUS_ERROR_INVALID_ARGUMENT;
+
+    void* cmdbuffer = manager->AddExtraCmdBuf(commands.Size());
+    memcpy(cmdbuffer, commands.Data(), commands.Size());
+    aql_profile::PopulateAql(cmdbuffer, commands.Size(), cmd_writer, packet);
     return HSA_STATUS_SUCCESS;
 }
 

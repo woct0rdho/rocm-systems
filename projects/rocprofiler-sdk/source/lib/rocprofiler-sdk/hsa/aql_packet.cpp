@@ -194,6 +194,17 @@ TraceMemoryPool::Copy(void* dst, const void* src, size_t size, void* data)
     return pool.api_copy_fn(dst, src, size);
 }
 
+QueueThreadTraceEnableAQLPacket::QueueThreadTraceEnableAQLPacket(
+    hsa_agent_t agent_, const hsa_ext_amd_aql_pm4_packet_t& packet_)
+: agent(agent_)
+, packet(packet_)
+{
+    packet.header            = VENDOR_BIT | BARRIER_BIT;
+    packet.completion_signal = hsa_signal_t{.handle = 0};
+    empty                    = false;
+    clear();
+}
+
 TraceControlAQLPacket::TraceControlAQLPacket(const TraceMemoryPool&          _tracepool,
                                              const aqlprofile_att_profile_t& p)
 : tracepool(std::make_shared<TraceMemoryPool>(_tracepool))

@@ -222,6 +222,23 @@ protected:
     TraceMemoryPool tracepool;
 };
 
+class QueueThreadTraceEnableAQLPacket : public AQLPacket
+{
+public:
+    QueueThreadTraceEnableAQLPacket(hsa_agent_t agent,
+                                    const hsa_ext_amd_aql_pm4_packet_t& packet);
+    ~QueueThreadTraceEnableAQLPacket() override = default;
+
+    void populate_before() override { before_krn_pkt.push_back(packet); }
+    void populate_after() override {}
+
+    hsa_agent_t GetAgent() const { return agent; }
+
+private:
+    hsa_agent_t                      agent{.handle = 0};
+    hsa_ext_amd_aql_pm4_packet_t     packet{};
+};
+
 class TraceControlAQLPacket : public AQLPacket
 {
     friend class rocprofiler::aql::ThreadTraceAQLPacketFactory;

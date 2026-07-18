@@ -1659,6 +1659,11 @@ pc_sampling_callback(rocprofiler_context_id_t /* context_id*/,
         {
             if(cur_header->kind == ROCPROFILER_PC_SAMPLING_RECORD_HOST_TRAP_V0_SAMPLE)
             {
+                if(cur_header->payload == nullptr)
+                {
+                    invalid_samples_cnt++;
+                    continue;
+                }
                 auto* pc_sample = static_cast<rocprofiler_pc_sampling_record_host_trap_v0_t*>(
                     cur_header->payload);
 
@@ -1673,6 +1678,11 @@ pc_sampling_callback(rocprofiler_context_id_t /* context_id*/,
             }
             else if(cur_header->kind == ROCPROFILER_PC_SAMPLING_RECORD_STOCHASTIC_V0_SAMPLE)
             {
+                if(cur_header->payload == nullptr)
+                {
+                    invalid_samples_cnt++;
+                    continue;
+                }
                 auto* pc_sample = static_cast<rocprofiler_pc_sampling_record_stochastic_v0_t*>(
                     cur_header->payload);
 
@@ -3711,6 +3721,8 @@ generate_output(cleanup_mode _cleanup_mode, bool skip_output = false)
                           rccl_output.get_generator(),
                           rocdecode_output.get_generator(),
                           counters_output.get_generator(),
+                          pc_sampling_host_trap_output.get_generator(),
+                          pc_sampling_stochastic_output.get_generator(),
                           spm_counters_output.get_generator(),
                           ompt_output.get_generator(),
                           hip_graph_output.get_generator(),

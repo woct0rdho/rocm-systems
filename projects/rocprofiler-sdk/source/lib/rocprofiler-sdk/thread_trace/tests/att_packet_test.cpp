@@ -191,6 +191,103 @@ TEST(thread_trace, configure_test)
     context::pop_client(1);
 }
 
+TEST(thread_trace, no_detail_parameter_pack_and_aql_option)
+{
+    ASSERT_EQ(hsa_init(), HSA_STATUS_SUCCESS);
+    test_init();
+
+    registration::init_logging();
+    registration::set_init_status(-1);
+
+    auto agents = hsa::get_queue_controller()->get_supported_agents();
+    ASSERT_GT(agents.size(), 0);
+
+    for(const auto& [_, agent] : agents)
+    {
+        auto params           = thread_trace::thread_trace_parameter_pack{};
+        params.no_detail_simd = true;
+
+        aql::ThreadTraceAQLPacketFactory factory(agent, params, get_api_table(), get_ext_table());
+        const auto has_occupancy_param = std::any_of(
+            factory.aql_params.begin(), factory.aql_params.end(), [](const auto& param) {
+                return param.parameter_name ==
+                           HSA_VEN_AMD_AQLPROFILE_PARAMETER_NAME_OCCUPANCY_MODE &&
+                       param.value == 1;
+            });
+        EXPECT_TRUE(has_occupancy_param);
+    }
+}
+
+TEST(thread_trace, no_detail_configure_test)
+{
+    ASSERT_EQ(hsa_init(), HSA_STATUS_SUCCESS);
+    test_init();
+
+    registration::init_logging();
+    registration::set_init_status(-1);
+    context::push_client(1);
+    rocprofiler_context_id_t ctx{0};
+    ROCPROFILER_CALL(rocprofiler_create_context(&ctx), "context creation failed");
+
+    std::vector<rocprofiler_thread_trace_parameter_t> params;
+    params.push_back({ROCPROFILER_THREAD_TRACE_PARAMETER_BUFFER_SIZE, {0x1000000}});
+    params.push_back({ROCPROFILER_THREAD_TRACE_PARAMETER_NO_DETAIL, {1}});
+
+    auto agents = hsa::get_queue_controller()->get_supported_agents();
+    ASSERT_GT(agents.size(), 0);
+
+    for(auto& [_, agent] : agents)
+    {
+        ROCPROFILER_CALL(
+            rocprofiler_configure_dispatch_thread_trace_service(
+                ctx,
+                agent.get_rocp_agent()->id,
+                params.data(),
+                params.size(),
+                [](rocprofiler_agent_id_t,
+                   rocprofiler_queue_id_t,
+                   rocprofiler_async_correlation_id_t,
+                   rocprofiler_kernel_id_t,
+                   rocprofiler_dispatch_id_t,
+                   void*,
+                   rocprofiler_user_data_t*) { return ROCPROFILER_THREAD_TRACE_CONTROL_NONE; },
+                [](rocprofiler_agent_id_t,
+                   int64_t,
+                   void*,
+                   size_t,
+                   rocprofiler_thread_trace_shader_data_flags_t,
+                   rocprofiler_user_data_t) {},
+                nullptr),
+            "configure no-detail ATT");
+    }
+
+    auto* context = rocprofiler::context::get_mutable_registered_context(ctx);
+    ASSERT_NE(context, nullptr);
+    auto* tracer = context->dispatch_thread_trace.get();
+    ASSERT_NE(tracer, nullptr);
+
+    tracer->resource_init();
+    bool saw_agent = false;
+    for(auto& [_, agent] : tracer->get_agents())
+    {
+        saw_agent = true;
+        EXPECT_TRUE(agent->params.no_detail_simd);
+
+        const auto has_occupancy_param = std::any_of(
+            agent->factory->aql_params.begin(),
+            agent->factory->aql_params.end(),
+            [](const auto& param) {
+                return param.parameter_name ==
+                           HSA_VEN_AMD_AQLPROFILE_PARAMETER_NAME_OCCUPANCY_MODE &&
+                       param.value == 1;
+            });
+        EXPECT_TRUE(has_occupancy_param);
+    }
+    EXPECT_TRUE(saw_agent);
+    tracer->resource_deinit();
+    context::pop_client(1);
+}
+
 TEST(thread_trace, perfcounters_configure_test)
 {
     constexpr int NUM_COUNTERS = 3;

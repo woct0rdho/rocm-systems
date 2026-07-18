@@ -698,8 +698,6 @@ hsa_ven_amd_aqlprofile_iterate_data(const hsa_ven_amd_aqlprofile_profile_t* prof
         const bool               is_concurrent = pm4_factory->IsConcurrent();
         const uint32_t           xcc_num       = pm4_factory->GetXccNumber();
         const uint32_t           xcc_per_aid   = pm4_factory->GetXccPerAid();
-        const uint32_t           se_number     = pm4_factory->GetShaderEnginesNumber() / xcc_num;
-        const uint32_t           sa_number     = pm4_factory->GetShaderArraysNumber();
 
         if(profile->type == HSA_VEN_AMD_AQLPROFILE_EVENT_TYPE_PMC)
         {
@@ -758,13 +756,7 @@ hsa_ven_amd_aqlprofile_iterate_data(const hsa_ven_amd_aqlprofile_profile_t* prof
                         return HSA_STATUS_ERROR;
 
                     // non-MI300A-AID counter event.
-                    uint32_t block_samples_count = 1;
-                    if(pm4_factory->GetBlockInfo(p)->attr & CounterBlockSeAttr)
-                        block_samples_count *= se_number;
-                    if(pm4_factory->GetBlockInfo(p)->attr & CounterBlockSaAttr)
-                        block_samples_count *= sa_number;
-                    if(pm4_factory->GetBlockInfo(p)->attr & CounterBlockWgpAttr)
-                        block_samples_count *= pm4_factory->GetNumWGPs();
+                    uint32_t block_samples_count = pm4_factory->GetNumEvents(p->block_name);
 
                     for(uint32_t blk = 0; blk < block_samples_count; ++blk)
                     {
@@ -855,6 +847,7 @@ hsa_ven_amd_aqlprofile_iterate_data(const hsa_ven_amd_aqlprofile_profile_t* prof
                 auto& trace_config = aql_profile::configs.at(profile->command_buffer.ptr);
                 pm4_builder::SqttBuilder* sqttbuilder     = pm4_factory->GetSqttBuilder();
                 const uint64_t            se_number_total = pm4_factory->GetShaderEnginesNumber();
+                const auto                gpu_id          = pm4_factory->GetGpuId();
                 // Control buffer was allocated as the CmdBuffer prefix partition
                 aql_profile::CommandBufferMgr cmd_buffer_mgr(profile);
 
@@ -863,12 +856,17 @@ hsa_ven_amd_aqlprofile_iterate_data(const hsa_ven_amd_aqlprofile_profile_t* prof
                 // Check if SQTT buffer was wrapped
                 for(size_t se_index = 0; se_index < se_number_total; se_index++)
                 {
+                    const auto full_status =
+                        (gpu_id == aql_profile::GFX115X_GPU_ID ||
+                         gpu_id >= aql_profile::GFX12_GPU_ID)
+                            ? control_ptr[se_index].status2
+                            : control_ptr[se_index].status;
                     if(control_ptr[se_index].status & sqttbuilder->GetUTCErrorMask())
                     {
                         ERR_LOGGING("SQTT memory error received, SE({})", se_index);
                         status = HSA_STATUS_ERROR_EXCEPTION;
                     }
-                    else if(control_ptr[se_index].status & sqttbuilder->GetBufferFullMask())
+                    else if(full_status & sqttbuilder->GetBufferFullMask())
                     {
                         AQL_WARNING << "SQTT data buffer full, SE(" << se_index << ")";
                         if(status == HSA_STATUS_SUCCESS) status = HSA_STATUS_ERROR_OUT_OF_RESOURCES;
@@ -889,7 +887,7 @@ hsa_ven_amd_aqlprofile_iterate_data(const hsa_ven_amd_aqlprofile_profile_t* prof
                         (control_ptr[se_index].wptr & sqttbuilder->GetWritePtrMask()) *
                         sqttbuilder->GetWritePtrBlk();
 
-                    if(pm4_factory->GetGpuId() == aql_profile::GFX11_GPU_ID)
+                    if(gpu_id == aql_profile::GFX11_GPU_ID || gpu_id == aql_profile::GFX115X_GPU_ID)
                     {
                         sample_size = sample_size - reinterpret_cast<uint64_t>(sample_ptr);
                         sample_size &= (1ull << 29) - 1;

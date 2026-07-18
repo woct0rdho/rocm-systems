@@ -286,6 +286,19 @@ ThreadTracerAgent::start_thread_trace(std::shared_ptr<std::atomic<int>> _flag)
                        nullptr);
     }
 
+    auto    buffer_packet    = std::unique_ptr<rocprofiler::hsa::SQTTBufferingPackets>{};
+    int64_t shader_engine_id = 0;
+    if(params.num_buffers > 1)
+    {
+        // Build the status/swap packets before SQTT starts so the aqlprofile
+        // manager is fully populated while the hardware is still idle.
+        for(uint64_t i = 0; (params.shader_engine_mask >> i) != 0; i++)
+            if((params.shader_engine_mask >> i) % 2 == 1) shader_engine_id = i;
+
+        buffer_packet = std::make_unique<rocprofiler::hsa::SQTTBufferingPackets>(
+            control_packet_copy->GetHandle(), shader_engine_id);
+    }
+
     // Submit the start packets without waiting: the producer thread (multi-buffer
     // path) and DeviceThreadTracer::start_context (single-buffer path) wait on the
     // returned signal so multiple agents can be launched in parallel.
@@ -294,17 +307,6 @@ ThreadTracerAgent::start_thread_trace(std::shared_ptr<std::atomic<int>> _flag)
 
     if(params.num_buffers > 1)
     {
-        // Find unique shader engine ID from mask
-        int64_t shader_engine_id = 0;
-        for(uint64_t i = 0; (params.shader_engine_mask >> i) != 0; i++)
-            if((params.shader_engine_mask >> i) % 2 == 1) shader_engine_id = i;
-
-        auto buffer_packet = std::make_unique<rocprofiler::hsa::SQTTBufferingPackets>(
-            control_packet_copy->GetHandle(), shader_engine_id);
-        // Emit the optional buffer header first so consumers can prime state
-        // before the main payload arrives. The header is chunk_index 0; the
-        // producer thread continues the sequence from 1.
-
         auto worker_data         = std::make_shared<triple_buffer_shared_data_t>();
         worker_data->queue       = queue.get();  // non-owning; ThreadTracerAgent owns queue
         worker_data->num_buffers = params.num_buffers;

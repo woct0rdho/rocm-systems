@@ -2,7 +2,19 @@
 //SPDX-License-Identifier: MIT
 
 #include <gtest/gtest.h>
+
+#include <map>
+#include <mutex>
+#include <sstream>
+#include <string>
+#include <type_traits>
+
+// Expose the private mapper so this unit test can validate gfx1151 selection
+// without constructing a full HSA-backed PM4 factory.
+#define private public
 #include "core/pm4_factory.h"
+#undef private
+#include "core/gfx11_factory.h"
 
 using namespace aql_profile;
 
@@ -33,6 +45,13 @@ TEST(Pm4FactoryTest, RegisterAgentAndGetAgentInfo) {
     EXPECT_EQ(info->se_num, 4u);
     EXPECT_EQ(info->xcc_num, 1u);
     EXPECT_EQ(info->shader_arrays_per_se, 2u);
+}
+
+TEST(Pm4FactoryTest, Gfx1151MapsToGfx115xAndGfx11Behavior) {
+    EXPECT_EQ(Pm4Factory::GetGpuId("gfx1151"), GFX115X_GPU_ID);
+    EXPECT_EQ(Pm4Factory::GetGpuId("gfx1150"), GFX115X_GPU_ID);
+    EXPECT_EQ(Pm4Factory::GetGpuId("gfx1100"), GFX11_GPU_ID);
+    EXPECT_TRUE((std::is_base_of<Gfx11Factory, Gfx115xFactory>::value));
 }
 
 // Test: GetAgentInfo returns nullptr for invalid handle

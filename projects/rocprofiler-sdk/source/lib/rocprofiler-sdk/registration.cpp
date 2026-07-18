@@ -339,6 +339,7 @@ struct client_library
     rocprofiler_tool_configure_attach_result_t* configure_attach_result = nullptr;
     rocprofiler_client_id_t                     internal_client_id      = {};
     rocprofiler_client_id_t                     mutable_client_id       = {};
+    bool                                        finalizing              = false;
 };
 
 using client_library_vec_t = std::vector<std::optional<client_library>>;
@@ -831,33 +832,73 @@ invoke_client_finalizer(rocprofiler_client_id_t client_id)
 {
     ROCP_INFO << __FUNCTION__ << "(client_id=" << client_id.handle << ")";
 
+    auto  _internal_client_handle = uint32_t{};
+    auto* _internal_client_name   = static_cast<const char*>(nullptr);
+    auto  _finalize_func          = rocprofiler_tool_finalize_t{nullptr};
+    void* _tool_data              = nullptr;
+    bool  _found_client           = false;
+
+    {
+        auto _lk = scoped_lock_t{get_registration_mutex()};
+
+        if(!get_clients()) return;
+
+        for(auto& itr : *get_clients())
+        {
+            if(itr && itr->internal_client_id.handle == client_id.handle &&
+               itr->mutable_client_id.handle == client_id.handle)
+            {
+                if(itr->finalizing) return;
+
+                itr->finalizing          = true;
+                _found_client            = true;
+                _internal_client_handle  = itr->internal_client_id.handle;
+                _internal_client_name    = itr->internal_client_id.name;
+
+                if(itr->configure_result && itr->configure_result->finalize)
+                {
+                    // set to nullptr so finalize only gets called once
+                    std::swap(_finalize_func, itr->configure_result->finalize);
+                    _tool_data = itr->configure_result->tool_data;
+                }
+                break;
+            }
+        }
+    }
+
+    if(!_found_client) return;
+
+    auto _internal_client_id = rocprofiler_client_id_t{sizeof(rocprofiler_client_id_t),
+                                                        _internal_client_name,
+                                                        _internal_client_handle};
+
+    context::stop_client_contexts(_internal_client_id);
+
+    if(_finalize_func)
+    {
+        hsa::async_copy_sync();
+        hsa::queue_controller_sync();
+        pc_sampling::service_sync(_internal_client_id);
+
+        auto _fini_status = get_fini_status();
+        if(_fini_status == 0) set_fini_status(-1);
+        _finalize_func(_tool_data);
+        if(_fini_status == 0) set_fini_status(_fini_status);
+    }
+
+    context::deactivate_client_contexts(_internal_client_id);
+
     auto _lk = scoped_lock_t{get_registration_mutex()};
 
     if(!get_clients()) return;
 
     for(auto& itr : *get_clients())
     {
-        if(itr && itr->internal_client_id.handle == client_id.handle &&
+        if(itr && itr->internal_client_id.handle == _internal_client_handle &&
            itr->mutable_client_id.handle == client_id.handle)
         {
-            context::stop_client_contexts(itr->internal_client_id);
-            if(itr->configure_result && itr->configure_result->finalize)
-            {
-                // set to nullptr so finalize only gets called once
-                rocprofiler_tool_finalize_t _finalize_func = nullptr;
-                std::swap(_finalize_func, itr->configure_result->finalize);
-
-                hsa::async_copy_sync();
-                hsa::queue_controller_sync();
-                pc_sampling::service_sync(itr->internal_client_id);
-
-                auto _fini_status = get_fini_status();
-                if(_fini_status == 0) set_fini_status(-1);
-                _finalize_func(itr->configure_result->tool_data);
-                if(_fini_status == 0) set_fini_status(_fini_status);
-            }
-            context::deactivate_client_contexts(itr->internal_client_id);
             itr.reset();
+            break;
         }
     }
 }

@@ -4468,6 +4468,17 @@ rocprofiler_configure(uint32_t                 version,
     // set the client name
     id->name = "rocprofv3";
 
+    int init_status = 0;
+    if(rocprofiler_is_initialized(&init_status) == ROCPROFILER_STATUS_SUCCESS && init_status > 0)
+    {
+        // Some runtimes can rediscover the visible configure symbol after the
+        // tool has already initialized. Do not return tool_init a second time:
+        // context configuration is no longer legal at that point.
+        ROCP_WARNING << "rocprofv3 configure called after rocprofiler initialization; skipping "
+                        "duplicate tool configuration";
+        return nullptr;
+    }
+
     // store client info
     client_identifier = id;
 
@@ -4510,9 +4521,19 @@ rocprofiler_configure(uint32_t                 version,
     if(tool::get_config().rocshmem_api_trace) libs |= ROCPROFILER_ROCSHMEM_TABLE;
     if(tool::get_config().hipfile_api_trace) libs |= ROCPROFILER_HIPFILE_TABLE;
 
-    ROCPROFILER_CALL(
-        rocprofiler_at_intercept_table_registration(api_timestamps_callback, libs, nullptr),
-        "api registration");
+    auto api_registration_status =
+        rocprofiler_at_intercept_table_registration(api_timestamps_callback, libs, nullptr);
+    if(api_registration_status == ROCPROFILER_STATUS_ERROR_CONFIGURATION_LOCKED)
+    {
+        // This callback only captures runtime initialization timestamps, so a
+        // late registration should not abort profiling.
+        ROCP_WARNING << "API timestamp registration skipped because rocprofiler configuration is "
+                        "already locked";
+    }
+    else
+    {
+        ROCPROFILER_CALL(api_registration_status, "api registration");
+    }
 
     ROCP_INFO << id->name << " is using rocprofiler-sdk v" << major << "." << minor << "." << patch
               << " (" << runtime_version << ")";

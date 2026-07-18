@@ -347,50 +347,45 @@ hipError_t StatCO::DigestFatBinary(const void* data, FatBinaryInfo*& programs) {
 
 FatBinaryInfo** StatCO::AddFatBinary(const void* data, bool& success) {
   std::scoped_lock lock(sclock_);
-  module_to_hostModule_.insert(std::make_pair(&modules_[data], data));
 
-  if (!owner_.IsInitialized()) {
-    success = true;
-    return &modules_[data];
-  }
+  auto module_iter = modules_.try_emplace(data, nullptr).first;
+  FatBinaryInfo** module = &module_iter->second;
+  module_to_hostModule_.try_emplace(module, data);
 
-  hipError_t err = DigestFatBinary(data, modules_[data]);
-
-  success = (err == hipSuccess);
-  return &modules_[data];
+  // Keep static registration metadata-only even when HIP is already initialized. The code object
+  // is digested lazily after the compiler-generated constructor has registered all functions and
+  // variables, avoiding COMGR/program creation from inside a late dlopen constructor.
+  success = true;
+  return module;
 }
 
 FatBinaryInfo** StatCO::AddKpackBinary(const void* hipk_metadata, const void* wrapper_addr,
                                        bool& success) {
   std::scoped_lock lock(sclock_);
+  (void)hipk_metadata;
 
-  // Use wrapper_addr as the key (same as data pointer for normal path)
-  // This allows DigestFatBinary to access the wrapper and detect HIPK magic
-  module_to_hostModule_.insert(std::make_pair(&modules_[wrapper_addr], wrapper_addr));
+  // Use wrapper_addr as the key so the lazy DigestFatBinary path can rediscover both the DSO path
+  // and the HIPK metadata from the compiler wrapper.
+  auto module_iter = modules_.try_emplace(wrapper_addr, nullptr).first;
+  FatBinaryInfo** module = &module_iter->second;
+  module_to_hostModule_.try_emplace(module, wrapper_addr);
 
-  if (!owner_.IsInitialized()) {
-    // Deferred loading: modules_[wrapper_addr] is nullptr, DigestFatBinary will handle it later
-    success = true;
-    return &modules_[wrapper_addr];
-  }
-
-  // Immediate loading: call DigestFatBinary which handles kpack detection
-  hipError_t err = DigestFatBinary(wrapper_addr, modules_[wrapper_addr]);
-  success = (err == hipSuccess);
-  return &modules_[wrapper_addr];
+  success = true;
+  return module;
 }
 
-hipError_t StatCO::RemoveFatBinary(FatBinaryInfo** module) {
-  std::scoped_lock lock(sclock_);
+bool StatCO::DetachFatBinaryLocked(FatBinaryInfo** module, FatBinaryCleanup& cleanup) {
+  auto hostModuleIter = module_to_hostModule_.find(module);
+  if (hostModuleIter == module_to_hostModule_.end()) {
+    return false;
+  }
 
   auto hostVarsIter = module_to_hostVars_.find(module);
   if (hostVarsIter != module_to_hostVars_.end()) {
-    for (auto& hostVar : hostVarsIter->second) {
+    for (const auto* hostVar : hostVarsIter->second) {
       auto varIter = vars_.find(hostVar);
-      if (varIter == vars_.end()) {
-        LogPrintfError("RemoveFatBinary: Unable to find module 0x%x hostVar 0x%x", module, hostVar);
-      } else {
-        delete varIter->second;
+      if (varIter != vars_.end()) {
+        cleanup.vars.push_back(varIter->second);
         vars_.erase(varIter);
       }
     }
@@ -399,106 +394,128 @@ hipError_t StatCO::RemoveFatBinary(FatBinaryInfo** module) {
 
   auto managedVarsIter = managedVars_.find(module);
   if (managedVarsIter != managedVars_.end()) {
-    for (auto& managedVar : managedVarsIter->second) {
-      hipError_t err = hipSuccess;
-      if (managedVar->GetAllocFlag()) {  // check if it is a managed or host alloc
-        err = ihipFree(*(static_cast<void**>(managedVar->GetManagedVarPtr())));
-      } else {
-        void** pointer = static_cast<void**>(managedVar->GetManagedVarPtr());
-        amd::Os::releaseMemory(*pointer, managedVar->GetSize());
-      }
-      assert(err == hipSuccess);
-      delete managedVar;
-    }
+    cleanup.managed_vars.insert(cleanup.managed_vars.end(), managedVarsIter->second.begin(),
+                                managedVarsIter->second.end());
     managedVars_.erase(managedVarsIter);
   }
 
   auto hostFuncsIter = module_to_hostFunctions_.find(module);
   if (hostFuncsIter != module_to_hostFunctions_.end()) {
-    for (auto& hostFunc : hostFuncsIter->second) {
+    for (const auto* hostFunc : hostFuncsIter->second) {
       auto funcIter = functions_.find(hostFunc);
-      if (funcIter == functions_.end()) {
-        LogPrintfError("RemoveFatBinary: Unable to find module 0x%x hostFunc 0x%x", module,
-                       hostFunc);
-      } else {
-        delete funcIter->second;
+      if (funcIter != functions_.end()) {
+        cleanup.functions.push_back(funcIter->second);
         functions_.erase(funcIter);
       }
     }
     module_to_hostFunctions_.erase(hostFuncsIter);
   }
 
-  auto hostModuleIter = module_to_hostModule_.find(module);
-  if (hostModuleIter != module_to_hostModule_.end()) {
-    auto hostModule = hostModuleIter->second;
-    auto moduleIter = modules_.find(hostModule);
-    if (moduleIter != modules_.end()) {
-      delete moduleIter->second;
-      modules_.erase(moduleIter);
-    } else {
-      LogPrintfError("RemoveFatBinary: Unable to find module 0x%x via hostModule 0x%x", module,
-                     hostModule);
+  auto moduleIter = modules_.find(hostModuleIter->second);
+  if (moduleIter != modules_.end()) {
+    if (moduleIter->second != nullptr) {
+      cleanup.fat_binaries.push_back(moduleIter->second);
     }
-    module_to_hostModule_.erase(hostModuleIter);
+    modules_.erase(moduleIter);
+  }
+  module_to_hostModule_.erase(hostModuleIter);
+  return true;
+}
+
+void StatCO::DestroyFatBinaryCleanup(FatBinaryCleanup& cleanup) {
+  // Compiler-generated unregister callbacks can run after the host language runtime has partially
+  // finalized. Do not invoke general device synchronization from that context. Detached kernels
+  // and programs are reference-counted by any commands that still use them.
+
+  for (auto* function : cleanup.functions) {
+    delete function;
+  }
+  for (auto* var : cleanup.vars) {
+    delete var;
+  }
+  for (auto* managed_var : cleanup.managed_vars) {
+    for (const auto& device : g_devices) {
+      amd::Memory* mem = nullptr;
+      if (managed_var->GetDeviceVarPtr(&mem, device->deviceId()) == hipSuccess && mem != nullptr) {
+        std::ignore = ihipFree(memDevPtr(mem));
+      }
+    }
+
+    void** pointer = static_cast<void**>(managed_var->GetManagedVarPtr());
+    if (pointer != nullptr && *pointer != nullptr) {
+      if (managed_var->GetAllocFlag()) {
+        std::ignore = ihipFree(*pointer);
+      } else {
+        amd::Os::releaseMemory(*pointer, managed_var->GetSize());
+      }
+    }
+    delete managed_var;
+  }
+  for (auto* fat_binary : cleanup.fat_binaries) {
+    delete fat_binary;
+  }
+}
+
+hipError_t StatCO::RemoveFatBinary(FatBinaryInfo** module) {
+  if (module == nullptr) {
+    return hipSuccess;
   }
 
+  FatBinaryCleanup cleanup;
+  {
+    std::scoped_lock lock(sclock_);
+    if (!DetachFatBinaryLocked(module, cleanup)) {
+      return hipSuccess;
+    }
+  }
+
+  DestroyFatBinaryCleanup(cleanup);
   return hipSuccess;
 }
 
 // =================================================================================================
 void StatCO::RemoveAllFatBinaries() {
-  std::scoped_lock lock(sclock_);
+  FatBinaryCleanup cleanup;
+  {
+    std::scoped_lock lock(sclock_);
 
-  // Clear mapping tables that associate modules with host-side constructs
-  module_to_hostModule_.clear();
-  module_to_hostFunctions_.clear();
-  module_to_hostVars_.clear();
-
-  // Delete all registered variables and clear the container
-  for (auto const& [_, var] : vars_) {
-    delete var;
-  }
-  vars_.clear();
-
-  // Clean up managed variables - these require special handling for memory on each device
-  for (auto& [_, managed_vars] : managedVars_) {
-    for (auto& managed_var : managed_vars) {
-      // Free device-specific allocations across all devices
-      for (auto dev : g_devices) {
-        amd::Memory* mem = nullptr;
-        if (managed_var->GetDeviceVarPtr(&mem, dev->deviceId()) == hipSuccess && mem) {
-          // Free device memory (also deletes the device ptr)
-          [[maybe_unused]] hipError_t err = ihipFree(memDevPtr(mem));
-          assert(err == hipSuccess);
-        }
-      }
-
-      // Free the managed memory allocation itself
-      void** managed_ptr = static_cast<void**>(managed_var->GetManagedVarPtr());
-      if (managed_var->GetAllocFlag()) {
-        // Memory was allocated with ihipMallocManaged - use ihipFree
-        [[maybe_unused]] hipError_t err = ihipFree(*managed_ptr);
-        assert(err == hipSuccess);
-      } else {
-        // Memory was allocated with OS-level allocator - use OS release
-        amd::Os::releaseMemory(*managed_ptr, managed_var->GetSize());
-      }
-      delete managed_var;
+    std::vector<FatBinaryInfo**> modules;
+    modules.reserve(module_to_hostModule_.size());
+    for (const auto& [module, _] : module_to_hostModule_) {
+      modules.push_back(module);
     }
-  }
-  managedVars_.clear();
+    for (auto* module : modules) {
+      std::ignore = DetachFatBinaryLocked(module, cleanup);
+    }
 
-  // Delete all registered functions and clear the container
-  for (auto const& [_, func] : functions_) {
-    delete func;
-  }
-  functions_.clear();
+    // Defensively reclaim any orphaned entries if prior registration failed part-way through.
+    for (const auto& [_, function] : functions_) {
+      cleanup.functions.push_back(function);
+    }
+    functions_.clear();
+    for (const auto& [_, var] : vars_) {
+      cleanup.vars.push_back(var);
+    }
+    vars_.clear();
+    for (const auto& [_, managed_vars] : managedVars_) {
+      cleanup.managed_vars.insert(cleanup.managed_vars.end(), managed_vars.begin(),
+                                  managed_vars.end());
+    }
+    managedVars_.clear();
+    for (const auto& [_, fat_binary] : modules_) {
+      if (fat_binary != nullptr) {
+        cleanup.fat_binaries.push_back(fat_binary);
+      }
+    }
+    modules_.clear();
 
-  // Delete all fat binary info objects and clear the modules container
-  for (auto const& [_, fb_info] : modules_) {
-    delete fb_info;
+    module_to_hostModule_.clear();
+    module_to_hostFunctions_.clear();
+    module_to_hostVars_.clear();
+    managedVarsDevicePtrInitalized_.clear();
   }
-  modules_.clear();
+
+  DestroyFatBinaryCleanup(cleanup);
 }
 
 hipError_t StatCO::RegisterFunction(const void* hostFunction, Function* func) {
@@ -526,28 +543,33 @@ const char* StatCO::GetFuncName(const void* hostFunction) {
   return it->second->GetName().c_str();
 }
 
+hipError_t StatCO::EnsureFatBinaryLoaded(FatBinaryInfo** module) {
+  std::scoped_lock lock(sclock_);
+
+  if (module == nullptr) {
+    return hipErrorInvalidDeviceFunction;
+  }
+
+  auto host_module_iter = module_to_hostModule_.find(module);
+  if (host_module_iter == module_to_hostModule_.end()) {
+    return hipErrorInvalidDeviceFunction;
+  }
+
+  if (*module == nullptr) {
+    return DigestFatBinary(host_module_iter->second, *module);
+  }
+  return hipSuccess;
+}
+
 hipError_t StatCO::GetFunc(hipFunction_t* hfunc, const void* hostFunction, int deviceId) {
+  std::scoped_lock lock(sclock_);
+
   const auto it = functions_.find(hostFunction);
   if (it == functions_.end()) {
     return hipErrorInvalidSymbol;
   }
 
-  // Lazy load
-  FatBinaryInfo** module = it->second->ModuleInfo();
-  if (module != nullptr) {
-    std::scoped_lock lock(sclock_);
-    if (*(module) == nullptr) {
-      hipError_t err = DigestFatBinary(module_to_hostModule_[module], *module);
-
-      if (err != hipSuccess) {
-        return err;
-      }
-    }
-  } else {
-    // Module was nullptr
-    return hipErrorInvalidDeviceFunction;
-  }
-
+  IHIP_RETURN_ONFAIL(EnsureFatBinaryLoaded(it->second->ModuleInfo()));
   return it->second->GetStatFunc(hfunc, deviceId);
 }
 
@@ -560,12 +582,7 @@ hipError_t StatCO::GetFuncAttr(hipFuncAttributes* func_attr, const void* hostFun
     return hipErrorInvalidSymbol;
   }
 
-  // Lazy load
-  FatBinaryInfo** module = it->second->ModuleInfo();
-  if (*(module) == nullptr) {
-    std::ignore = DigestFatBinary(module_to_hostModule_[module], *module);
-  }
-
+  IHIP_RETURN_ONFAIL(EnsureFatBinaryLoaded(it->second->ModuleInfo()));
   return it->second->GetStatFuncAttr(func_attr, deviceId);
 }
 
@@ -591,11 +608,7 @@ hipError_t StatCO::GetGlobalVar(const void* hostVar, int deviceId, hipDeviceptr_
     return hipErrorInvalidSymbol;
   }
 
-  // Lazy load
-  FatBinaryInfo** module = it->second->ModuleInfo();
-  if (*(module) == nullptr) {
-    std::ignore = DigestFatBinary(module_to_hostModule_[module], *module);
-  }
+  IHIP_RETURN_ONFAIL(EnsureFatBinaryLoaded(it->second->ModuleInfo()));
 
   amd::Memory* mem = nullptr;
   IHIP_RETURN_ONFAIL(it->second->GetStatDeviceVar(&mem, deviceId));
@@ -612,7 +625,14 @@ hipError_t StatCO::GetGlobalVar(const void* hostVar, int deviceId, hipDeviceptr_
 }
 
 hipError_t StatCO::RegisterManagedVar(Var* var) {
+  std::scoped_lock lock(sclock_);
+
   managedVars_[var->ModuleInfo()].push_back(var);
+  // A managed variable can arrive in a DSO loaded after a device was already initialized. Force the
+  // next per-device managed-symbol pass to include the newly registered module.
+  for (auto& [_, initialized] : managedVarsDevicePtrInitalized_) {
+    initialized = false;
+  }
   return hipSuccess;
 }
 
@@ -640,11 +660,7 @@ hipError_t StatCO::InitManagedVarDevicePtr(int deviceId) {
       !managedVarsDevicePtrInitalized_[deviceId]) {
     for (auto& vecIter : managedVars_) {
       for (auto& var : vecIter.second) {
-        // Lazy load
-        FatBinaryInfo** module = var->ModuleInfo();
-        if (*(module) == nullptr) {
-          std::ignore = DigestFatBinary(module_to_hostModule_[module], *module);
-        }
+        IHIP_RETURN_ONFAIL(EnsureFatBinaryLoaded(var->ModuleInfo()));
         hip::Stream* stream = g_devices.at(deviceId)->NullStream();
         if (stream == nullptr) {
           ClPrint(amd::LOG_ERROR, amd::LOG_API, "Host Queue is NULL");

@@ -352,10 +352,7 @@ def get_att_paths(args):
     if args.att_library_path:
         library_paths.extend(args.att_library_path)
     elif os.environ.get("ROCPROF_ATT_LIBRARY_PATH"):
-        # Return a list (not a bare str) so the caller iterates over paths and
-        # not over the individual characters of the string. Support a
-        # colon-separated list for consistency with LD_LIBRARY_PATH.
-        for itr in os.environ["ROCPROF_ATT_LIBRARY_PATH"].split(":"):
+        for itr in os.environ["ROCPROF_ATT_LIBRARY_PATH"].split(os.pathsep):
             if itr and itr not in library_paths:
                 library_paths += [itr]
     else:

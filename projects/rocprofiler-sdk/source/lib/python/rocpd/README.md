@@ -139,6 +139,7 @@ base table names only when you need to understand the schema or write custom JOI
 | rocpd_kernel_dispatch | GPU kernel launch (agent, kernel, queue, stream, grid/workgroup sizes). | id, agent_id, kernel_id, queue_id, stream_id, start, end, grid_size_*, workgroup_size_* |
 | rocpd_memory_copy | Memory copy operation (source/destination, size, time range). | id, start, end, size, name_id, src_agent_id, dst_agent_id |
 | rocpd_memory_allocate | Memory allocation or free (type: ALLOC/FREE/REALLOC/RECLAIM; level: REAL/VIRTUAL/SCRATCH). | id, type, level, start, end, size, address, agent_id |
+| rocpd_pc_sampling | PC sampling record. | id, method, timestamp, exec_mask, dispatch_id, instruction, correlation_id, wave_issued_instruction, instruction_type, stall_reason, wave_count |
 
 ### Common views
 
@@ -561,3 +562,23 @@ Purpose: One memory allocation event (ALLOC, FREE, REALLOC, or RECLAIM) at REAL,
 | stream_id | References rocpd_info_stream.id (may be null). |
 | event_id | References rocpd_event.id (may be null). |
 | extdata | JSON for any extra data. |
+
+**rocpd_pc_sampling**
+
+Purpose: One PC-sampling record. The method column disambiguates host-trap and stochastic records that share the table.
+
+| Field | Meaning |
+| ----- | ------- |
+| id | Primary key. |
+| guid | Database/import identifier. |
+| method | One of: 'host_trap', 'stochastic'. |
+| timestamp | Sample timestamp (nanoseconds). |
+| exec_mask | Active SIMD lanes when sampled. |
+| dispatch_id | Originating kernel dispatch ID. |
+| instruction | Decoded instruction, if available. |
+| instruction_comment | Instruction comment or source-line information, if available. |
+| correlation_id | API launch correlation ID. |
+| wave_issued_instruction | Stochastic-only flag matching CSV `Wave_Issued_Instruction`; null for host-trap rows. |
+| instruction_type | Stochastic-only instruction type matching CSV `Instruction_Type`; null for host-trap rows. |
+| stall_reason | Stochastic-only stall reason matching CSV `Stall_Reason`; null for host-trap rows. |
+| wave_count | Stochastic-only active wave count matching CSV `Wave_Count`; null for host-trap rows. |

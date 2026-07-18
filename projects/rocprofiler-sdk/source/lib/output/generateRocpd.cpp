@@ -45,6 +45,7 @@
 
 #include <rocprofiler-sdk/fwd.h>
 #include <rocprofiler-sdk/marker/api_id.h>
+#include <rocprofiler-sdk/pc_sampling.h>
 #include <rocprofiler-sdk/cxx/details/tokenize.hpp>
 #include <rocprofiler-sdk/cxx/hash.hpp>
 #include <rocprofiler-sdk/cxx/operators.hpp>
@@ -1026,6 +1027,8 @@ write_rocpd(
     const generator<rocprofiler_buffer_tracing_rccl_api_record_t>&          rccl_api_gen,
     const generator<rocprofiler_buffer_tracing_rocdecode_api_ext_record_t>& rocdecode_api_gen,
     const generator<tool_counter_record_t>&                                 counter_collection_gen,
+    const generator<rocprofiler_tool_pc_sampling_host_trap_record_t>&       pc_sampling_host_trap_gen,
+    const generator<rocprofiler_tool_pc_sampling_stochastic_record_t>&      pc_sampling_stochastic_gen,
     const generator<tool_spm_counter_record_t>&                             spm_collection_gen,
     const generator<rocprofiler_buffer_tracing_ompt_record_t>&              ompt_gen,
     const generator<rocprofiler_buffer_tracing_hip_graph_record_t>&         graph_launch_gen,
@@ -2281,6 +2284,74 @@ write_rocpd(
         auto _sqlgenperf_rocpd = get_simple_timer("rocpd_memory_allocate");
         insert_memory_alloc_data(memory_alloc_gen);
         insert_memory_alloc_data(scratch_memory_gen);
+    }
+
+    // PC sampling data (host_trap and stochastic share the same table schema)
+    {
+        auto _sqlgenperf_rocpd = get_simple_timer("rocpd_pc_sampling");
+
+        auto insert_pc_sampling = [&db, &tool_metadata](const auto& _gen, std::string_view method) {
+            auto _deferred = sql::deferred_transaction{db.conn};
+            for(auto pitr : _gen)
+            {
+                for(const auto& record : _gen.get(pitr))
+                {
+                    using record_type = common::mpl::unqualified_type_t<decltype(record)>;
+
+                    std::string inst;
+                    std::string inst_comment;
+                    if(record.inst_index == -1)
+                    {
+                        inst_comment =
+                            "Unrecognized code object id, physical virtual address of PC:" +
+                            std::to_string(record.pc_sample_record.pc.code_object_offset);
+                    }
+                    else
+                    {
+                        inst         = tool_metadata.get_instruction(record.inst_index);
+                        inst_comment = tool_metadata.get_comment(record.inst_index);
+                    }
+
+                    auto values = std::vector<sql_insert_value>{
+                        insert_value("method", method),
+                        insert_value("timestamp", record.pc_sample_record.timestamp),
+                        insert_value("exec_mask", record.pc_sample_record.exec_mask),
+                        insert_value("dispatch_id", record.pc_sample_record.dispatch_id),
+                        insert_value("instruction", inst, allow_empty_string{}),
+                        insert_value("instruction_comment", inst_comment, allow_empty_string{}),
+                        insert_value("correlation_id",
+                                     record.pc_sample_record.correlation_id.internal),
+                    };
+
+                    if constexpr(std::is_same_v<record_type,
+                                                rocprofiler_tool_pc_sampling_stochastic_record_t>)
+                    {
+                        const auto* instruction_type =
+                            rocprofiler_get_pc_sampling_instruction_type_name(
+                                static_cast<rocprofiler_pc_sampling_instruction_type_t>(
+                                    record.pc_sample_record.inst_type));
+                        const auto* stall_reason =
+                            rocprofiler_get_pc_sampling_instruction_not_issued_reason_name(
+                                static_cast<rocprofiler_pc_sampling_instruction_not_issued_reason_t>(
+                                    record.pc_sample_record.snapshot.reason_not_issued));
+
+                        values.emplace_back(insert_value(
+                            "wave_issued_instruction",
+                            static_cast<unsigned int>(record.pc_sample_record.wave_issued)));
+                        values.emplace_back(insert_value("instruction_type", instruction_type));
+                        values.emplace_back(insert_value("stall_reason", stall_reason));
+                        values.emplace_back(insert_value(
+                            "wave_count",
+                            static_cast<unsigned int>(record.pc_sample_record.wave_count)));
+                    }
+
+                    get_insert_statement(db, "rocpd_pc_sampling{{uuid}}", std::move(values));
+                }
+            }
+        };
+
+        insert_pc_sampling(pc_sampling_host_trap_gen, "host_trap");
+        insert_pc_sampling(pc_sampling_stochastic_gen, "stochastic");
     }
 
     {

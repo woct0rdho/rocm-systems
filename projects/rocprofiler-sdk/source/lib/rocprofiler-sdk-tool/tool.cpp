@@ -95,6 +95,7 @@
 #include <atomic>
 #include <cassert>
 #include <cerrno>
+#include <cctype>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
@@ -1502,17 +1503,113 @@ struct agent_profiles
         profiles;
 };
 
+struct counter_dispatch_info
+{
+    rocprofiler_counter_id_t id         = {};
+    std::string              description{};
+    std::string              expression{};
+};
+
+using counter_dispatch_info_map_t = std::unordered_map<std::string, counter_dispatch_info>;
+
+bool
+is_dispatch_non_windowable_description(std::string_view description)
+{
+    return description.find("Perf_Windowing not supported") != std::string_view::npos ||
+           description.find("Not windowable") != std::string_view::npos;
+}
+
+const counter_dispatch_info_map_t&
+get_agent_dispatch_counter_info(rocprofiler_agent_id_t agent_id)
+{
+    using cache_t = common::Synchronized<std::unordered_map<rocprofiler_agent_id_t,
+                                                            counter_dispatch_info_map_t>>;
+    static auto& counter_cache = *common::static_object<cache_t>::construct();
+
+    return counter_cache.wlock([agent_id](auto& cache) -> const counter_dispatch_info_map_t& {
+        if(const auto* itr = common::get_val(cache, agent_id)) return *itr;
+
+        auto& counter_info = cache[agent_id];
+        auto  status       = rocprofiler_iterate_agent_supported_counters(
+            agent_id,
+            [](rocprofiler_agent_id_t,
+               rocprofiler_counter_id_t* counters,
+               size_t                    num_counters,
+               void*                     user_data) {
+                auto* info_map = static_cast<counter_dispatch_info_map_t*>(user_data);
+                for(size_t i = 0; i < num_counters; ++i)
+                {
+                    auto info = rocprofiler_counter_info_v1_t{};
+                    ROCPROFILER_CALL(rocprofiler_query_counter_info(
+                                         counters[i], ROCPROFILER_COUNTER_INFO_VERSION_1, &info),
+                                     "query counter info");
+                    info_map->emplace(info.name,
+                                      counter_dispatch_info{counters[i],
+                                                            info.description ? info.description : "",
+                                                            info.expression ? info.expression : ""});
+                }
+
+                return ROCPROFILER_STATUS_SUCCESS;
+            },
+            &counter_info);
+
+        ROCPROFILER_CALL(status, "iterate agent supported counters");
+        return counter_info;
+    });
+}
+
+std::optional<std::string_view>
+find_non_windowable_dependency(std::string_view                    counter_name,
+                               const counter_dispatch_info_map_t&  counter_info_by_name,
+                               std::unordered_set<std::string_view>& visited)
+{
+    const auto itr = counter_info_by_name.find(std::string{counter_name});
+    if(itr == counter_info_by_name.end()) return std::nullopt;
+
+    const auto info_name = std::string_view{itr->first};
+    if(!visited.emplace(info_name).second) return std::nullopt;
+
+    if(is_dispatch_non_windowable_description(itr->second.description)) return info_name;
+
+    auto expression = std::string_view{itr->second.expression};
+    for(size_t i = 0; i < expression.size();)
+    {
+        while(i < expression.size() &&
+              !(std::isalpha(static_cast<unsigned char>(expression[i])) || expression[i] == '_'))
+            ++i;
+
+        const size_t begin = i;
+        while(i < expression.size() &&
+              (std::isalnum(static_cast<unsigned char>(expression[i])) || expression[i] == '_'))
+            ++i;
+
+        if(begin == i) continue;
+
+        const auto token = expression.substr(begin, i - begin);
+        if(counter_info_by_name.find(std::string{token}) != counter_info_by_name.end())
+        {
+            if(auto dep = find_non_windowable_dependency(token, counter_info_by_name, visited))
+            {
+                return dep;
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
 std::optional<rocprofiler_counter_config_id_t>
 construct_counter_collection_profile(rocprofiler_agent_id_t       agent_id,
                                      const std::set<std::string>& counters)
 {
-    static const auto gpu_agents_counter_info = get_agent_counter_info();
     auto              profile                 = std::optional<rocprofiler_counter_config_id_t>{};
     auto              counters_v              = counter_vec_t{};
     auto              found_v                 = std::vector<std::string_view>{};
     auto              not_found_counters_v    = std::vector<std::string_view>{};
+    auto              unsupported_counters_v  = std::vector<std::string>{};
     const auto*       agent_v                 = tool_metadata->get_agent(agent_id);
-    auto              expected_v              = counters.size();
+    const auto        gpu_agents_counter_info = get_agent_counter_info();
+    const auto&       counter_info_by_name    = get_agent_dispatch_counter_info(agent_id);
 
     if(gpu_agents_counter_info.find(agent_id) == gpu_agents_counter_info.end())
     {
@@ -1540,32 +1637,45 @@ construct_counter_collection_profile(rocprofiler_agent_id_t       agent_id,
             // doesn't this agent's device id)
             if(dev_id_v != agent_v->gpu_index)
             {
-                --expected_v;  // is not expected
                 continue;
             }
         }
 
         // search the gpu agent counter info for a counter with a matching name
         bool counter_found = false;
-        auto counter_vec   = gpu_agents_counter_info.find(agent_id);
-        ROCP_FATAL_IF(counter_vec == gpu_agents_counter_info.end())
-            << "No counter information found for agent " << agent_v->node_id << " (gpu-"
-            << agent_v->gpu_index << ", " << agent_v->name << "). Unable to find counter: " << itr;
-
-        for(const auto& citr : counter_vec->second)
+        if(const auto info_itr = counter_info_by_name.find(std::string{name_v});
+           info_itr != counter_info_by_name.end())
         {
-            if(name_v == std::string_view{citr.name})
+            std::unordered_set<std::string_view> visited{};
+            if(auto dep = find_non_windowable_dependency(
+                   info_itr->first, counter_info_by_name, visited))
             {
-                counters_v.emplace_back(citr.id);
-                found_v.emplace_back(itr);
-                counter_found = true;
+                unsupported_counters_v.emplace_back(
+                    fmt::format("{} (depends on non-windowable {})", itr, *dep));
             }
+            else
+            {
+                counters_v.emplace_back(info_itr->second.id);
+                found_v.emplace_back(itr);
+            }
+            counter_found = true;
         }
 
         if(!counter_found) not_found_counters_v.emplace_back(itr);
     }
 
-    if(expected_v != counters_v.size())
+    if(!unsupported_counters_v.empty())
+    {
+        auto unsupported_counters = fmt::format("{}", fmt::join(unsupported_counters_v, ", "));
+        ROCP_WARNING << "Skipping dispatch-windowed counters for agent " << agent_v->node_id
+                     << " (gpu-" << agent_v->gpu_index << ", " << agent_v->name
+                     << ") because rocprofv3 dispatch counting uses perf windows and these "
+                        "metrics depend on non-windowable counters: ["
+                     << unsupported_counters
+                     << "]. Use device counting service for those metrics instead.";
+    }
+
+    if(!not_found_counters_v.empty())
     {
         auto requested_counters =
             fmt::format("{}", fmt::join(counters.begin(), counters.end(), ", "));

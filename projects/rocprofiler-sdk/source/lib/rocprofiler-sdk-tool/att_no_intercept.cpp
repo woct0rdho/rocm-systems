@@ -140,36 +140,6 @@ register_kernel_symbol_locked(agent_state_t& state, const kernel_symbol_t& symbo
     add_range_locked(state, symbol.code_object_id, elf_vaddr, symbol_size, targeted);
 }
 
-void
-start_agent_context(agent_state_t& state)
-{
-    auto lock = std::unique_lock{state.mutex};
-    if(state.started || state.finalized) return;
-
-    state.started = true;
-    ROCP_INFO << fmt::format("starting ATT no-intercept context for agent {}", state.id.handle);
-    check_status(rocprofiler_start_context(state.context), "ATT no-intercept context start");
-}
-
-void
-stop_agent_context(agent_state_t& state)
-{
-    auto stop_context = false;
-    {
-        auto lock       = std::unique_lock{state.mutex};
-        stop_context    = state.started;
-        state.started   = false;
-        state.finalized = true;
-    }
-
-    if(!stop_context) return;
-
-    auto status = rocprofiler_stop_context(state.context);
-    if(status != ROCPROFILER_STATUS_SUCCESS && status != ROCPROFILER_STATUS_ERROR_CONTEXT_NOT_FOUND)
-    {
-        check_status(status, "ATT no-intercept context stop");
-    }
-}
 }  // namespace
 
 bool
@@ -195,7 +165,9 @@ configure(shader_data_forwarder_t forwarder, std::unordered_set<size_t> filter_r
 }
 
 agent_trace_config_t
-configure_agent(rocprofiler_agent_id_t id, uint64_t consecutive_kernels)
+configure_agent(rocprofiler_agent_id_t  id,
+                uint64_t                consecutive_kernels,
+                rocprofiler_context_id_t context)
 {
     auto lock = std::unique_lock{manager_mutex};
     if(auto itr = agent_states()->find(id.handle); itr != agent_states()->end())
@@ -205,14 +177,28 @@ configure_agent(rocprofiler_agent_id_t id, uint64_t consecutive_kernels)
     state->id                  = id;
     state->consecutive_kernels = consecutive_kernels;
     state->userdata.ptr        = state.get();
+    state->context             = context;
 
-    check_status(rocprofiler_create_context(&state->context), "ATT no-intercept context creation");
+    if(state->context.handle == 0)
+        check_status(rocprofiler_create_context(&state->context),
+                     "ATT no-intercept context creation");
     backend_create(*state);
 
     auto trace_config = agent_trace_config_t{state->context, state->userdata};
     agent_states()->emplace(id.handle, std::move(state));
     ROCP_INFO << fmt::format("configured ATT no-intercept context for agent {}", id.handle);
     return trace_config;
+}
+
+void
+mark_started()
+{
+    auto lock = std::unique_lock{manager_mutex};
+    for(auto& itr : *agent_states())
+    {
+        auto state_lock     = std::unique_lock{itr.second->mutex};
+        itr.second->started = true;
+    }
 }
 
 void
@@ -244,8 +230,6 @@ code_object_load(const rocprofiler_callback_tracing_code_object_load_data_t& dat
     }
 
     backend_code_object_load(*state, data);
-
-    start_agent_context(*state);
 }
 
 void
@@ -272,12 +256,32 @@ kernel_symbol_load(const kernel_symbol_t& data, bool is_targeted)
 void
 finalize()
 {
-    auto lock = std::unique_lock{manager_mutex};
+    auto        lock      = std::unique_lock{manager_mutex};
+    static bool finalized = false;
+    if(finalized) return;
+    finalized = true;
+
+    auto stopped_contexts = std::unordered_set<uint64_t>{};
 
     for(auto& itr : *agent_states())
     {
-        auto& state = *itr.second;
-        stop_agent_context(state);
+        auto& state        = *itr.second;
+        auto  stop_context = false;
+        {
+            auto state_lock = std::unique_lock{state.mutex};
+            stop_context =
+                state.started && stopped_contexts.emplace(state.context.handle).second;
+            state.started   = false;
+            state.finalized = true;
+        }
+
+        if(stop_context)
+        {
+            auto status = rocprofiler_stop_context(state.context);
+            if(status != ROCPROFILER_STATUS_SUCCESS &&
+               status != ROCPROFILER_STATUS_ERROR_CONTEXT_NOT_FOUND)
+                check_status(status, "ATT no-intercept context stop");
+        }
         backend_destroy(state);
     }
 

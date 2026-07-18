@@ -352,7 +352,11 @@ def get_att_paths(args):
     if args.att_library_path:
         library_paths.extend(args.att_library_path)
     elif os.environ.get("ROCPROF_ATT_LIBRARY_PATH"):
-        return os.environ.get("ROCPROF_ATT_LIBRARY_PATH")
+        library_paths.extend(
+            itr
+            for itr in os.environ["ROCPROF_ATT_LIBRARY_PATH"].split(os.pathsep)
+            if itr
+        )
     else:
         default_lib_path_env = os.environ.get("LD_LIBRARY_PATH", "").split(":") + [
             f"{ROCM_DIR}/lib"

@@ -88,7 +88,9 @@ struct triple_buffer_shared_data_t
     /// count bounded; the public API rejects values above this.
     static constexpr size_t MAX_SLOTS = 16;
 
-    att_queue_t* queue{nullptr};  // non-owning; ThreadTracerAgent owns the queue
+    att_queue_t*      queue{nullptr};  // non-owning; ThreadTracerAgent owns the queue
+    std::atomic<bool> producer_waiting{false};
+    std::atomic<bool> producer_ready{false};
 
     /// Global shutdown flag. Producer sets true after draining final chunks
     /// and notifies every slot's cv so consumers can exit.
@@ -122,6 +124,7 @@ struct triple_buffer_producer_data_t
     std::shared_ptr<triple_buffer_shared_data_t> shared{};
     std::unique_ptr<hsa::SQTTBufferingPackets>   buffer_packet{};
     int64_t                                      shader_engine_id{0};
+    bool                                         gfx11_workarounds{false};
 };
 
 // Worker flags have three states: stop (either stopped or stopping), running and (global)destructor

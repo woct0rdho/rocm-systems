@@ -6,6 +6,12 @@ rocprofiler_activate_clang_tidy()
 
 # Adding main rocprofv3
 configure_file(rocprofv3.py ${PROJECT_BINARY_DIR}/${CMAKE_INSTALL_BINDIR}/rocprofv3 @ONLY)
+foreach(_windows_module _rocprofv3_windows.py _rocprofv3_windows_job.py)
+    configure_file(
+        ${_windows_module}
+        ${PROJECT_BINARY_DIR}/${CMAKE_INSTALL_BINDIR}/${_windows_module}
+        COPYONLY)
+endforeach()
 
 install(
     FILES ${PROJECT_BINARY_DIR}/${CMAKE_INSTALL_BINDIR}/rocprofv3
@@ -13,6 +19,28 @@ install(
     PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ
                 WORLD_EXECUTE
     COMPONENT tools)
+
+install(
+    FILES
+        ${PROJECT_BINARY_DIR}/${CMAKE_INSTALL_BINDIR}/_rocprofv3_windows.py
+        ${PROJECT_BINARY_DIR}/${CMAKE_INSTALL_BINDIR}/_rocprofv3_windows_job.py
+    DESTINATION ${CMAKE_INSTALL_BINDIR}
+    PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ
+    COMPONENT tools)
+
+if(WIN32)
+    foreach(_windows_launcher rocprofv3.cmd rocprofv3-avail.cmd)
+        configure_file(
+            ${_windows_launcher}.in
+            ${PROJECT_BINARY_DIR}/${CMAKE_INSTALL_BINDIR}/${_windows_launcher}
+            COPYONLY)
+        install(
+            FILES ${PROJECT_BINARY_DIR}/${CMAKE_INSTALL_BINDIR}/${_windows_launcher}
+            DESTINATION ${CMAKE_INSTALL_BINDIR}
+            PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ
+            COMPONENT tools)
+    endforeach()
+endif()
 
 configure_file(rocprofv3-avail.py
                ${PROJECT_BINARY_DIR}/${CMAKE_INSTALL_BINDIR}/rocprofv3-avail COPYONLY)
@@ -24,6 +52,7 @@ install(
                 WORLD_EXECUTE
     COMPONENT tools)
 
+if(NOT ROCPROFILER_BUILD_WINDOWS_MINIMAL)
 configure_file(rocprof-attach.py
                ${PROJECT_BINARY_DIR}/${CMAKE_INSTALL_BINDIR}/rocprof-attach COPYONLY)
 
@@ -69,6 +98,7 @@ foreach(_EXE IN LISTS ROCPD_EXECUTABLES)
                     WORLD_READ WORLD_EXECUTE
         COMPONENT rocpd)
 endforeach()
+endif()
 
 if(ROCPROFILER_BUILD_TESTS)
     add_subdirectory(tests)

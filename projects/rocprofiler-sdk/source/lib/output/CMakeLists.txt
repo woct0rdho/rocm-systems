@@ -64,20 +64,26 @@ target_sources(rocprofiler-sdk-output-library PRIVATE ${TOOL_OUTPUT_SOURCES}
 # directly link to the sqlite3 library.
 target_link_libraries(
     rocprofiler-sdk-output-library
-    PUBLIC rocprofiler-sdk::rocprofiler-sdk-rocpd-library
-           rocprofiler-sdk::rocprofiler-sdk-aqlprofile
+    PUBLIC rocprofiler-sdk::rocprofiler-sdk-aqlprofile
     PRIVATE rocprofiler-sdk::rocprofiler-sdk-headers
             rocprofiler-sdk::rocprofiler-sdk-build-flags
             rocprofiler-sdk::rocprofiler-sdk-sanitizer
             rocprofiler-sdk::rocprofiler-sdk-common-library
             rocprofiler-sdk::rocprofiler-sdk-cereal
-            rocprofiler-sdk::rocprofiler-sdk-perfetto
-            rocprofiler-sdk::rocprofiler-sdk-otf2
-            rocprofiler-sdk::rocprofiler-sdk-amd-comgr
-            rocprofiler-sdk::rocprofiler-sdk-dw
-            rocprofiler-sdk::rocprofiler-sdk-elf)
+            rocprofiler-sdk::rocprofiler-sdk-amd-comgr)
+if(NOT ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+    target_link_libraries(
+        rocprofiler-sdk-output-library
+        PUBLIC rocprofiler-sdk::rocprofiler-sdk-rocpd-library
+        PRIVATE rocprofiler-sdk::rocprofiler-sdk-perfetto
+                rocprofiler-sdk::rocprofiler-sdk-otf2
+                rocprofiler-sdk::rocprofiler-sdk-dw
+                rocprofiler-sdk::rocprofiler-sdk-elf)
+endif()
 
 target_compile_definitions(rocprofiler-sdk-output-library
                            PRIVATE PROJECT_BINARY_DIR="${PROJECT_BINARY_DIR}")
 
-add_subdirectory(sql)
+if(NOT ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+    add_subdirectory(sql)
+endif()

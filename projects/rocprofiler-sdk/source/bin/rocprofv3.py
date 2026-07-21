@@ -26,8 +26,20 @@ import os
 import sys
 import re
 import argparse
+import csv
+import hashlib
+import json
+import shutil
 import textwrap
 import subprocess
+import time
+import uuid
+from pathlib import Path
+
+if os.name == "nt":
+    _windows_module_directory = str(Path(__file__).resolve().parent)
+    if _windows_module_directory not in sys.path:
+        sys.path.insert(0, _windows_module_directory)
 
 # version info for rocprofiler-sdk / rocprofv3
 CONST_VERSION_INFO = {
@@ -751,7 +763,6 @@ For attachment profiling of running processes:
         nargs="*",
         action="append",
     )
-
     spm_options = parser.add_argument_group("Streaming Performance Monitor(SPM) options")
 
     add_parser_bool_argument(
@@ -1531,7 +1542,18 @@ def int_auto(num_str):
         )
 
 
+if os.name == "nt":
+    import _rocprofv3_windows as _windows_backend
+
+    _windows_backend.configure(fatal_error)
+    for _windows_name in _windows_backend.__all__:
+        globals()[_windows_name] = getattr(_windows_backend, _windows_name)
+
+
 def run(app_args, args, **kwargs):
+
+    if os.name == "nt":
+        return run_windows(app_args, args, **kwargs)
 
     app_env = dict(os.environ)
     use_execv = kwargs.get("use_execv", True)

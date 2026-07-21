@@ -1,0 +1,370 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+from collections import Counter
+from pathlib import Path
+
+
+PMC_PARITY_DIRECTORY = Path(__file__).resolve().parents[2] / "pmc-parity"
+PMC_CONTRACT = json.loads(
+    (PMC_PARITY_DIRECTORY / "gfx1151_linux_contract.json").read_text(encoding="utf-8")
+)
+sys.path.insert(0, str(PMC_PARITY_DIRECTORY))
+from pmc_contract import parse_counter_info  # noqa: E402
+
+
+def load_result():
+    path = Path(os.environ["ROCPROFILER_WINDOWS_INTEGRATION_RESULT"])
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def require_workload(output: str):
+    for marker in (
+        "architecture=gfx1151",
+        "dispatches=8",
+        "work_items=1048576",
+        "workgroup_size=256",
+        "kernel=vector_add",
+        "resource=loaded",
+        "validation=passed",
+    ):
+        assert marker in output
+
+
+def require_original_target(data):
+    modules = re.search(
+        r"(?:^|\n)executable=(.+?) runtime=(.+?) resource=loaded", data["stdout"]
+    )
+    assert modules
+    target = Path(data["target"]).resolve()
+    assert Path(modules.group(1)).resolve() == target
+    assert Path(modules.group(2)).resolve() == target.with_name("amdhip64_7.dll")
+
+
+def require_agent_field(output: str, name: str, value: str):
+    fields = {}
+    for line in output.splitlines():
+        if ":" not in line:
+            continue
+        field, field_value = line.split(":", 1)
+        fields[field.strip()] = field_value.strip()
+    assert fields[name] == value
+
+
+def test_windows_integration_case():
+    result = load_result()
+    case = os.environ["ROCPROFILER_WINDOWS_INTEGRATION_CASE"]
+    assert result["case"] == case
+    data = result["data"]
+
+    if case == "availability":
+        for name, command in data.items():
+            expected_returncode = (
+                1 if name in {"pmc_check_rejected", "pmc_check_unknown"} else 0
+            )
+            assert command["returncode"] == expected_returncode
+
+        for command_name in ("list", "agent", "catalog"):
+            output = data[command_name]["stdout"]
+            assert "Invalid metric" not in output
+            assert "absl::InitializeLog" not in output
+            assert not re.search(r"^E\d{4} ", output, re.MULTILINE)
+
+        list_output = data["list"]["stdout"]
+        for marker in (
+            "gfx1151",
+            "GRBM_COUNT",
+            "GRBM_GUI_ACTIVE",
+            "SQ_WAVES",
+            "TA_TA_BUSY",
+            "TCP_REQ",
+            "GL1C_BUSY",
+            "GL2C_HIT",
+            "GDSInsts",
+            "DIMENSION_WGP[0:4]",
+            "DIMENSION_SHADER_ARRAY[0:1]",
+            "DIMENSION_SHADER_ENGINE[0:1]",
+        ):
+            assert marker in list_output
+
+        agent = data["agent"]["stdout"]
+        for name, value in (
+            ("name", "gfx1151"),
+            ("node_id", "1"),
+            ("cu_count", "40"),
+            ("simd_count", "80"),
+            ("wave_front_size", "32"),
+            ("gfx_target_version", "110501"),
+        ):
+            require_agent_field(agent, name, value)
+
+        identity, actual_counters = parse_counter_info(data["catalog"]["stdout"])
+        expected_catalog = PMC_CONTRACT["counter_catalog"]
+        assert identity == {"logical_gpu_index": 0, "architecture": "gfx1151"}
+        assert len(actual_counters) == expected_catalog["count"] == 442
+        assert [counter["name"] for counter in actual_counters] == sorted(
+            counter["name"] for counter in actual_counters
+        )
+        assert Counter(counter["kind"] for counter in actual_counters) == Counter(
+            expected_catalog["kind_counts"]
+        )
+        expected_counters = {
+            counter["name"]: counter for counter in expected_catalog["counters"]
+        }
+        actual_counters_by_name = {
+            counter["name"]: counter for counter in actual_counters
+        }
+        assert actual_counters_by_name.keys() == expected_counters.keys()
+        for name, expected in expected_counters.items():
+            assert actual_counters_by_name[name] == expected, name
+
+        observations = {
+            item["name"]: item for item in PMC_CONTRACT["profile_observations"]
+        }
+        assert observations["retained-three-counter-group"]["diagnostic"] in data[
+            "pmc_check"
+        ]["stdout"]
+        assert observations["representative-multi-block-group"]["diagnostic"] in data[
+            "pmc_check_representative"
+        ]["stdout"]
+        assert (
+            "Following input counters can be collected together on GPU:0\tGDSInsts"
+            in data["pmc_check_derived"]["stdout"]
+        )
+        assert (
+            "Following input counters can be collected together on GPU:0\t"
+            "GRBM_GL2C_BUSY\tGCEA_RDRAM_SIZE_REQ\tGCEA_WDRAM_SIZE_REQ"
+            in data["pmc_check_catalog_boundaries"]["stdout"]
+        )
+        assert observations["grbm-capacity-exceeded"]["diagnostic"] in data[
+            "pmc_check_rejected"
+        ]["stdout"]
+        assert observations["unknown-counter"]["diagnostic"] in data[
+            "pmc_check_unknown"
+        ]["stdout"]
+    elif case == "baseline":
+        assert data["returncode"] == 0
+        require_workload(data["stdout"])
+        assert "runtime-run\\amdhip64_7.dll" in data["stdout"]
+    elif case == "kernel-trace":
+        assert data["returncode"] == 0
+        require_workload(data["stdout"])
+        require_original_target(data)
+        assert "Windows kernel trace: records=8" in data["stdout"]
+        rows = [row for row in data["rows"] if "vector_add" in row["Kernel_Name"]]
+        assert len(rows) == 8
+        assert {int(row["Dispatch_Id"]) for row in rows} == set(range(1, 9))
+        assert len({int(row["Queue_Id"]) for row in rows}) == 1
+        for row in rows:
+            assert row["Kind"] == "KERNEL_DISPATCH"
+            assert row["Agent_Id"] == "Agent 1"
+            assert int(row["Queue_Id"]) >= 0
+            assert int(row["Stream_Id"]) > 0
+            assert int(row["Thread_Id"]) > 0
+            assert int(row["Kernel_Id"]) > 0
+            assert int(row["Correlation_Id"]) > 0
+            assert int(row["End_Timestamp"]) > int(row["Start_Timestamp"])
+            assert int(row["Workgroup_Size_X"]) == 256
+            assert int(row["Workgroup_Size_Y"]) == 1
+            assert int(row["Workgroup_Size_Z"]) == 1
+            assert int(row["Grid_Size_X"]) == 1_048_576
+            assert int(row["Grid_Size_Y"]) == 1
+            assert int(row["Grid_Size_Z"]) == 1
+    elif case == "hip-trace":
+        assert data["returncode"] == 0
+        require_workload(data["stdout"])
+        require_original_target(data)
+        assert "Windows trace: hip_records=18" in data["stdout"]
+        assert not data["graph_output_exists"]
+        rows = data["rows"]
+        assert rows
+        functions = [row["Function"] for row in rows]
+        assert functions.count("hipMalloc") == 3
+        assert functions.count("hipLaunchKernel") == 8
+        assert functions.count("hipFree") == 3
+        assert functions.count("hipMemcpy") == 3
+        assert functions.count("hipDeviceSynchronize") == 1
+        correlation_ids = [int(row["Correlation_Id"]) for row in rows]
+        assert len(correlation_ids) == len(set(correlation_ids))
+        assert all(row["Domain"] == "HIP_RUNTIME_API" for row in rows)
+        assert all(int(row["Process_Id"]) > 0 for row in rows)
+        assert all(int(row["Thread_Id"]) > 0 for row in rows)
+        assert all(int(row["Status"]) == 0 for row in rows)
+        assert all(
+            int(row["End_Timestamp"]) >= int(row["Start_Timestamp"])
+            for row in rows
+        )
+    elif case == "hip-graph":
+        assert data["returncode"] == 0
+        require_original_target(data)
+        for marker in (
+            "architecture=gfx1151",
+            "dispatches=2",
+            "kernel=vector_add",
+            "execution=graph",
+            "resource=loaded",
+            "validation=passed",
+            "Windows trace: hip_records=17",
+            "graph_records=2",
+        ):
+            assert marker in data["stdout"]
+        assert data["graph_output_exists"]
+        functions = [row["Function"] for row in data["rows"]]
+        for function in (
+            "hipGraphCreate",
+            "hipGraphAddKernelNode",
+            "hipGraphInstantiate",
+            "hipGraphExecDestroy",
+            "hipGraphDestroy",
+        ):
+            assert functions.count(function) == 1
+        assert functions.count("hipGraphLaunch") == 2
+        launch_rows = [
+            row for row in data["rows"] if row["Function"] == "hipGraphLaunch"
+        ]
+        graph_rows = data["graph_rows"]
+        assert len(graph_rows) == 2
+        assert {row["Kind"] for row in graph_rows} == {"HIP_GRAPH_LAUNCH"}
+        assert {row["Kernel_Dispatch_Count"] for row in graph_rows} == {"1"}
+        assert len({row["Graph_Exec_Id"] for row in graph_rows}) == 1
+        assert graph_rows[0]["Graph_Exec_Id"] not in ("", "0x0")
+        assert {row["Status"] for row in graph_rows} == {"0"}
+        assert {row["Correlation_Id"] for row in graph_rows} == {
+            row["Correlation_Id"] for row in launch_rows
+        }
+    elif case == "hip-marker":
+        assert data["returncode"] == 0
+        require_original_target(data)
+        for marker in (
+            "architecture=gfx1151",
+            "dispatches=2",
+            "execution=direct",
+            "resource=loaded",
+            "markers=enabled",
+            "validation=passed",
+            "hip_records=12",
+            "marker_api_records=6",
+            "marker_records=4",
+        ):
+            assert marker in data["stdout"]
+        hip_rows = data["rows"]
+        marker_api_rows = data["marker_api_rows"]
+        marker_rows = data["marker_rows"]
+        assert len(hip_rows) == 12
+        assert len(marker_api_rows) == 6
+        assert len(marker_rows) == 4
+        assert [row["Message"] for row in marker_rows] == [
+            "hip workload begin",
+            "hip dispatches",
+            "hip workload",
+            "hip workload end",
+        ]
+        all_api_rows = hip_rows + marker_api_rows
+        correlations = [int(row["Correlation_Id"]) for row in all_api_rows]
+        assert len(correlations) == len(set(correlations))
+        assert all(value > 0 for value in correlations)
+        assert {row["Correlation_Id"] for row in marker_rows} < {
+            row["Correlation_Id"] for row in marker_api_rows
+        }
+        assert min(int(row["Correlation_Id"]) for row in marker_api_rows) < min(
+            int(row["Correlation_Id"]) for row in hip_rows
+        )
+        assert {row["Status"] for row in hip_rows} == {"0"}
+        assert {row["Status"] for row in marker_rows} == {"0"}
+    elif case == "roctx-trace":
+        assert data["returncode"] == 0
+        for marker in (
+            "roctx_workload=passed",
+            "mark=1",
+            "thread_ranges=2",
+            "process_ranges=1",
+            "marker_api_records=8",
+            "marker_records=4",
+        ):
+            assert marker in data["stdout"]
+        api_rows = data["api_rows"]
+        marker_rows = data["marker_rows"]
+        assert len(api_rows) == 8
+        assert len(marker_rows) == 4
+        assert {row["Domain"] for row in api_rows} == {"MARKER_CORE_API"}
+        functions = [row["Function"] for row in api_rows]
+        assert functions.count("roctxMarkA") == 1
+        assert functions.count("roctxRangePushA") == 2
+        assert functions.count("roctxRangePop") == 3
+        assert functions.count("roctxRangeStartA") == 1
+        assert functions.count("roctxRangeStop") == 1
+        assert [row["Status"] for row in api_rows].count("-1") == 1
+        correlations = [int(row["Correlation_Id"]) for row in api_rows]
+        assert all(value > 0 for value in correlations)
+        assert len(correlations) == len(set(correlations))
+        assert {row["Kind"] for row in marker_rows} == {
+            "mark",
+            "thread_range",
+            "process_range",
+        }
+        assert [row["Message"] for row in marker_rows] == [
+            "standalone mark",
+            "inner range",
+            "outer range",
+            "process range",
+        ]
+        assert {row["Status"] for row in marker_rows} == {"0"}
+        api_correlations = {row["Correlation_Id"] for row in api_rows}
+        assert {row["Correlation_Id"] for row in marker_rows} < api_correlations
+        for row in marker_rows:
+            start = int(row["Start_Timestamp"])
+            end = int(row["End_Timestamp"])
+            assert start > 0
+            assert end >= start
+    elif case == "no-overwrite":
+        assert data["returncode"] == 1
+        assert "output already exists" in data["stdout"]
+        assert data["retained_output"] == "retained"
+        assert not data["target_launched"]
+    elif case == "hsa-barrier":
+        assert data["returncode"] == 0
+        assert data["hsa_tools_lib"] is None
+        assert data["sdk_path"].endswith("\\bin\\rocprofiler-sdk.dll")
+        assert data["registration_environment"] == {
+            "ROCPROFILER_REGISTER_ENABLED": "1",
+            "ROCPROFILER_REGISTER_FORCE_LOAD": "1",
+            "ROCPROFILER_REGISTER_LIBRARY": data["sdk_path"],
+            "ROCPROFILER_REGISTER_SECURE": "1",
+        }
+        stdout = data["stdout"]
+        for marker in (
+            "hsa_init=0x0",
+            "hsa_iterate_agents=0x0",
+            "hsa_queue_create=0x0",
+            "hsa_signal_create=0x0",
+            "completion=0",
+            "hsa_signal_destroy=0x0",
+            "hsa_shut_down=0x0",
+        ):
+            assert marker in stdout
+        assert re.search(r"gpu_agents=[1-9]\d*", stdout)
+        tool_log = data["tool_log"]
+        for marker in (
+            "event=api_table status=accepted name=hsa",
+            "event=onload",
+            "status=accepted",
+            "event=queue_create status=intercepted",
+            "create_status=0 register_status=0",
+        ):
+            assert marker in tool_log
+        workload_packet = re.search(
+            r"barrier_packet queue_id=(\d+) packet_id=(\d+) completion=0",
+            stdout,
+        )
+        tool_packet = re.search(
+            r"event=packet queue_id=(\d+) packet_id=(\d+) packet_type=3",
+            tool_log,
+        )
+        assert workload_packet and tool_packet
+        assert workload_packet.groups() == tool_packet.groups()
+        assert set(re.findall(r"packet_type=(\d+)", tool_log)) == {"3"}
+    else:
+        raise AssertionError(case)

@@ -47,13 +47,13 @@ struct csv_output_file
     csv_output_file(const output_config& cfg,
                     std::string_view     name,
                     csv::csv_encoder<N>,
-                    std::array<std::string_view, N>&& header);
+                    std::array<std::string_view, N> header);
 
     template <size_t N>
     csv_output_file(const output_config& cfg,
                     domain_type          domain,
                     csv::csv_encoder<N>,
-                    std::array<std::string_view, N>&& header);
+                    std::array<std::string_view, N> header);
 
     ~csv_output_file();
 
@@ -78,10 +78,10 @@ private:
 };
 
 template <size_t N>
-csv_output_file::csv_output_file(const output_config&              cfg,
-                                 std::string_view                  name,
-                                 csv::csv_encoder<N>               encoder,
-                                 std::array<std::string_view, N>&& header)
+csv_output_file::csv_output_file(const output_config&             cfg,
+                                 std::string_view                 name,
+                                 csv::csv_encoder<N>              encoder,
+                                 std::array<std::string_view, N> header)
 : m_name{std::string{name}}
 , m_os{get_output_stream(cfg, m_name, ".csv")}
 {
@@ -96,10 +96,10 @@ csv_output_file::csv_output_file(const output_config&              cfg,
 }
 
 template <size_t N>
-csv_output_file::csv_output_file(const output_config&              cfg,
-                                 domain_type                       domain,
-                                 csv::csv_encoder<N>               encoder,
-                                 std::array<std::string_view, N>&& header)
+csv_output_file::csv_output_file(const output_config&             cfg,
+                                 domain_type                      domain,
+                                 csv::csv_encoder<N>              encoder,
+                                 std::array<std::string_view, N> header)
 : csv_output_file{cfg, get_domain_trace_file_name(domain), encoder, std::move(header)}
 {}
 }  // namespace tool

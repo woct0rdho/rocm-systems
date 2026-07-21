@@ -28,15 +28,30 @@
 #include <string_view>
 #include <vector>
 
-#include <dlfcn.h>
-#include <sys/types.h>
-#include <unistd.h>
+#if !defined(_WIN32)
+#    include <dlfcn.h>
+#    include <sys/types.h>
+#    include <unistd.h>
+#endif
 
 namespace rocprofiler_register
 {
 namespace binary
 {
 using open_modes_vec_t = std::vector<int>;
+using library_handle_t = void*;
+
+#if defined(_WIN32)
+using process_id_t = uint32_t;
+constexpr int open_mode_lazy    = 0x01;
+constexpr int open_mode_no_load = 0x02;
+constexpr int open_mode_global  = 0x04;
+#else
+using process_id_t = pid_t;
+constexpr int open_mode_lazy    = RTLD_LAZY;
+constexpr int open_mode_no_load = RTLD_NOLOAD;
+constexpr int open_mode_global  = RTLD_GLOBAL;
+#endif
 
 struct address_range
 {
@@ -50,8 +65,26 @@ struct segment_address_ranges
     std::vector<address_range> ranges   = {};
 };
 
+process_id_t
+current_process_id();
+
 std::vector<segment_address_ranges>
-get_segment_addresses(pid_t _pid = getpid());
+get_segment_addresses(process_id_t pid = current_process_id());
+
+library_handle_t
+open_library(std::string_view name, int mode);
+
+void*
+get_symbol(library_handle_t handle, std::string_view symbol);
+
+void*
+get_default_symbol(std::string_view symbol);
+
+void
+close_library(library_handle_t handle);
+
+std::optional<std::string>
+get_library_path(library_handle_t handle);
 
 // helper function for translating generic lib name to resolved path
 std::optional<std::string>

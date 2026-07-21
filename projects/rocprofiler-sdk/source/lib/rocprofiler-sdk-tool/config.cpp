@@ -22,6 +22,7 @@
 //
 
 #include "config.hpp"
+#include "counter_config_common.hpp"
 #include "kernel_filter_range.hpp"
 
 #include "lib/common/defines.hpp"
@@ -94,13 +95,6 @@ handle_special_chars(std::string& str)
         str.at(pos) = ' ';
 }
 
-bool
-has_counter_format(std::string const& str)
-{
-    return std::find_if(str.begin(), str.end(), [](unsigned char ch) {
-               return (isalnum(ch) != 0 || ch == '_');
-           }) != str.end();
-}
 
 std::vector<att_perfcounter>
 parse_att_counters(std::string line)
@@ -157,76 +151,16 @@ parse_att_counters(std::string line)
     return counters;
 }
 
-std::set<std::string>
-parse_counters(std::string line, const std::string& qualifier)
-{
-    auto counters = std::set<std::string>{};
-
-    if(line.empty()) return counters;
-
-    // strip the comment
-    if(auto pos = std::string::npos; (pos = line.find('#')) != std::string::npos)
-        line = line.substr(0, pos);
-
-    // trim line for any white spaces after comment strip
-    trim(line);
-
-    // check to see if comment stripping + trim resulted in empty line
-    if(line.empty()) return counters;
-
-    auto pos = std::string::npos;
-
-    // should we handle an "pmc:" not being present? Seems like it should be a fatal error
-    if((pos = line.find(qualifier)) != std::string::npos)
-    {
-        // strip out pmc qualifier
-        line = line.substr(pos + qualifier.length());
-
-        handle_special_chars(line);
-
-        auto input_ss = std::stringstream{line};
-        while(true)
-        {
-            auto counter = std::string{};
-            input_ss >> counter;
-            if(counter.empty())
-                break;
-            else if(counter != qualifier && has_counter_format(counter))
-                counters.emplace(counter);
-        }
-    }
-
-    return counters;
-}
-
-std::vector<std::set<std::string>>
-parse_counter_envs()
-{
-    if(auto single_counter = get_env("ROCPROF_COUNTERS", std::string{}); !single_counter.empty())
-    {
-        return {parse_counters(single_counter, "pmc:")};
-    }
-
-    if(auto group_counters = get_env("ROCPROF_COUNTER_GROUPS", std::string{});
-       !group_counters.empty())
-    {
-        auto counters = std::vector<std::set<std::string>>{};
-        for(const auto& group : rocprofiler::sdk::parse::tokenize(group_counters, "\n"))
-        {
-            counters.emplace_back(parse_counters(group, "pmc:"));
-        }
-        return counters;
-    }
-    return {};
-}
 }  // namespace
 
 config::config()
 : base_type{base_type::load_from_env()}
 , kernel_filter_range{get_kernel_filter_range(
       get_env("ROCPROF_KERNEL_FILTER_RANGE", std::string{}))}
-, counters{parse_counter_envs()}
-, spm_counters({parse_counters(get_env("ROCPROF_SPM_COUNTERS", std::string()), "spm:")})
+, counters{common_config::parse_counter_groups(get_env("ROCPROF_COUNTERS", std::string{}),
+                                                get_env("ROCPROF_COUNTER_GROUPS", std::string{}))}
+, spm_counters({common_config::parse_counter_line(
+      get_env("ROCPROF_SPM_COUNTERS", std::string()), "spm:")})
 , att_param_perfcounters{
       parse_att_counters(get_env("ROCPROF_ATT_PARAM_PERFCOUNTERS", std::string{}))}
 {

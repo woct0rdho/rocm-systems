@@ -29,6 +29,7 @@
 #include <iomanip>
 #include <ios>
 #include <ostream>
+#include <string>
 #include <string_view>
 #include <type_traits>
 
@@ -38,6 +39,20 @@ namespace tool
 {
 namespace csv
 {
+inline std::string
+quote(std::string_view value)
+{
+    auto output = std::string{"\""};
+    output.reserve(value.size() + 2);
+    for(const auto character : value)
+    {
+        if(character == '\"') output.push_back('\"');
+        output.push_back(character);
+    }
+    output.push_back('\"');
+    return output;
+}
+
 struct numerical_formatter
 {
     template <typename Tp>
@@ -65,9 +80,14 @@ write_csv_entry(std::ostream& ofs, TupleT&& _data, std::index_sequence<Idx...>)
     auto _write = [&ofs](size_t idx, auto&& _val) {
         using value_type = common::mpl::unqualified_type_t<decltype(_val)>;
         if(idx > 0) ofs << ",";
-        if constexpr(common::mpl::is_string_type<value_type>::value) ofs << "\"";
-        FmtT{}(ofs, _val) << _val;
-        if constexpr(common::mpl::is_string_type<value_type>::value) ofs << "\"";
+        if constexpr(common::mpl::is_string_type<value_type>::value)
+        {
+            ofs << quote(std::string_view{_val});
+        }
+        else
+        {
+            FmtT{}(ofs, _val) << _val;
+        }
     };
 
     (_write(Idx, std::get<Idx>(_data)), ...);

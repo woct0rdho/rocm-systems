@@ -24,6 +24,9 @@
 
 ROCPROFILER_EXTERN_C_INIT
 
+int
+availability_status(const char** message) ROCPROFILER_EXPORT;
+
 size_t
 get_number_of_agents() ROCPROFILER_EXPORT;
 void

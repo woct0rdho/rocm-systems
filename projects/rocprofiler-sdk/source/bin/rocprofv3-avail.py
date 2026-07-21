@@ -582,20 +582,43 @@ def main(argv=None):
 
     ROCPROFV3_AVAIL_DIR = os.path.dirname(os.path.realpath(__file__))
     ROCM_DIR = os.path.dirname(ROCPROFV3_AVAIL_DIR)
-    ROCPROF_LIST_AVAIL_TOOL_LIBRARY = (
-        f"{ROCM_DIR}/lib/rocprofiler-sdk/librocprofv3-list-avail.so"
-    )
-    os.environ["ROCPROFILER_METRICS_PATH"] = f"{ROCM_DIR}/share/rocprofiler-sdk"
+    if os.name == "nt":
+        rocm_runtime_root = os.environ.get(
+            "ROCPROFILER_WINDOWS_ROCM_ROOT",
+            os.path.join(sys.prefix, "Lib", "site-packages", "_rocm_sdk_core"),
+        )
+        ROCPROF_LIST_AVAIL_TOOL_LIBRARY = os.path.join(
+            rocm_runtime_root,
+            "bin",
+            "rocprofiler-sdk",
+            "rocprofv3-list-avail.dll",
+        )
+        metrics_path = os.path.join(rocm_runtime_root, "share", "rocprofiler-sdk")
+        fallback_package = os.path.join(sys.prefix, "Lib", "site-packages")
+        os.environ.setdefault("ROCPROF_LOG_LEVEL", "error")
+        os.environ.setdefault("ROCPROFILER_LOG_LEVEL", "error")
+    else:
+        ROCPROF_LIST_AVAIL_TOOL_LIBRARY = (
+            f"{ROCM_DIR}/lib/rocprofiler-sdk/librocprofv3-list-avail.so"
+        )
+        metrics_path = f"{ROCM_DIR}/share/rocprofiler-sdk"
+        fallback_package = f"{ROCM_DIR}/lib/python{sys.version_info[0]}/site-packages"
+
+    os.environ.setdefault("ROCPROFILER_METRICS_PATH", metrics_path)
+    if os.name == "nt":
+        # Scripts/rocprofv3.py would otherwise shadow the installed rocprofv3 package.
+        script_directory = os.path.normcase(os.path.abspath(ROCPROFV3_AVAIL_DIR))
+        sys.path = [
+            path
+            for path in sys.path
+            if os.path.normcase(os.path.abspath(path or os.curdir)) != script_directory
+        ]
     try:
         # try to import rocprofv3 normally
         from rocprofv3 import avail
     except (ImportError, ModuleNotFoundError):
-        # if failed, find the python package for this python version
-        ROCPROFV3_AVAIL_PACKAGE = (
-            f"{ROCM_DIR}/lib/python{sys.version_info[0]}/site-packages"
-        )
-        sys.path.append(ROCPROFV3_AVAIL_PACKAGE)
-
+        # if failed, find the Python package for this interpreter
+        sys.path.append(fallback_package)
         from rocprofv3 import avail
 
     avail.loadLibrary.libname = os.environ.get(

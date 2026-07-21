@@ -26,6 +26,12 @@
 import sys
 import ctypes
 import json
+import os
+
+
+UINT8 = ctypes.c_uint8
+UINT64 = ctypes.c_uint64
+SIZE_T = ctypes.c_size_t
 
 
 def fatal_error(msg, exit_code=1):
@@ -268,13 +274,51 @@ class spm_config:
 class loadLibrary:
     libname = None
     c_lib = None
+    dll_directories = []
 
 
 def get_library():
+    if loadLibrary.c_lib is not None:
+        return loadLibrary.c_lib
+    if not loadLibrary.libname:
+        fatal_error("ROCPROF_LIST_AVAIL_TOOL_LIBRARY did not resolve to a library")
 
-    get_library.libname = None
-    if loadLibrary.c_lib is None:
-        loadLibrary.c_lib = ctypes.CDLL(loadLibrary.libname)
+    library_path = os.path.abspath(loadLibrary.libname)
+    if os.name == "nt" and hasattr(os, "add_dll_directory"):
+        search_directories = [
+            os.path.dirname(library_path),
+            os.path.dirname(os.path.dirname(library_path)),
+        ]
+        search_directories.extend(
+            path
+            for path in os.environ.get("ROCPROFILER_WINDOWS_DLL_DIRS", "").split(
+                os.pathsep
+            )
+            if path
+        )
+        for directory in dict.fromkeys(search_directories):
+            if os.path.isdir(directory):
+                loadLibrary.dll_directories.append(os.add_dll_directory(directory))
+
+    try:
+        loadLibrary.c_lib = ctypes.CDLL(library_path)
+    except OSError as error:
+        fatal_error(f"Failed to load availability library '{library_path}': {error}")
+
+    status_function = getattr(loadLibrary.c_lib, "availability_status", None)
+    if status_function is not None:
+        status_function.argtypes = [ctypes.POINTER(ctypes.c_char_p)]
+        status_function.restype = ctypes.c_int
+        message = ctypes.c_char_p()
+        status = status_function(ctypes.byref(message))
+        if status != 0:
+            detail = (
+                message.value.decode("utf-8", errors="replace")
+                if message.value
+                else "no failure detail was provided"
+            )
+            loadLibrary.c_lib = None
+            fatal_error(f"Availability initialization failed ({status}): {detail}")
     return loadLibrary.c_lib
 
 
@@ -284,30 +328,29 @@ def get_string_value(str_ptr):
 
 def get_agent_info(agent_handle):
     lib = get_library()
-    lib.agent_info.argtypes = [ctypes.c_ulong, ctypes.POINTER(ctypes.c_char_p)]
+    lib.agent_info.argtypes = [UINT64, ctypes.POINTER(ctypes.c_char_p)]
+    lib.agent_info.restype = None
     agent_info_str = ctypes.c_char_p()
     lib.agent_info(agent_handle, ctypes.byref(agent_info_str))
     return json.loads(agent_info_str.value.decode("utf-8"))
 
 
 def get_number_of_counters(agent_handle):
-    lib = get_library()
-    lib.get_number_of_counters.restype = ctypes.c_ulong
-    lib.get_number_of_counters.argtypes = [ctypes.c_ulong]
-    return lib.get_number_of_agent_counters(agent_handle)
+    return get_number_of_agent_counters(agent_handle)
 
 
 def get_number_agents():
     lib = get_library()
-    lib.get_number_of_agents.restype = ctypes.c_ulong
+    lib.get_number_of_agents.restype = SIZE_T
     return lib.get_number_of_agents()
 
 
 def get_agent_handles():
     lib = get_library()
     num_agents = get_number_agents()
-    lib.agent_handles.argtypes = [ctypes.c_ulong * num_agents, ctypes.c_ulong]
-    agent_handles_arr = (ctypes.c_ulong * num_agents)()
+    lib.agent_handles.argtypes = [ctypes.POINTER(UINT64), SIZE_T]
+    lib.agent_handles.restype = None
+    agent_handles_arr = (UINT64 * num_agents)()
     lib.agent_handles(agent_handles_arr, num_agents)
     return list(agent_handles_arr)
 
@@ -323,46 +366,42 @@ def get_agent_info_map():
 
 def get_number_of_agent_counters(agent_handle):
     lib = get_library()
-    lib.get_number_of_agent_counters.argtypes = [ctypes.c_ulong]
+    lib.get_number_of_agent_counters.argtypes = [UINT64]
+    lib.get_number_of_agent_counters.restype = SIZE_T
     return lib.get_number_of_agent_counters(agent_handle)
 
 
 def get_agent_counter_handles(agent_handle):
     lib = get_library()
     num_counters = get_number_of_agent_counters(agent_handle)
-    lib.agent_counter_handles.argtypes = [
-        ctypes.c_ulong * num_counters,
-        ctypes.c_ulong,
-        ctypes.c_ulong,
-    ]
-    counter_handles = (ctypes.c_ulong * num_counters)()
+    lib.agent_counter_handles.argtypes = [ctypes.POINTER(UINT64), UINT64, SIZE_T]
+    lib.agent_counter_handles.restype = None
+    counter_handles = (UINT64 * num_counters)()
     lib.agent_counter_handles(counter_handles, agent_handle, num_counters)
     return list(counter_handles)
 
 
 def get_dimensions(counter_handle):
     lib = get_library()
-    lib.get_number_of_dimensions.argtypes = [ctypes.c_ulong]
-    lib.get_number_of_dimensions.restype = ctypes.c_ulong
+    lib.get_number_of_dimensions.argtypes = [UINT64]
+    lib.get_number_of_dimensions.restype = SIZE_T
     num_dims = lib.get_number_of_dimensions(counter_handle)
 
-    lib.counter_dimension_ids.argtypes = [
-        ctypes.c_ulong,
-        ctypes.c_ulong * num_dims,
-        ctypes.c_uint,
-    ]
-    dims_ids = (ctypes.c_ulong * num_dims)()
+    lib.counter_dimension_ids.argtypes = [UINT64, ctypes.POINTER(UINT64), SIZE_T]
+    lib.counter_dimension_ids.restype = None
+    dims_ids = (UINT64 * num_dims)()
     lib.counter_dimension.argtypes = [
-        ctypes.c_ulong,
-        ctypes.c_ulong,
+        UINT64,
+        UINT64,
         ctypes.POINTER(ctypes.c_char_p),
-        ctypes.POINTER(ctypes.c_uint),
+        ctypes.POINTER(UINT64),
     ]
+    lib.counter_dimension.restype = None
     lib.counter_dimension_ids(counter_handle, dims_ids, num_dims)
     dimensions = []
     for dim_id in list(dims_ids):
         dimension_name = ctypes.c_char_p()
-        dimension_instance = ctypes.c_uint()
+        dimension_instance = UINT64()
         lib.counter_dimension(
             counter_handle,
             dim_id,
@@ -394,6 +433,7 @@ def get_counters_helper(is_spm=False):
                         agent_counters[agent].append(counter_info)
                 else:
                     agent_counters[agent].append(counter_info)
+        agent_counters[agent].sort(key=lambda counter_info: counter_info.name)
     return agent_counters
 
 
@@ -432,18 +472,19 @@ def get_pc_sample_configs():
 def get_counter_info(counter_handle):
     lib = get_library()
     lib.counter_info.argtypes = [
-        ctypes.c_ulong,
+        UINT64,
         ctypes.POINTER(ctypes.c_char_p),
         ctypes.POINTER(ctypes.c_char_p),
-        ctypes.POINTER(ctypes.c_uint),
-        ctypes.POINTER(ctypes.c_uint),
-        ctypes.POINTER(ctypes.c_uint),
+        ctypes.POINTER(UINT8),
+        ctypes.POINTER(UINT8),
+        ctypes.POINTER(UINT8),
     ]
+    lib.counter_info.restype = None
     counter_name = ctypes.c_char_p()
     counter_description = ctypes.c_char_p()
-    is_derived = ctypes.c_uint()
-    is_hw_constant = ctypes.c_uint()
-    spm_support = ctypes.c_uint()
+    is_derived = UINT8()
+    is_hw_constant = UINT8()
+    spm_support = UINT8()
     lib.counter_info(
         counter_handle,
         ctypes.byref(counter_name),
@@ -455,9 +496,10 @@ def get_counter_info(counter_handle):
 
     if is_derived.value == 1:
         lib.counter_expression.argtypes = [
-            ctypes.c_ulong,
+            UINT64,
             ctypes.POINTER(ctypes.c_char_p),
         ]
+        lib.counter_expression.restype = None
         expression = ctypes.c_char_p()
         lib.counter_expression(counter_handle, ctypes.byref(expression))
         dimensions = get_dimensions(counter_handle)
@@ -472,7 +514,8 @@ def get_counter_info(counter_handle):
         )
 
     elif not is_hw_constant.value:
-        lib.counter_block.argtypes = [ctypes.c_ulong, ctypes.POINTER(ctypes.c_char_p)]
+        lib.counter_block.argtypes = [UINT64, ctypes.POINTER(ctypes.c_char_p)]
+        lib.counter_block.restype = None
         block = ctypes.c_char_p()
         lib.counter_block(counter_handle, ctypes.byref(block))
         dimensions = get_dimensions(counter_handle)
@@ -498,15 +541,15 @@ def get_counter_info(counter_handle):
 
 def get_number_of_pc_sample_configs(agent_handle):
     lib = get_library()
-    lib.get_number_of_pc_sample_configs.argtypes = [ctypes.c_ulong]
-    lib.get_number_of_pc_sample_configs.restype = ctypes.c_ulong
+    lib.get_number_of_pc_sample_configs.argtypes = [UINT64]
+    lib.get_number_of_pc_sample_configs.restype = SIZE_T
     return lib.get_number_of_pc_sample_configs(agent_handle)
 
 
 def get_number_of_spm_configs(agent_handle):
     lib = get_library()
-    lib.get_number_of_spm_configs.argtypes = [ctypes.c_ulong]
-    lib.get_number_of_spm_configs.restype = ctypes.c_ulong
+    lib.get_number_of_spm_configs.argtypes = [UINT64]
+    lib.get_number_of_spm_configs.restype = SIZE_T
     return lib.get_number_of_spm_configs(agent_handle)
 
 
@@ -514,22 +557,23 @@ def get_pc_sample_config(agent_handle):
     lib = get_library()
     num_configs = get_number_of_pc_sample_configs(agent_handle)
     lib.pc_sample_config.argtypes = [
-        ctypes.c_ulong,
-        ctypes.c_ulong,
-        ctypes.POINTER(ctypes.c_ulong),
-        ctypes.POINTER(ctypes.c_ulong),
-        ctypes.POINTER(ctypes.c_ulong),
-        ctypes.POINTER(ctypes.c_ulong),
-        ctypes.POINTER(ctypes.c_ulong),
+        UINT64,
+        UINT64,
+        ctypes.POINTER(UINT64),
+        ctypes.POINTER(UINT64),
+        ctypes.POINTER(UINT64),
+        ctypes.POINTER(UINT64),
+        ctypes.POINTER(UINT64),
     ]
+    lib.pc_sample_config.restype = None
     pc_configs = []
 
     for config in range(0, num_configs):
-        method = (ctypes.c_ulong)()
-        unit = (ctypes.c_ulong)()
-        max_interval = (ctypes.c_ulong)()
-        min_interval = (ctypes.c_ulong)()
-        flags = (ctypes.c_ulong)()
+        method = UINT64()
+        unit = UINT64()
+        max_interval = UINT64()
+        min_interval = UINT64()
+        flags = UINT64()
         lib.pc_sample_config(
             agent_handle,
             config,
@@ -537,7 +581,7 @@ def get_pc_sample_config(agent_handle):
             ctypes.byref(unit),
             ctypes.byref(min_interval),
             ctypes.byref(max_interval),
-            flags,
+            ctypes.byref(flags),
         )
         pc_configs.append(
             pc_config(
@@ -555,16 +599,19 @@ def get_spm_config(agent_handle):
     lib = get_library()
     num_configs = get_number_of_spm_configs(agent_handle)
     lib.spm_sample_interval_config.argtypes = [
-        ctypes.c_ulong,
-        ctypes.c_ulong,
-        ctypes.POINTER(ctypes.c_ulong),
+        UINT64,
+        UINT64,
+        ctypes.POINTER(UINT64),
+        ctypes.POINTER(UINT64),
+        ctypes.POINTER(UINT64),
     ]
+    lib.spm_sample_interval_config.restype = None
     spm_configs = []
 
     for config in range(0, num_configs):
-        type_ = (ctypes.c_ulong)()
-        max_interval = (ctypes.c_ulong)()
-        min_interval = (ctypes.c_ulong)()
+        type_ = UINT64()
+        max_interval = UINT64()
+        min_interval = UINT64()
         lib.spm_sample_interval_config(
             agent_handle,
             config,
@@ -602,12 +649,8 @@ def check_pmc(agent_counter):
 
     for agent, counter_ids in agent_counter.items():
         num_counters = len(counter_ids)
-        counters = (ctypes.c_ulong * num_counters)(*counter_ids)
-        lib.is_counter_set.argtypes = [
-            ctypes.c_ulong * num_counters,
-            ctypes.c_ulong,
-            ctypes.c_ulong,
-        ]
+        counters = (UINT64 * num_counters)(*counter_ids)
+        lib.is_counter_set.argtypes = [ctypes.POINTER(UINT64), UINT64, SIZE_T]
         lib.is_counter_set.restype = ctypes.c_bool
         if lib.is_counter_set(counters, agent, num_counters) is False:
             fatal_error(

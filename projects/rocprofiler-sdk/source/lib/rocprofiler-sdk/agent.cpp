@@ -30,6 +30,7 @@
 #include "lib/common/utility.hpp"
 #include "lib/rocprofiler-sdk/hsa/agent_cache.hpp"
 #include "lib/rocprofiler-sdk/platform/agent.hpp"
+#include "lib/rocprofiler-sdk/registration.hpp"
 #ifdef _WIN32
 #    include "lib/rocprofiler-sdk/platform/windows/agent.hpp"
 #else
@@ -45,12 +46,14 @@
 #include <fmt/ranges.h>
 #include <hsa/hsa.h>
 #include <hsa/hsa_api_trace.h>
-#include <libdrm/amdgpu.h>
-#include <xf86drm.h>
+#if !defined(_WIN32)
+#    include <libdrm/amdgpu.h>
+#    include <xf86drm.h>
 // amdgpu_drm.h provides AMDGPU_INFO_DEV_INFO / drm_amdgpu_info_device for the
 // V2 cu_bitmap path below; only needed in internal-aqlprofile builds.
-#if !ROCPROFILER_EXTERNAL_AQLPROFILE
-#    include <libdrm/amdgpu_drm.h>
+#    if !ROCPROFILER_EXTERNAL_AQLPROFILE
+#        include <libdrm/amdgpu_drm.h>
+#    endif
 #endif
 
 #include <iomanip>
@@ -424,12 +427,13 @@ get_bdf_info(const rocprofiler_agent_t* agent)
 // (see _set_default_agent_names) and across the SDK (pc_sampling, evaluate_ast),
 // so the >= 110000 threshold cleanly selects GFX11 / GFX12 / future families.
 //
-// Only compiled for internal-aqlprofile builds. External-aqlprofile builds
+// Only compiled for internal-aqlprofile builds on non-Windows platforms, where
+// the DRM device query is available. External-aqlprofile builds
 // (ROCPROFILER_BUILD_AQLPROFILE=OFF) link against the ROCm-release-shipped
 // libhsa-amd-aqlprofile64.so which neither exposes aqlprofile_register_agent_info
 // nor the AQLPROFILE_AGENT_VERSION_V2 enum value, so this function is omitted
 // there and the caller's #if branch takes the legacy aqlprofile_register_agent path.
-#if !ROCPROFILER_EXTERNAL_AQLPROFILE
+#if !ROCPROFILER_EXTERNAL_AQLPROFILE && !defined(_WIN32)
 bool
 try_register_agent_v2(const rocprofiler_agent_t* agent, aqlprofile_agent_handle_t* handle)
 {
@@ -475,7 +479,7 @@ try_register_agent_v2(const rocprofiler_agent_t* agent, aqlprofile_agent_handle_
     drmClose(drm_fd);
     return success;
 }
-#endif  // !ROCPROFILER_EXTERNAL_AQLPROFILE
+#endif  // !ROCPROFILER_EXTERNAL_AQLPROFILE && !_WIN32
 
 const std::vector<aqlprofile_agent_handle_t>&
 get_aql_handles()
@@ -519,10 +523,12 @@ get_aql_handles()
 
                 // Try V2 registration with cu_bitmap from DRM for WGP harvesting support.
                 bool registered_v2 = false;
+#if !defined(_WIN32)
                 if(agent->type == ROCPROFILER_AGENT_TYPE_GPU && agent->drm_render_minor > 0)
                 {
                     registered_v2 = try_register_agent_v2(agent, &handle);
                 }
+#endif
 
                 // Fallback to V1 if V2 was unavailable or failed
                 if(!registered_v2)
@@ -643,10 +649,12 @@ construct_agent_cache(::HsaApiTable* table)
                 continue;
             }
 
+#if defined(_WIN32)
+            if(agent_type == HSA_DEVICE_TYPE_GPU) hsa_agents.emplace_back(_agent);
+#else
             if(agent_type == HSA_DEVICE_TYPE_CPU || agent_type == HSA_DEVICE_TYPE_GPU)
-            {
                 hsa_agents.emplace_back(_agent);
-            }
+#endif
         }
     }
 
@@ -901,6 +909,8 @@ rocprofiler_query_available_agents(rocprofiler_agent_version_t             versi
                                    size_t                                  agent_size,
                                    void*                                   user_data)
 {
+    rocprofiler::registration::init_logging();
+
     // only support version 0 for now
     if(version != ROCPROFILER_AGENT_INFO_VERSION_0)
         return ROCPROFILER_STATUS_ERROR_INVALID_ARGUMENT;

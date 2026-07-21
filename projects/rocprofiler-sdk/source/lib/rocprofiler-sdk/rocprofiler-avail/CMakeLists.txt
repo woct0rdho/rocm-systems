@@ -24,7 +24,11 @@ rocprofiler_activate_clang_tidy()
 
 add_library(rocprofv3-list-avail SHARED)
 add_library(rocprofiler-sdk::rocprofv3-list-avail ALIAS rocprofv3-list-avail)
-target_sources(rocprofv3-list-avail PRIVATE rocprofv3_avail.cpp)
+if(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+    target_sources(rocprofv3-list-avail PRIVATE rocprofv3_avail_windows.cpp)
+else()
+    target_sources(rocprofv3-list-avail PRIVATE rocprofv3_avail.cpp)
+endif()
 
 target_link_libraries(
     rocprofv3-list-avail
@@ -33,25 +37,40 @@ target_link_libraries(
             rocprofiler-sdk::rocprofiler-sdk-build-flags
             rocprofiler-sdk::rocprofiler-sdk-memcheck
             rocprofiler-sdk::rocprofiler-sdk-common-library
-            rocprofiler-sdk::rocprofiler-sdk-cereal
-            rocprofiler-sdk::rocprofiler-sdk-perfetto
-            rocprofiler-sdk::rocprofiler-sdk-output-library
-            rocprofiler-sdk::rocprofiler-sdk-drm
-            rocprofiler-sdk::rocprofiler-sdk-dl
-            rocprofiler-sdk::rocprofiler-sdk-dw
-            rocprofiler-sdk::rocprofiler-sdk-amd-comgr)
+            rocprofiler-sdk::rocprofiler-sdk-cereal)
+if(NOT ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+    target_link_libraries(
+        rocprofv3-list-avail
+        PRIVATE rocprofiler-sdk::rocprofiler-sdk-perfetto
+                rocprofiler-sdk::rocprofiler-sdk-output-library
+                rocprofiler-sdk::rocprofiler-sdk-drm
+                rocprofiler-sdk::rocprofiler-sdk-dl
+                rocprofiler-sdk::rocprofiler-sdk-dw
+                rocprofiler-sdk::rocprofiler-sdk-amd-comgr)
+endif()
 
 set_target_properties(
     rocprofv3-list-avail
     PROPERTIES LIBRARY_OUTPUT_DIRECTORY
                ${PROJECT_BINARY_DIR}/${CMAKE_INSTALL_LIBDIR}/rocprofiler-sdk
+               WINDOWS_EXPORT_ALL_SYMBOLS ON
                SOVERSION ${PROJECT_VERSION_MAJOR}
                VERSION ${PROJECT_VERSION}
                BUILD_RPATH "\$ORIGIN:\$ORIGIN/.."
                INSTALL_RPATH "\$ORIGIN:\$ORIGIN/..")
 
-install(
-    TARGETS rocprofv3-list-avail
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/rocprofiler-sdk
-    COMPONENT tools
-    EXPORT rocprofiler-sdk-tool-targets)
+if(WIN32)
+    install(
+        TARGETS rocprofv3-list-avail
+        EXPORT rocprofiler-sdk-tool-targets
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}/rocprofiler-sdk
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/rocprofiler-sdk
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}/rocprofiler-sdk
+        COMPONENT tools)
+else()
+    install(
+        TARGETS rocprofv3-list-avail
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/rocprofiler-sdk
+        COMPONENT tools
+        EXPORT rocprofiler-sdk-tool-targets)
+endif()

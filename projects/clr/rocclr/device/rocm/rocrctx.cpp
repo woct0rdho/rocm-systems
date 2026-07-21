@@ -15,6 +15,19 @@ std::once_flag Hsa::initialized;
 RocrEntryPoints Hsa::cep_;
 bool Hsa::is_ready_ = false;
 
+hsa_status_t Hsa::queue_create(hsa_agent_t agent, uint32_t size, hsa_queue_type32_t type,
+                               void (*callback)(hsa_status_t status, hsa_queue_t* source,
+                                                void* data),
+                               void* data, uint32_t private_segment_size,
+                               uint32_t group_segment_size, hsa_queue_t** queue) {
+  return ROCR_DYN(hsa_queue_create)(agent, size, type, callback, data, private_segment_size,
+                                    group_segment_size, queue);
+}
+
+hsa_status_t Hsa::queue_destroy(hsa_queue_t* queue) {
+  return ROCR_DYN(hsa_queue_destroy)(queue);
+}
+
 bool Hsa::LoadLib() {
 #if defined(ROCR_DYN_DLL)
   static const char* rocr_lib_name = WINDOWS_SWITCH("hsa-runtime64.dll", "hsa-runtime64.so.1");

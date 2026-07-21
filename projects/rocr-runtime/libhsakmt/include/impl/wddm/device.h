@@ -63,6 +63,7 @@
 #include "impl/wddm/status.h"
 #include "impl/wddm/types.h"
 #include "impl/wddm/gpu_memory.h"
+#include "impl/wddm/profiling.h"
 #include "impl/wddm/cmd_util.h"
 
 namespace wsl {
@@ -161,6 +162,7 @@ public:
   bool SupportStateShadowingByCpFw(void) const { return device_info_.state_shadowing_by_cpfw; }
   bool SupportPlatformAtomic(void) const { return device_info_.platform_atomic_support; }
   bool IsAqlSupported() const { return device_info_.hwsInfo.hwsMask.aql_queue != 0; }
+  const profiling::Capability& AqlProfileCapability() const { return profiling_capability_; }
 
   uint32_t GetSdmaEngine(uint32_t idx) {
     assert(idx < NumSdmaEngine());
@@ -293,6 +295,7 @@ private:
   std::vector<struct SegmentInfo> segment_infos_;
   //CmdUtil cmd_util;
   device_init_result init_status_;
+  profiling::Capability profiling_capability_{};
 
   // GPU events fields
   uint64_t base_mailbox_va_ = 0;  //!< GPU VA returned by KMD for all mailboxes

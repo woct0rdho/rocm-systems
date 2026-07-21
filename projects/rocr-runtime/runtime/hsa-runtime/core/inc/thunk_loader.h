@@ -72,6 +72,10 @@ class ThunkLoader {
     typedef HSAKMT_STATUS (HSAKMT_DEF(hsaKmtOpenKFD))(void);
     typedef HSAKMT_STATUS (HSAKMT_DEF(hsaKmtCloseKFD))(void);
     typedef HSAKMT_STATUS (HSAKMT_DEF(hsaKmtGetVersion))(HsaVersionInfo* VersionInfo);
+#if defined(_WIN32)
+    typedef HSAKMT_STATUS (HSAKMT_DEF(hsaKmtGetWddmAqlProfileCapability))(
+        HSAuint32 NodeId, HsaWddmAqlProfileCapability* Capability);
+#endif
     typedef HSAKMT_STATUS (HSAKMT_DEF(hsaKmtAcquireSystemProperties))(HsaSystemProperties* SystemProperties);
     typedef HSAKMT_STATUS (HSAKMT_DEF(hsaKmtReleaseSystemProperties))(void);
     typedef HSAKMT_STATUS (HSAKMT_DEF(hsaKmtGetNodeProperties))(HSAuint32 NodeId, \
@@ -455,6 +459,10 @@ class ThunkLoader {
     HSAKMT_DEF(hsaKmtOpenKFD)* HSAKMT_PFN(hsaKmtOpenKFD);
     HSAKMT_DEF(hsaKmtCloseKFD)* HSAKMT_PFN(hsaKmtCloseKFD);
     HSAKMT_DEF(hsaKmtGetVersion)* HSAKMT_PFN(hsaKmtGetVersion);
+#if defined(_WIN32)
+    HSAKMT_DEF(hsaKmtGetWddmAqlProfileCapability)*
+        HSAKMT_PFN(hsaKmtGetWddmAqlProfileCapability);
+#endif
     HSAKMT_DEF(hsaKmtAcquireSystemProperties)* HSAKMT_PFN(hsaKmtAcquireSystemProperties);
     HSAKMT_DEF(hsaKmtReleaseSystemProperties)* HSAKMT_PFN(hsaKmtReleaseSystemProperties);
     HSAKMT_DEF(hsaKmtGetNodeProperties)* HSAKMT_PFN(hsaKmtGetNodeProperties);

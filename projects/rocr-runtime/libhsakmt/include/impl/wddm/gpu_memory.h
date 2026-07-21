@@ -42,6 +42,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include "util/utils.h"
@@ -235,9 +236,15 @@ public:
     return (desc_.adapter_luid.HighPart == luid.HighPart &&
       desc_.adapter_luid.LowPart == luid.LowPart);
   }
-  inline void GetQueueReference() { desc_.flags.is_queue_referenced = 1; }
-  inline void PutQueueReference() { desc_.flags.is_queue_referenced = 0; }
-  inline bool IsQueueReferenced() const { return desc_.flags.is_queue_referenced; }
+  inline void GetQueueReference() { queue_reference_count_.fetch_add(1, std::memory_order_relaxed); }
+  inline bool PutQueueReference() {
+    const uint32_t previous = queue_reference_count_.fetch_sub(1, std::memory_order_acq_rel);
+    assert(previous > 0);
+    return previous == 1;
+  }
+  inline bool IsQueueReferenced() const {
+    return queue_reference_count_.load(std::memory_order_acquire) != 0;
+  }
   inline void IncSharedReference() { desc_.flags.is_imported_from_same_process++; }
   inline uint32_t DecSharedReference() { return (desc_.flags.is_imported_from_same_process == 0) ? 0 : --desc_.flags.is_imported_from_same_process; }
   inline bool IsSharedFromSameProcess() const { return desc_.flags.is_imported_from_same_process > 0; }
@@ -305,6 +312,7 @@ private:
 
   bool is_phymem_created = false; // status of physical memory allocation
   bool is_sysmem_locked_ = false; // kSystem allocation pinned via D3DKMTLock2
+  std::atomic<uint32_t> queue_reference_count_{0};
 
   // Number of outstanding GPU mappings of a user pointer.
   uint32_t mapping_count_ = 1;

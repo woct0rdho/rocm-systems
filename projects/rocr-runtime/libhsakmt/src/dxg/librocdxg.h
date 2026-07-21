@@ -133,12 +133,10 @@ struct hsakmtRuntime {
   std::unique_ptr<wsl::thunk::VaMgr> handle_aperture_mgr_;
   union {
     struct {
-      uint64_t use_pm4_ : 1;
       uint64_t is_forked : 1;
       uint64_t hsakmt_is_dgpu : 1;
       uint64_t check_avail_sysram : 1;
       uint64_t zfb_support : 1;
-      uint64_t vendor_packet_process : 1;
       uint64_t enable_thunk_sub_allocator : 1;
       uint64_t is_svm_api_supported : 1;
       uint64_t disable_wait_timeout_ : 1;
@@ -294,6 +292,11 @@ HSAKMT_STATUS hsaKmtFreeMemoryInternal(void *MemoryAddress,
 
 bool queue_acquire_buffer(void *MemoryAddress);
 bool queue_release_buffer(void *MemoryAddress);
+bool queue_acquire_buffer_range(uint64_t gpu_address, uint64_t size,
+                                wsl::thunk::WDDMDevice* expected_device,
+                                wsl::thunk::GpuMemory** memory,
+                                const void** cpu_address);
+void queue_release_buffer_reference(wsl::thunk::GpuMemory* memory);
 /* Calculate VGPR and SGPR register file size per CU */
 uint32_t get_vgpr_size_per_cu(HSA_ENGINE_ID id);
 #define SGPR_SIZE_PER_CU 0x4000

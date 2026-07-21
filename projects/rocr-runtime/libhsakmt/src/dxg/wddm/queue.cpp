@@ -62,14 +62,39 @@ extern void hsakmt_hsa_signal_store_screlease(hsa_signal_t hsa_signal, hsa_signa
 extern hsa_status_t hsakmt_hsa_ven_amd_loader_query_host_address(const void* device_address,
                                                                  const void** host_address);
 extern wsl::thunk::GpuMemory* GetGpuMemoryFromAddress(void* memory_address);
+extern bool queue_acquire_buffer_range(uint64_t gpu_address, uint64_t size,
+                                       wsl::thunk::WDDMDevice* expected_device,
+                                       wsl::thunk::GpuMemory** memory,
+                                       const void** cpu_address);
+extern void queue_release_buffer_reference(wsl::thunk::GpuMemory* memory);
+extern void* hsakmt_hsa_signal_acquire(hsa_signal_t signal);
+extern void hsakmt_hsa_signal_release(void* signal);
+
+namespace {
+
+bool IsOwnedUserSignal(uint64_t handle) {
+  if (handle == 0 || (handle & (alignof(amd_signal_t) - 1)) != 0) return false;
+#if defined(_WIN32)
+  MEMORY_BASIC_INFORMATION info{};
+  if (::VirtualQuery(reinterpret_cast<const void*>(handle), &info, sizeof(info)) != sizeof(info) ||
+      info.State != MEM_COMMIT || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+    return false;
+  }
+  const uint64_t region_base = reinterpret_cast<uint64_t>(info.BaseAddress);
+  const uint64_t region_size = static_cast<uint64_t>(info.RegionSize);
+  if (region_size > UINT64_MAX - region_base || handle < region_base ||
+      sizeof(amd_signal_t) > region_base + region_size - handle) {
+    return false;
+  }
+#endif
+  const auto* signal = reinterpret_cast<const amd_signal_t*>(handle);
+  return signal->kind == AMD_SIGNAL_KIND_USER;
+}
+
+}  // namespace
 
 namespace wsl {
 namespace thunk {
-
-// Format value in a VENDOR_SPECIFIC AQL packet's ven_hdr identifying a PM4
-// indirect-buffer packet (amd_aql_pm4_ib). A VENDOR_SPECIFIC slot is only fully
-// published once ven_hdr holds this; until then the body is still being written.
-static constexpr uint16_t AMD_AQL_FORMAT_PM4_IB = 0x1;
 
 hsa_status_t WDDMQueue::SwsInit(void) {
   if (!device->CreateSyncobj(&syncobj, &sync_addr)) return HSA_STATUS_ERROR;
@@ -308,9 +333,18 @@ ComputeQueue::~ComputeQueue() {
     aql_to_pm4_thread_.join();
   }
 
+  ReleaseCompletedProfileReferences(true);
+
   // doorbell_signal_->Release();
 
   device->DestroyQueue(this);
+  while (!pending_profile_resources_.empty()) {
+    ReleaseProfileResources(&pending_profile_resources_.front().allocations,
+                            &pending_profile_resources_.front().signal_reference);
+    pending_profile_resources_.pop_front();
+  }
+  ReleaseProfileResources(&profile_references_for_submit_, &profile_signal_for_submit_);
+  profiling_submission_state_.Reset();
 
   if (scratch_base_) {
     auto scratch_gpu_mem = GpuMemory::Convert(scratch_mem_);
@@ -780,9 +814,136 @@ hsa_status_t ComputeQueue::KernelDispatchAqlToPm4(char* cpu, hsa_kernel_dispatch
 
   ib_size = i;
   cmdbuf_aql_frame_write_index++;
-  packet->header = HSA_PACKET_TYPE_INVALID;
+  rocr::atomic::Store(&packet->header, static_cast<uint16_t>(HSA_PACKET_TYPE_INVALID),
+                      std::memory_order_release);
 
   return HSA_STATUS_SUCCESS;
+}
+
+hsa_status_t ComputeQueue::ExtendedDispatchAqlToPm4(
+    char* cpu, hsa_amd_ext_kernel_dispatch_packet_t* packet) {
+  if (packet->amd_format != HSA_AMD_PACKET_TYPE_EXT_KERNEL_DISPATCH || packet->reserved0 != 0 ||
+      packet->setup == 0 || packet->setup > 3 || packet->workgroup_size_x == 0 ||
+      packet->workgroup_size_y == 0 || packet->workgroup_size_z == 0 ||
+      packet->cluster_count_x == 0 || packet->cluster_count_y == 0 ||
+      packet->cluster_count_z == 0 || packet->cluster_size_x == 0 ||
+      packet->cluster_size_y == 0 || packet->cluster_size_z == 0) {
+    return HSA_STATUS_ERROR_INVALID_PACKET_FORMAT;
+  }
+
+  // The gfx1151 WDDM PM4 dispatch builder has no cluster-co-scheduling controls.
+  // Preserve the established non-cluster extended packet (dependency signal and
+  // hints included; hints may be ignored by definition) and fail closed rather
+  // than silently flattening a clustered dispatch into different semantics.
+  if (packet->cluster_size_x != 1 || packet->cluster_size_y != 1 ||
+      packet->cluster_size_z != 1) {
+    return HSA_STATUS_ERROR_INVALID_PACKET_FORMAT;
+  }
+
+  auto checked_grid_size = [](uint64_t clusters, uint64_t workgroup, uint32_t* output) {
+    if (clusters > UINT32_MAX / workgroup) return false;
+    *output = static_cast<uint32_t>(clusters * workgroup);
+    return true;
+  };
+  hsa_kernel_dispatch_packet_t lowered{};
+  if (!checked_grid_size(packet->cluster_count_x, packet->workgroup_size_x,
+                         &lowered.grid_size_x) ||
+      !checked_grid_size(packet->cluster_count_y, packet->workgroup_size_y,
+                         &lowered.grid_size_y) ||
+      !checked_grid_size(packet->cluster_count_z, packet->workgroup_size_z,
+                         &lowered.grid_size_z)) {
+    return HSA_STATUS_ERROR_INVALID_ARGUMENT;
+  }
+
+  if (packet->dep_signal.handle != 0) {
+    if (!IsOwnedUserSignal(packet->dep_signal.handle))
+      return HSA_STATUS_ERROR_INVALID_PACKET_FORMAT;
+    void* signal_reference = hsakmt_hsa_signal_acquire(packet->dep_signal);
+    if (signal_reference == nullptr) return HSA_STATUS_ERROR_INVALID_PACKET_FORMAT;
+    (void) hsakmt_hsa_signal_wait_relaxed(packet->dep_signal, HSA_SIGNAL_CONDITION_EQ, 0,
+                                          UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
+    hsakmt_hsa_signal_release(signal_reference);
+  }
+  if (packet->completion_signal.handle != 0 &&
+      !IsOwnedUserSignal(packet->completion_signal.handle)) {
+    return HSA_STATUS_ERROR_INVALID_PACKET_FORMAT;
+  }
+
+  constexpr uint16_t type_mask =
+      ((1u << HSA_PACKET_HEADER_WIDTH_TYPE) - 1u) << HSA_PACKET_HEADER_TYPE;
+  lowered.header = static_cast<uint16_t>((packet->header & ~type_mask) |
+                                         (HSA_PACKET_TYPE_KERNEL_DISPATCH
+                                          << HSA_PACKET_HEADER_TYPE));
+  lowered.setup = packet->setup;
+  lowered.workgroup_size_x = packet->workgroup_size_x;
+  lowered.workgroup_size_y = packet->workgroup_size_y;
+  lowered.workgroup_size_z = packet->workgroup_size_z;
+  lowered.private_segment_size = packet->private_segment_size;
+  lowered.group_segment_size = packet->group_segment_size;
+  lowered.kernel_object = packet->kernel_object;
+  lowered.kernarg_address = packet->kernarg_address;
+  lowered.completion_signal = packet->completion_signal;
+
+  // Lower in place so the dispatch-packet pointer observed by the kernel and the
+  // PM4 COMPUTE_DISPATCH_PKT_ADDR registers continue to identify the queue slot.
+  auto* queue_packet = reinterpret_cast<hsa_kernel_dispatch_packet_t*>(packet);
+  memcpy(queue_packet, &lowered, sizeof(lowered));
+  return KernelDispatchAqlToPm4(cpu, queue_packet);
+}
+
+hsa_status_t ComputeQueue::BarrierValueAqlToPm4(char* cpu,
+                                                hsa_amd_barrier_value_packet_t* packet) {
+  if (packet->header.AmdFormat != HSA_AMD_PACKET_TYPE_BARRIER_VALUE ||
+      packet->header.reserved != 0 || packet->reserved0 != 0 || packet->reserved1 != 0 ||
+      packet->reserved2 != 0 || packet->reserved3 != 0 ||
+      packet->cond > HSA_SIGNAL_CONDITION_GTE) {
+    return HSA_STATUS_ERROR_INVALID_PACKET_FORMAT;
+  }
+  if (packet->signal.handle != 0) {
+    if (!IsOwnedUserSignal(packet->signal.handle))
+      return HSA_STATUS_ERROR_INVALID_PACKET_FORMAT;
+    void* signal_reference = hsakmt_hsa_signal_acquire(packet->signal);
+    if (signal_reference == nullptr) return HSA_STATUS_ERROR_INVALID_PACKET_FORMAT;
+    for (;;) {
+      const hsa_signal_value_t observed =
+          hsakmt_hsa_signal_load_relaxed(packet->signal) & packet->mask;
+      bool satisfied = false;
+      switch (packet->cond) {
+        case HSA_SIGNAL_CONDITION_EQ:
+          satisfied = observed == packet->value;
+          break;
+        case HSA_SIGNAL_CONDITION_NE:
+          satisfied = observed != packet->value;
+          break;
+        case HSA_SIGNAL_CONDITION_LT:
+          satisfied = observed < packet->value;
+          break;
+        case HSA_SIGNAL_CONDITION_GTE:
+          satisfied = observed >= packet->value;
+          break;
+        default:
+          break;
+      }
+      if (satisfied) break;
+      std::this_thread::sleep_for(std::chrono::microseconds(20));
+    }
+    hsakmt_hsa_signal_release(signal_reference);
+  }
+  if (packet->completion_signal.handle != 0 &&
+      !IsOwnedUserSignal(packet->completion_signal.handle)) {
+    return HSA_STATUS_ERROR_INVALID_PACKET_FORMAT;
+  }
+
+  hsa_barrier_and_packet_t lowered{};
+  constexpr uint16_t type_mask =
+      ((1u << HSA_PACKET_HEADER_WIDTH_TYPE) - 1u) << HSA_PACKET_HEADER_TYPE;
+  lowered.header = static_cast<uint16_t>((packet->header.header & ~type_mask) |
+                                         (HSA_PACKET_TYPE_BARRIER_AND
+                                          << HSA_PACKET_HEADER_TYPE));
+  lowered.completion_signal = packet->completion_signal;
+  auto* queue_packet = reinterpret_cast<hsa_barrier_and_packet_t*>(packet);
+  memcpy(queue_packet, &lowered, sizeof(lowered));
+  return BarrierGenericAqlToPm4(cpu, queue_packet);
 }
 
 hsa_status_t ComputeQueue::BarrierGenericAqlToPm4(char* cpu, hsa_barrier_and_packet_t* packet,
@@ -869,123 +1030,186 @@ hsa_status_t ComputeQueue::BarrierGenericAqlToPm4(char* cpu, hsa_barrier_and_pac
 
   ib_size = i;
   cmdbuf_aql_frame_write_index++;
-  packet->header = HSA_PACKET_TYPE_INVALID;
+  rocr::atomic::Store(&packet->header, static_cast<uint16_t>(HSA_PACKET_TYPE_INVALID),
+                      std::memory_order_release);
 
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t ComputeQueue::VendorSpecificAqlToPm4(char* cpu, amd_aql_pm4_ib* packet) {
-  assert(packet->ven_hdr == AMD_AQL_FORMAT_PM4_IB);
+void ComputeQueue::ReleaseProfileResources(std::vector<GpuMemory*>* references,
+                                           void** signal_reference) {
+  for (auto* allocation : *references) queue_release_buffer_reference(allocation);
+  references->clear();
+  if (*signal_reference != nullptr) {
+    hsakmt_hsa_signal_release(*signal_reference);
+    *signal_reference = nullptr;
+  }
+}
 
-  uint8_t op = (packet->ib_jump_cmd[0] >> PM4_OPCODE_SHIFT) & 0xff;
-  assert(op == IT_INDIRECT_BUFFER);
-  uint32_t* pm4_addr =
-      reinterpret_cast<uint32_t*>((static_cast<uint64_t>(packet->ib_jump_cmd[2]) << 32) |
-                                  (static_cast<uint64_t>(packet->ib_jump_cmd[1]) & ~3ull));
-  uint32_t pm4_size = packet->ib_jump_cmd[3] & 0xfffff;
-  size_t required_size = platform_atomic_support_ ? sizeof(AtomicTemplate)
-                                                  : sizeof(WriteDataTemplate);
-  bool process_packet = dxg_runtime->vendor_packet_process;
+void ComputeQueue::ReleaseCompletedProfileReferences(bool wait_for_all) {
+  if (wait_for_all && !pending_profile_resources_.empty()) {
+    uint64_t fence = pending_profile_resources_.back().fence_value;
+    if (!device->CpuWait(&syncobj, &fence, 1, false)) return;
+  }
+  const uint64_t completed = *sync_addr;
+  while (!pending_profile_resources_.empty() &&
+         pending_profile_resources_.front().fence_value <= completed) {
+    ReleaseProfileResources(&pending_profile_resources_.front().allocations,
+                            &pending_profile_resources_.front().signal_reference);
+    pending_profile_resources_.pop_front();
+  }
+}
 
-  if (process_packet) {
-    required_size += static_cast<size_t>(pm4_size) * sizeof(uint32_t);
+hsa_status_t ComputeQueue::VendorSpecificAqlToPm4(char* cpu,
+                                                   profiling::AqlProfilePacket* packet) {
+  if (!profile_references_for_submit_.empty() || profile_signal_for_submit_ != nullptr)
+    return HSA_STATUS_ERROR_INVALID_PACKET_FORMAT;
 
-    if (packet->completion_signal.handle != 0) {
-      required_size += sizeof(BarrierTemplate);
-      required_size += device->Major() == 9 ? sizeof(gfx9::AcquireMemTemplate)
-                                            : sizeof(gfx10::AcquireMemTemplate);
-
-      if (EnableProfiling()) required_size += 2 * sizeof(PM4MEC_COPY_DATA);
-      if (platform_atomic_support_) required_size += sizeof(AtomicTemplate);
+  std::vector<GpuMemory*> references;
+  void* signal_reference = nullptr;
+  auto resolver = [&](uint64_t address, uint64_t size, profiling::ResolvedMemory* resolved) {
+    GpuMemory* allocation = nullptr;
+    const void* cpu_address = nullptr;
+    if (!queue_acquire_buffer_range(address, size, device, &allocation, &cpu_address)) return false;
+    bool duplicate = false;
+    for (auto* existing : references) {
+      if (existing == allocation) {
+        duplicate = true;
+        break;
+      }
     }
+    if (duplicate)
+      queue_release_buffer_reference(allocation);
+    else
+      references.emplace_back(allocation);
+    resolved->cpu_address = cpu_address;
+    resolved->owner = reinterpret_cast<uintptr_t>(allocation);
+    return true;
+  };
+  auto signal_validator = [&](uint64_t handle) {
+    if (!IsOwnedUserSignal(handle)) return false;
+    hsa_signal_t signal{handle};
+    signal_reference = hsakmt_hsa_signal_acquire(signal);
+    return signal_reference != nullptr;
+  };
+  const bool is_runtime_packet = packet->reserved[0] == profiling::kRuntimeManifestMagic;
+  const auto validation = is_runtime_packet
+                              ? profiling::ValidateRuntimePacket(device->AqlProfileCapability(),
+                                                                  *packet, resolver,
+                                                                  signal_validator)
+                              : profiling::ValidatePacket(device->AqlProfileCapability(), *packet,
+                                                          resolver, signal_validator);
+  if (validation.status != profiling::ValidationStatus::kSuccess) {
+    ReleaseProfileResources(&references, &signal_reference);
+    pr_err("reject AQL Profile vendor packet: validation status %u format=%u manifest=%08x "
+           "ib_header=%08x\n",
+           static_cast<unsigned>(validation.status), packet->format, packet->reserved[0],
+           packet->ib[0]);
+    if (validation.status == profiling::ValidationStatus::kUnsupportedCapability)
+      return static_cast<hsa_status_t>(HSA_STATUS_ERROR_NOT_SUPPORTED);
+    if (validation.status == profiling::ValidationStatus::kInvalidMemory ||
+        validation.status == profiling::ValidationStatus::kInvalidCommandBuffer)
+      return HSA_STATUS_ERROR_INVALID_ALLOCATION;
+    return HSA_STATUS_ERROR_INVALID_PACKET_FORMAT;
   }
 
+  auto next_submission_state = profiling_submission_state_;
+  if (!is_runtime_packet &&
+      next_submission_state.Advance(validation.stage, validation.profile_key) !=
+          profiling::ValidationStatus::kSuccess) {
+    ReleaseProfileResources(&references, &signal_reference);
+    return HSA_STATUS_ERROR_INVALID_PACKET_FORMAT;
+  }
+
+  const uint32_t* pm4_addr = nullptr;
+  const uint64_t pm4_gpu_address =
+      (static_cast<uint64_t>(packet->ib[2]) << 32) |
+      (static_cast<uint64_t>(packet->ib[1]) & ~3ull);
+  GpuMemory* command_allocation = nullptr;
+  const void* command_cpu_address = nullptr;
+  if (!queue_acquire_buffer_range(pm4_gpu_address,
+                                  static_cast<uint64_t>(validation.command_dwords) * sizeof(uint32_t),
+                                  device, &command_allocation, &command_cpu_address)) {
+    ReleaseProfileResources(&references, &signal_reference);
+    return HSA_STATUS_ERROR_INVALID_ALLOCATION;
+  }
+  // Validation already owns this allocation. Drop the temporary lookup reference.
+  queue_release_buffer_reference(command_allocation);
+  pm4_addr = static_cast<const uint32_t*>(command_cpu_address);
+
+  pr_debug("queue %p process VENDOR_SPECIFIC pkt pm4_addr %p pm4_size %#x cs=%" PRIx64 "\n",
+           ring, pm4_addr, validation.command_dwords, packet->completion_signal);
+
+  size_t required_size = static_cast<size_t>(validation.command_dwords) * sizeof(uint32_t);
+  required_size += platform_atomic_support_ ? sizeof(AtomicTemplate) : sizeof(WriteDataTemplate);
+  if (packet->completion_signal != 0) {
+    required_size += sizeof(BarrierTemplate);
+    required_size += device->Major() == 9 ? sizeof(gfx9::AcquireMemTemplate)
+                                          : sizeof(gfx10::AcquireMemTemplate);
+    if (EnableProfiling()) required_size += 2 * sizeof(PM4MEC_COPY_DATA);
+    if (platform_atomic_support_) required_size += sizeof(AtomicTemplate);
+  }
   if (required_size > cmdbuf_aql_frame_size) {
+    ReleaseProfileResources(&references, &signal_reference);
     pr_err("PM4 command buffer overflow in VendorSpecific: required %zu bytes, limit %u bytes\n",
            required_size, cmdbuf_aql_frame_size);
-    // Oversized vendor IB: drop the PM4 payload but still retire the AQL
-    // packet and signal completion, matching the existing
-    // vendor_packet_process=off skip contract below (no queue hang).
-    process_packet = false;
+    return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
   }
 
-  pr_debug("queue %p %s VENDOR_SPECIFIC pkt pm4_addr %p pm4_size %#x cs=%" PRIx64 "\n", ring,
-           process_packet ? "process" : "skip", pm4_addr, pm4_size,
-           packet->completion_signal.handle);
-  for (int i = 0; i < pm4_size; i++) {
-    pr_debug("pm4_addr[%d]=%#x\n", i, pm4_addr[i]);
+  uint32_t i = static_cast<uint32_t>(ib_size);
+  const int major = device->Major();
+  memcpy(cpu + i, pm4_addr, validation.command_dwords * sizeof(uint32_t));
+  i += validation.command_dwords * sizeof(uint32_t);
+
+  if (packet->completion_signal != 0) {
+    auto* signal = reinterpret_cast<amd_signal_t*>(packet->completion_signal);
+    uint64_t* signal_addr =
+        reinterpret_cast<uint64_t*>(const_cast<int64_t*>(&signal->value));
+    pr_debug("signal value=%" PRIx64 "\n", signal->value);
+
+    if (EnableProfiling()) i += cmd_util.BuildCopyData(&signal->start_ts, cpu + i);
+    i += cmd_util.BuildBarrier(cpu + i);
+    if (EnableProfiling()) i += cmd_util.BuildCopyData(&signal->end_ts, cpu + i);
+    i += cmd_util.BuildAcquireMem(major, cpu + i);
+
+    if (platform_atomic_support_)
+      i += cmd_util.BuildAtomicMem(signal_addr, TC_OP_ATOMIC_ADD_RTN_64, cpu + i,
+                                   cache_policy__mec_atomic_mem__bypass, -1);
+    else
+      signal_addr_ = signal_addr;
   }
 
-  uint32_t i = ib_size;
-
-  if (process_packet) {
-    int major = device->Major();
-    memcpy(cpu + i, pm4_addr, pm4_size * sizeof(uint32_t));
-    i += pm4_size * sizeof(uint32_t);
-
-    if (packet->completion_signal.handle != 0) {
-      amd_signal_t* signal = (amd_signal_t*)packet->completion_signal.handle;
-      assert(signal->kind == AMD_SIGNAL_KIND_USER);
-      uint64_t* signal_addr = (uint64_t*)&signal->value;
-      pr_debug("signal value=%" PRIx64 "\n", signal->value);
-
-      // Record start timestamp when enabling profiling
-      if (EnableProfiling()) i += cmd_util.BuildCopyData(&signal->start_ts, cpu + i);
-
-      // if (needs_barrier)
-      i += cmd_util.BuildBarrier(cpu + i);
-
-      // needs_barrier = false;
-
-      // Record end timestamp when enabling profiling
-      if (EnableProfiling()) i += cmd_util.BuildCopyData(&signal->end_ts, cpu + i);
-
-      // flush cache
-      i += cmd_util.BuildAcquireMem(major, cpu + i);
-
-      if (platform_atomic_support_)
-        i += cmd_util.BuildAtomicMem(signal_addr, TC_OP_ATOMIC_ADD_RTN_64, cpu + i,
-                                     cache_policy__mec_atomic_mem__bypass, -1);
-      else
-        signal_addr_ = signal_addr;
-    }
-  } else {
-    if (packet->completion_signal.handle != 0) {
-      hsakmt_hsa_signal_store_screlease(packet->completion_signal, 0);
-    }
-  }
-
-  // The ring_rptr is used to record pm4 queue rptr value,
-  // dispatch readptr position, this is used to share rptr with
-  // aql queue.
   if (platform_atomic_support_)
     i += cmd_util.BuildAtomicMem((uint64_t*)ring_rptr, TC_OP_ATOMIC_ADD_RTN_64, cpu + i);
   else
     i += cmd_util.BuildWriteData64Command(cpu + i, (uint64_t*)ring_rptr,
                                           cmdbuf_aql_frame_write_index + 1);
 
-  // Safety net: required_size above must stay in lockstep with the Build*
-  // calls emitted in this function. Catch drift in debug builds if a new
-  // Build* call is added without a matching required_size term.
-  assert((i - ib_size) <= cmdbuf_aql_frame_size);
+  if ((i - ib_size) > cmdbuf_aql_frame_size) {
+    ReleaseProfileResources(&references, &signal_reference);
+    pr_err("PM4 command buffer overflow in VendorSpecific: used %" PRIu64 " bytes, limit %u bytes\n",
+           i - ib_size, cmdbuf_aql_frame_size);
+    return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
+  }
 
+  profiling_submission_state_ = next_submission_state;
+  profile_references_for_submit_ = std::move(references);
+  profile_signal_for_submit_ = signal_reference;
+  signal_reference = nullptr;
   ib_size = i;
   cmdbuf_aql_frame_write_index++;
-  // Clear ven_hdr on consume so a recycled slot can't transiently read a stale
-  // PM4-IB format before the next producer republishes its body.
-  packet->ven_hdr = 0;
-  packet->header = HSA_PACKET_TYPE_INVALID;
+  // Clear the vendor format before publishing the recycled slot as invalid.
+  packet->format = 0;
+  rocr::atomic::Store(&packet->header, static_cast<uint16_t>(HSA_PACKET_TYPE_INVALID),
+                      std::memory_order_release);
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t ComputeQueue::SwitchAql2PM4(void) {
+hsa_status_t ComputeQueue::SwitchAql2PM4(uint16_t packet_header) {
   uint16_t* packet = (uint16_t*)((char*)ring + (cmdbuf_aql_frame_write_index % ring_size) * 64);
-  // Acquire-load the header to pair with the producer's release publication so
-  // the packet body is fully visible before we read it; a plain read races the
-  // producer's burst commit (it bumps the write index before the slot body is
-  // visible) and yields a half-published packet.
-  uint16_t header =
-      (rocr::atomic::Load(packet, std::memory_order_acquire) >> HSA_PACKET_HEADER_TYPE);
+  // Process uses the acquire-loaded header from IsInvalidPacket(), avoiding a
+  // second read of a slot that may be recycled between the two calls.
+  uint16_t header = (packet_header >> HSA_PACKET_HEADER_TYPE);
   header &= (1 << HSA_PACKET_HEADER_WIDTH_TYPE) - 1;
   hsa_kernel_dispatch_packet_t* aql_packet = (hsa_kernel_dispatch_packet_t*)packet;
   hsa_status_t ret;
@@ -1007,21 +1231,43 @@ hsa_status_t ComputeQueue::SwitchAql2PM4(void) {
 
       break;
     case HSA_PACKET_TYPE_BARRIER_AND:
-      BarrierGenericAqlToPm4((char*)ib_start_addr, (hsa_barrier_and_packet_t*)aql_packet);
+      ret = BarrierGenericAqlToPm4((char*)ib_start_addr,
+                                   (hsa_barrier_and_packet_t*)aql_packet);
+      if (ret != HSA_STATUS_SUCCESS) return ret;
       break;
     case HSA_PACKET_TYPE_BARRIER_OR:
-      BarrierGenericAqlToPm4((char*)ib_start_addr, (hsa_barrier_and_packet_t*)aql_packet, true);
+      ret = BarrierGenericAqlToPm4((char*)ib_start_addr,
+                                   (hsa_barrier_and_packet_t*)aql_packet, true);
+      if (ret != HSA_STATUS_SUCCESS) return ret;
       break;
-    case HSA_PACKET_TYPE_VENDOR_SPECIFIC:
-      // A burst commit makes the producer bump the write index before the new
-      // slot's body is fully visible: the header can already read VENDOR_SPECIFIC
-      // (type 0, which passes the INVALID gate) while ven_hdr still holds the slot's
-      // stale value. Treat that as not-yet-published and retry next iteration,
-      // exactly like an INVALID packet.
-      if (((amd_aql_pm4_ib*)aql_packet)->ven_hdr != AMD_AQL_FORMAT_PM4_IB)
-        return HSA_STATUS_SUCCESS;
-      VendorSpecificAqlToPm4((char*)ib_start_addr, (amd_aql_pm4_ib*)aql_packet);
+    case HSA_PACKET_TYPE_VENDOR_SPECIFIC: {
+      auto* vendor_packet = reinterpret_cast<profiling::AqlProfilePacket*>(aql_packet);
+      // The producer clears format when a slot is consumed. A zero format with
+      // a published vendor header therefore means a burst body is not ready yet.
+      if (vendor_packet->format == 0) return HSA_STATUS_SUCCESS;
+      switch (profiling::ClassifyVendorPacket(*vendor_packet)) {
+        case profiling::VendorPacketKind::kProfile:
+        case profiling::VendorPacketKind::kRuntime:
+          ret = VendorSpecificAqlToPm4((char*)ib_start_addr, vendor_packet);
+          break;
+        case profiling::VendorPacketKind::kBarrierValue:
+          ret = BarrierValueAqlToPm4(
+              (char*)ib_start_addr,
+              reinterpret_cast<hsa_amd_barrier_value_packet_t*>(aql_packet));
+          break;
+        case profiling::VendorPacketKind::kExtendedDispatch:
+          ret = ExtendedDispatchAqlToPm4(
+              (char*)ib_start_addr,
+              reinterpret_cast<hsa_amd_ext_kernel_dispatch_packet_t*>(aql_packet));
+          break;
+        case profiling::VendorPacketKind::kOther:
+        default:
+          ret = HSA_STATUS_ERROR_INVALID_PACKET_FORMAT;
+          break;
+      }
+      if (ret != HSA_STATUS_SUCCESS) return ret;
       break;
+    }
     case HSA_PACKET_TYPE_INVALID:
       // When packets are submitted out of order, the format field of current AQL packet
       // may not have been updated yet and is still INVALID. Return HSA_STATUS_SUCCESS and
@@ -1039,7 +1285,10 @@ hsa_status_t ComputeQueue::SwitchAql2PM4(void) {
 }
 
 hsa_status_t ComputeQueue::Process(void) {
-  while (cmdbuf_aql_frame_write_index < ring_wptr->load() && !IsInvalidPacket()) {
+  ReleaseCompletedProfileReferences(false);
+  uint16_t packet_header = HSA_PACKET_TYPE_INVALID;
+  while (cmdbuf_aql_frame_write_index < ring_wptr->load() &&
+         !IsInvalidPacket(&packet_header)) {
     pr_debug("process %p wptr=%" PRIx64 " rptr=%" PRIx64 "\n", ring, ring_wptr->load(),
              ring_rptr->load());
 
@@ -1054,13 +1303,24 @@ hsa_status_t ComputeQueue::Process(void) {
       if (!device->CpuWait(&syncobj, &value, 1, false)) return HSA_STATUS_ERROR;
     }
 
-    ret = SwitchAql2PM4();
+    ret = SwitchAql2PM4(packet_header);
     if (ret != HSA_STATUS_SUCCESS) return ret;
 
     if (!ready_to_submit) continue;
 
     ret = Submit();
-    if (ret != HSA_STATUS_SUCCESS) return ret;
+    if (ret != HSA_STATUS_SUCCESS) {
+      ReleaseProfileResources(&profile_references_for_submit_, &profile_signal_for_submit_);
+      return ret;
+    }
+    if (!profile_references_for_submit_.empty() || profile_signal_for_submit_ != nullptr) {
+      pending_profile_resources_.push_back(
+          {cmdbuf_aql_frame_write_index,
+           std::move(profile_references_for_submit_),
+           profile_signal_for_submit_});
+      profile_references_for_submit_.clear();
+      profile_signal_for_submit_ = nullptr;
+    }
 
     // CPU wait for GPU fence, and cpu update the signal.
     if (!platform_atomic_support_ && signal_addr_) {
@@ -1072,6 +1332,7 @@ hsa_status_t ComputeQueue::Process(void) {
       signal_addr_ = NULL;
     }
 
+    ReleaseCompletedProfileReferences(false);
     ready_to_submit = false;
 
     pr_debug("done %p wptr=%" PRIx64 " rptr=%" PRIx64 "\n", ring, ring_wptr->load(),

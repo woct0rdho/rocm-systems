@@ -693,6 +693,23 @@ uint32_t get_num_wddmdev() {
   return dxg_topology->wdevices_.size();
 }
 
+HSAKMT_STATUS HSAKMTAPI hsaKmtGetWddmAqlProfileCapability(
+    HSAuint32 NodeId, HsaWddmAqlProfileCapability* Capability) {
+  CHECK_DXG_OPEN();
+  if (Capability == nullptr) return HSAKMT_STATUS_INVALID_PARAMETER;
+  Capability->Version = 0;
+  Capability->MaxPm4Dwords = 0;
+
+  auto* device = get_wddmdev(NodeId);
+  if (device == nullptr) return HSAKMT_STATUS_INVALID_NODE_UNIT;
+  const auto& capability = device->AqlProfileCapability();
+  if (!capability.supported) return HSAKMT_STATUS_NOT_SUPPORTED;
+
+  Capability->Version = capability.version;
+  Capability->MaxPm4Dwords = capability.max_pm4_dwords;
+  return HSAKMT_STATUS_SUCCESS;
+}
+
 HSAKMT_STATUS topology_sysfs_get_system_props(HsaSystemProperties& props) {
   std::memset(&props, 0, sizeof(props));
 

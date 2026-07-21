@@ -77,11 +77,19 @@ template <class T> static __forceinline bool IsValid(T* ptr) {
     return AMD::handleExceptionT<RETURN_TYPE>();                                                   \
   }
 
+#ifdef HSA_PC_SAMPLING_SUPPORT
+#define RETURN_IF_PC_SAMPLING_DISABLED() ((void)0)
+#else
+#define RETURN_IF_PC_SAMPLING_DISABLED() \
+  return static_cast<hsa_status_t>(HSA_STATUS_ERROR_NOT_SUPPORTED)
+#endif
+
 namespace pcs {
 
 hsa_status_t hsa_ven_amd_pcs_iterate_configuration(
     hsa_agent_t hsa_agent, hsa_ven_amd_pcs_iterate_configuration_callback_t configuration_callback,
     void* callback_data) {
+  RETURN_IF_PC_SAMPLING_DISABLED();
   TRY;
   IS_OPEN();
 
@@ -99,6 +107,7 @@ hsa_status_t hsa_ven_amd_pcs_create(hsa_agent_t hsa_agent, hsa_ven_amd_pcs_metho
                                     size_t buffer_size,
                                     hsa_ven_amd_pcs_data_ready_callback_t data_ready_cb,
                                     void* client_cb_data, hsa_ven_amd_pcs_t* handle) {
+  RETURN_IF_PC_SAMPLING_DISABLED();
   TRY;
   IS_OPEN();
   core::Agent* agent = core::Agent::Convert(hsa_agent);
@@ -116,6 +125,7 @@ hsa_status_t hsa_ven_amd_pcs_create_from_id(uint32_t pcs_id, hsa_agent_t hsa_age
                                             size_t latency, size_t buffer_size,
                                             hsa_ven_amd_pcs_data_ready_callback_t data_ready_cb,
                                             void* client_cb_data, hsa_ven_amd_pcs_t* handle) {
+  RETURN_IF_PC_SAMPLING_DISABLED();
   TRY;
   IS_OPEN();
   core::Agent* agent = core::Agent::Convert(hsa_agent);
@@ -129,24 +139,28 @@ hsa_status_t hsa_ven_amd_pcs_create_from_id(uint32_t pcs_id, hsa_agent_t hsa_age
 }
 
 hsa_status_t hsa_ven_amd_pcs_destroy(hsa_ven_amd_pcs_t handle) {
+  RETURN_IF_PC_SAMPLING_DISABLED();
   TRY;
   return PcsRuntime::instance()->PcSamplingDestroy(handle);
   CATCH;
 }
 
 hsa_status_t hsa_ven_amd_pcs_start(hsa_ven_amd_pcs_t handle) {
+  RETURN_IF_PC_SAMPLING_DISABLED();
   TRY;
   return PcsRuntime::instance()->PcSamplingStart(handle);
   CATCH;
 }
 
 hsa_status_t hsa_ven_amd_pcs_stop(hsa_ven_amd_pcs_t handle) {
+  RETURN_IF_PC_SAMPLING_DISABLED();
   TRY;
   return PcsRuntime::instance()->PcSamplingStop(handle);
   CATCH;
 }
 
 hsa_status_t hsa_ven_amd_pcs_flush(hsa_ven_amd_pcs_t handle) {
+  RETURN_IF_PC_SAMPLING_DISABLED();
   TRY;
   return PcsRuntime::instance()->PcSamplingFlush(handle);
   CATCH;

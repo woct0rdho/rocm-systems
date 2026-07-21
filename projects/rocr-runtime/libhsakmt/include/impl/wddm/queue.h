@@ -44,9 +44,11 @@
 
 #include <cinttypes>
 #include <condition_variable>
+#include <deque>
 #include <iostream>
 #include <queue>
 #include <utility>
+#include <vector>
 #include "impl/wddm/types.h"
 #include "impl/wddm/device.h"
 #include "impl/wddm/gpu_memory.h"
@@ -170,12 +172,13 @@ public:
   uint32_t GetAqlFrameSize(void) const { return cmdbuf_aql_frame_size; }
   void* GetHsaQueueAddr(void) const { return ring; }
 
-  bool IsInvalidPacket(void) const {
-    uint16_t *packet = (uint16_t *)((char *)ring +
-                       (cmdbuf_aql_frame_write_index % ring_size) * 64);
+  bool IsInvalidPacket(uint16_t* packet_header = nullptr) const {
+    const uint16_t* packet = (const uint16_t*)((const char*)ring +
+                             (cmdbuf_aql_frame_write_index % ring_size) * 64);
     // Acquire-load to pair with the producer's release publication, consistent
     // with SwitchAql2PM4(); a plain read races a burst commit's not-yet-published slot.
-    uint16_t header = rocr::atomic::Load(packet, std::memory_order_acquire);
+    const uint16_t header = rocr::atomic::Load(packet, std::memory_order_acquire);
+    if (packet_header) *packet_header = header;
     return ((header >> HSA_PACKET_HEADER_TYPE) & ((1 << HSA_PACKET_HEADER_WIDTH_TYPE) - 1))
            == HSA_PACKET_TYPE_INVALID;
   }
@@ -187,21 +190,18 @@ public:
 
  private:
   hsa_status_t KernelDispatchAqlToPm4(char *cpu, hsa_kernel_dispatch_packet_t *packet);
+  hsa_status_t ExtendedDispatchAqlToPm4(
+      char* cpu, hsa_amd_ext_kernel_dispatch_packet_t* packet);
   hsa_status_t BarrierGenericAqlToPm4(char *cpu, hsa_barrier_and_packet_t *packet, bool is_or = false);
+  hsa_status_t BarrierValueAqlToPm4(char* cpu, hsa_amd_barrier_value_packet_t* packet);
 
   uint64_t CalcDispatchGroups(hsa_kernel_dispatch_packet_t *packet);
   uint64_t CalcDispatchWavesPerGroup(hsa_kernel_dispatch_packet_t *packet, bool wave32);
 
-  struct amd_aql_pm4_ib {
-      uint16_t header;
-      uint16_t ven_hdr;
-      uint32_t ib_jump_cmd[4];
-      uint32_t dw_cnt_remain;
-      uint32_t reserved[8];
-      hsa_signal_t completion_signal;
-  };
-  hsa_status_t VendorSpecificAqlToPm4(char *cpu, amd_aql_pm4_ib *packet);
-  hsa_status_t SwitchAql2PM4(void);
+  hsa_status_t VendorSpecificAqlToPm4(char *cpu, profiling::AqlProfilePacket *packet);
+  hsa_status_t SwitchAql2PM4(uint16_t packet_header);
+  void ReleaseCompletedProfileReferences(bool wait_for_all);
+  void ReleaseProfileResources(std::vector<GpuMemory*>* references, void** signal_reference);
 
   hsa_status_t PreSubmit(void);
   hsa_status_t EndSubmit(void);
@@ -225,6 +225,16 @@ public:
   bool platform_atomic_support_;
   bool needs_barrier;
   bool ready_to_submit;
+
+  struct PendingProfileResources {
+    uint64_t fence_value = 0;
+    std::vector<GpuMemory*> allocations;
+    void* signal_reference = nullptr;
+  };
+  profiling::SubmissionState profiling_submission_state_;
+  std::vector<GpuMemory*> profile_references_for_submit_;
+  void* profile_signal_for_submit_ = nullptr;
+  std::deque<PendingProfileResources> pending_profile_resources_;
 
   CmdUtil cmd_util;
 

@@ -2263,17 +2263,19 @@ void GpuAgent::GetInfoMemoryProperties(uint8_t value[8]) const {
 }
 
 void GpuAgent::GetAqlInfoProperties(uint8_t value[8]) const {
-  auto setFlag = [&](uint32_t bit) {
-    assert(bit < 8 * 8 && "Flag value exceeds input parameter size");
-
-    uint index = bit / 8;
-    uint subBit = bit % 8;
-    ((uint8_t*)value)[index] |= 1 << subBit;
-  };
-
-  // Fill the HSA_AMD_AQL_PROPERTY_EXT_DISPATCH
+  uint64_t properties = 0;
   if (extended_aql_dispatch_supported_)
-      setFlag(HSA_AMD_AQL_PROPERTY_EXT_DISPATCH);
+    properties |= HSA_AMD_AQL_PROPERTY_EXT_DISPATCH;
+
+#if defined(_WIN32)
+  HsaWddmAqlProfileCapability capability{};
+  if (HSAKMT_CALL(hsaKmtGetWddmAqlProfileCapability(node_id(), &capability)) ==
+          HSAKMT_STATUS_SUCCESS &&
+      capability.Version != 0) {
+    properties |= HSA_AMD_AQL_PROPERTY_PM4_IB;
+  }
+#endif
+  std::memcpy(value, &properties, sizeof(properties));
 }
 
 

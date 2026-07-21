@@ -2463,9 +2463,12 @@ bool Runtime::VMFaultHandler(hsa_signal_value_t val, void* arg) {
         !(faulty_agent->supported_isas()[0]->GetMajorVersion() == 11 &&
           faulty_agent->supported_isas()[0]->GetMinorVersion() < 5) &&
         !runtime_singleton_->KfdVersion().supports_core_dump) {
+#ifdef HSA_PC_SAMPLING_SUPPORT
       if (pcs::PcsRuntime::instance()->SessionsActive())
         fprintf(stderr, "GPU core dump skipped because PC Sampling active\n");
-      else if (amd::coredump::dump_gpu_core())
+      else
+#endif
+      if (amd::coredump::dump_gpu_core())
         fprintf(stderr, "GPU core dump failed\n");
       // Process will abort - no need to resume queues
     }
@@ -2908,7 +2911,8 @@ void Runtime::LoadTools() {
 
     if (rocp_reg_status != ROCP_REG_SUCCESS && flag().report_tool_register_failures()) {
       fprintf(stderr, "[hsa-runtime][%i] rocprofiler-register returned status code %i: %s\n",
-              getpid(), rocp_reg_status, rocprofiler_register_error_string(rocp_reg_status));
+              os::GetProcessId(), rocp_reg_status,
+              rocprofiler_register_error_string(rocp_reg_status));
     }
 
     bool allow_v1_registration = false;

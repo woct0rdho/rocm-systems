@@ -140,6 +140,13 @@ std::string GetAdjacentThunkLibraryPath(const std::string& library_name) {
       HSAKMT_PFN(hsaKmtGetVersion) = (HSAKMT_DEF(hsaKmtGetVersion)*)rocr::os::GetExportAddress(thunk_handle, "hsaKmtGetVersion");
       if (HSAKMT_PFN(hsaKmtGetVersion) == nullptr) goto LOAD_ERROR;
 
+#if defined(_WIN32)
+      HSAKMT_PFN(hsaKmtGetWddmAqlProfileCapability) =
+          (HSAKMT_DEF(hsaKmtGetWddmAqlProfileCapability)*)rocr::os::GetExportAddress(
+              thunk_handle, "hsaKmtGetWddmAqlProfileCapability");
+      if (HSAKMT_PFN(hsaKmtGetWddmAqlProfileCapability) == nullptr) goto LOAD_ERROR;
+#endif
+
       HSAKMT_PFN(hsaKmtAcquireSystemProperties) = (HSAKMT_DEF(hsaKmtAcquireSystemProperties)*)rocr::os::GetExportAddress(thunk_handle, "hsaKmtAcquireSystemProperties");
       if (HSAKMT_PFN(hsaKmtAcquireSystemProperties) == nullptr) goto LOAD_ERROR;
 
@@ -506,6 +513,11 @@ LOAD_ERROR:
       HSAKMT_PFN(hsaKmtOpenKFD) = (HSAKMT_DEF(hsaKmtOpenKFD)*)(&hsaKmtOpenKFD);
       HSAKMT_PFN(hsaKmtCloseKFD) = (HSAKMT_DEF(hsaKmtCloseKFD)*)(&hsaKmtCloseKFD);
       HSAKMT_PFN(hsaKmtGetVersion) = (HSAKMT_DEF(hsaKmtGetVersion)*)(&hsaKmtGetVersion);
+#if defined(_WIN32)
+      HSAKMT_PFN(hsaKmtGetWddmAqlProfileCapability) =
+          (HSAKMT_DEF(hsaKmtGetWddmAqlProfileCapability)*)
+              (&hsaKmtGetWddmAqlProfileCapability);
+#endif
       HSAKMT_PFN(hsaKmtAcquireSystemProperties) = (HSAKMT_DEF(hsaKmtAcquireSystemProperties)*)(&hsaKmtAcquireSystemProperties);
       HSAKMT_PFN(hsaKmtReleaseSystemProperties) = (HSAKMT_DEF(hsaKmtReleaseSystemProperties)*)(&hsaKmtReleaseSystemProperties);
       HSAKMT_PFN(hsaKmtGetNodeProperties) = (HSAKMT_DEF(hsaKmtGetNodeProperties)*)(&hsaKmtGetNodeProperties);

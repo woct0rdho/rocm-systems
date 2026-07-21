@@ -292,12 +292,17 @@ add_dependencies( ${CORE_RUNTIME_TARGET} amd_blit_shaders_v2)
 
 option(PC_SAMPLING_SUPPORT "Enable PC Sampling Support" ON)
 
+# The PC sampling entry points are part of the Windows export definition and
+# GpuAgent contains PC sampling methods regardless of this option. Keep the
+# implementation objects available for ABI/link completeness; when support is
+# disabled, the exported entry points return HSA_STATUS_ERROR_NOT_SUPPORTED and
+# the extension table is not populated.
+target_sources(${CORE_RUNTIME_TARGET} PRIVATE
+  pcs/hsa_ven_amd_pc_sampling.cpp
+  pcs/pcs_runtime.cpp)
+
 if (${PC_SAMPLING_SUPPORT})
   target_compile_definitions(${CORE_RUNTIME_TARGET} PRIVATE HSA_PC_SAMPLING_SUPPORT)
-
-  set( PCS_SRCS pcs/hsa_ven_amd_pc_sampling.cpp pcs/pcs_runtime.cpp )
-
-  target_sources( ${CORE_RUNTIME_TARGET} PRIVATE ${PCS_SRCS} )
 endif()
 
 if (${AMDCUID_FOUND})
@@ -390,7 +395,6 @@ else()
   target_link_libraries(${CORE_RUNTIME_TARGET} PRIVATE dxcore)
 endif()
 
-# For static package rocprofiler-register dependency is not required
 # Link to hsakmt target for shared library builds
 # Link to hsakmt-staticdrm target for static library builds
 if( BUILD_SHARED_LIBS )
@@ -400,17 +404,6 @@ if( BUILD_SHARED_LIBS )
       message(STATUS "Building with virtio support")
       target_link_libraries ( ${CORE_RUNTIME_TARGET} PRIVATE hsakmt_virtio)
     endif()
-    find_package(rocprofiler-register)
-    if(rocprofiler-register_FOUND)
-      target_compile_definitions(${CORE_RUNTIME_TARGET} PRIVATE HSA_ROCPROFILER_REGISTER=1
-                                                                HSA_VERSION_MAJOR=${VERSION_MAJOR}
-                                                                HSA_VERSION_MINOR=${VERSION_MINOR}
-                                                                HSA_VERSION_PATCH=${VERSION_PATCH})
-      target_link_libraries(${CORE_RUNTIME_TARGET} PRIVATE rocprofiler-register::rocprofiler-register)
-      set(HSA_DEP_ROCPROFILER_REGISTER ON CACHE INTERNAL "")
-    else()
-      set(HSA_DEP_ROCPROFILER_REGISTER OFF CACHE INTERNAL "")
-    endif() # end rocprofiler-register_FOUND
   else()
     target_link_libraries ( ${CORE_RUNTIME_TARGET} PRIVATE hsakmt::hsakmt)
   endif()
@@ -422,6 +415,24 @@ else()
     target_link_libraries ( ${CORE_RUNTIME_TARGET} PRIVATE hsakmt-staticdrm::hsakmt-staticdrm)
   endif()
 endif()#end BUILD_SHARED_LIBS
+
+# Shared ROCr registers on every platform. The Windows HIP runtime embeds static
+# ROCr, so that static target must retain the HSA producer registration path too.
+if(BUILD_SHARED_LIBS OR WIN32)
+  find_package(rocprofiler-register CONFIG QUIET)
+  if(rocprofiler-register_FOUND)
+    target_compile_definitions(${CORE_RUNTIME_TARGET} PRIVATE HSA_ROCPROFILER_REGISTER=1
+                                                              HSA_VERSION_MAJOR=${VERSION_MAJOR}
+                                                              HSA_VERSION_MINOR=${VERSION_MINOR}
+                                                              HSA_VERSION_PATCH=${VERSION_PATCH})
+    target_link_libraries(${CORE_RUNTIME_TARGET} PRIVATE rocprofiler-register::rocprofiler-register)
+    set(HSA_DEP_ROCPROFILER_REGISTER ON CACHE INTERNAL "")
+  else()
+    set(HSA_DEP_ROCPROFILER_REGISTER OFF CACHE INTERNAL "")
+  endif() # end rocprofiler-register_FOUND
+else()
+  set(HSA_DEP_ROCPROFILER_REGISTER OFF CACHE INTERNAL "")
+endif()
 
 ## Set the VERSION and SOVERSION values
 set_property ( TARGET ${CORE_RUNTIME_TARGET} PROPERTY VERSION "${SO_VERSION_STRING}" )

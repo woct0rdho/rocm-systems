@@ -581,23 +581,13 @@ static HSAKMT_STATUS init_vars_from_env(void) {
     dxg_runtime->zfb_support = safe_env_to_int(envvar, 0);
   }
 
-  // Enable vendor-specific AQL packet processing if WSLKMT_VENDOR_PACKET is set.
-  if ((envvar = getenv("WSLKMT_VENDOR_PACKET")) != nullptr) {
-    dxg_runtime->vendor_packet_process = safe_env_to_int(envvar, 0);
-  }
-
   // Enable thunk sub-allocator via WSL_ENABLE_THUNK_SUB_ALLOCATOR.
   if ((envvar = getenv("WSL_ENABLE_THUNK_SUB_ALLOCATOR")) != nullptr) {
     dxg_runtime->enable_thunk_sub_allocator = safe_env_to_int(envvar, 0);
   }
 
-  // Enable PM4 packet usage if ROCR_USE_PM4 is set.
-  if ((envvar = getenv("ROCR_USE_PM4")) != nullptr) {
-    dxg_runtime->use_pm4_ = safe_env_to_int(envvar, 0);
-  }
-#ifdef __linux__
-  dxg_runtime->use_pm4_ = 1;  // Force PM4 usage on Linux for now
-#endif
+  // WDDM AQL Profile packet handling is selected from device/runtime capability.
+  // ROCR_USE_PM4 and WSLKMT_VENDOR_PACKET are intentionally not product inputs.
 
   // Disable wait timeout if ROCR_DISABLE_WAIT_TIMEOUT is set.
   if ((envvar = getenv("ROCR_DISABLE_WAIT_TIMEOUT")) != nullptr) {

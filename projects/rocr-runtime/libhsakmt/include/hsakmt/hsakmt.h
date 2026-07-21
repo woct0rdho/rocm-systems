@@ -85,6 +85,19 @@ hsaKmtGetVersion(
     HsaVersionInfo*  VersionInfo    //OUT
     );
 
+#if defined(_WIN32)
+/**
+  Describes the validated WDDM AQL Profile PM4 indirect-buffer capability.
+  Version and MaxPm4Dwords are zero when the node is unsupported.
+*/
+HSAKMT_STATUS
+HSAKMTAPI
+hsaKmtGetWddmAqlProfileCapability(
+    HSAuint32 NodeId,
+    HsaWddmAqlProfileCapability* Capability //OUT
+    );
+#endif
+
 /**
   The function takes a "snapshot" of the topology information within the KFD
   to avoid any changes during the enumeration process.

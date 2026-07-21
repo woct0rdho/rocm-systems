@@ -52,8 +52,16 @@ if(WIN32)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
+if(POLICY CMP0091)
+  cmake_policy(SET CMP0091 NEW)
+endif()
+
 # Set the project name
 project("rocr")
+if(WIN32 AND NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING
+      "MSVC runtime used by the prebuilt Windows WKMI archive")
+endif()
 set( CORE_TARGET "hsa-rocr" )
 set( BUILD_ENABLE_LINTIAN_OVERRIDES ON CACHE BOOL "Enable/Disable Lintian Overrides" )
 set( BUILD_DEBIAN_PKGING_FLAG ON CACHE BOOL "Internal Status Flag to indicate Debian Packaging Build" )
@@ -68,6 +76,7 @@ set ( BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS} CACHE BOOL "Build shared library (.
 if (NOT DEFINED BUILD_ROCR)
   set(BUILD_ROCR ON)
 endif()
+option(ROCR_BUILD_WINDOWS_TESTS "Build CPU-only Windows ROCr/libhsakmt tests" OFF)
 
 function(add_rocm_subdir subdir subdir_assigns)
     message("add_rocm_subdir() -- " ${subdir})
@@ -160,6 +169,12 @@ endif()
   else()
     add_dependencies(hsa-runtime64 hsakmt-staticdrm)
   endif()
+endif()
+
+if(WIN32 AND ROCR_BUILD_WINDOWS_TESTS)
+  enable_testing()
+  include(CTest)
+  add_subdirectory(libhsakmt/tests/wddm)
 endif()
 
 # Optionally record the package's find module in the user's package cache.

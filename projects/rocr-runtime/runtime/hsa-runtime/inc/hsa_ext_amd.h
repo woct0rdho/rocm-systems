@@ -1004,6 +1004,11 @@ typedef enum hsa_amd_agent_memory_properties_s {
  */
 typedef enum hsa_amd_agent_aql_properties_s {
   HSA_AMD_AQL_PROPERTY_EXT_DISPATCH = (1 << 0),
+  /**
+   * The agent accepts validated AQL Profile PM4 indirect-buffer packets through
+   * the ordinary queue-submission path.
+   */
+  HSA_AMD_AQL_PROPERTY_PM4_IB = (1 << 1),
 } hsa_amd_agent_aql_properties_t;
 
 /**

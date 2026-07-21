@@ -72,6 +72,9 @@
 #include "core/inc/amd_gpu_pm4.h"
 #include "core/inc/hsa_amd_tool_int.hpp"
 #include "core/inc/amd_core_dump.hpp"
+#if defined(_WIN32)
+#include "impl/wddm/profiling.h"
+#endif
 
 namespace rocr {
 namespace AMD {
@@ -1479,9 +1482,12 @@ bool AqlQueue::ExceptionHandler(hsa_signal_value_t error_code, void* arg) {
                 !(queue->agent_->supported_isas()[0]->GetMajorVersion() == 11
                   && queue->agent_->supported_isas()[0]->GetMinorVersion() < 5)) {
 
+#ifdef HSA_PC_SAMPLING_SUPPORT
     if (pcs::PcsRuntime::instance()->SessionsActive())
       fprintf(stderr, "GPU core dump skipped because PC Sampling active\n");
-    else if (amd::coredump::dump_gpu_core(&suspended_queues))
+    else
+#endif
+    if (amd::coredump::dump_gpu_core(&suspended_queues))
       fprintf(stderr, "GPU core dump failed\n");
     // supports_core_dump flag is overwritten to avoid generate core dump file again
     // caught by a different exception handler. Such as VMFaultHandler.
@@ -1719,6 +1725,15 @@ void AqlQueue::ExecutePM4(uint32_t* cmd_data, size_t cmd_size_b, hsa_fence_scope
     aql_pm4_ib.ib_jump_cmd[2] = ib_jump_cmd[2];
     aql_pm4_ib.ib_jump_cmd[3] = ib_jump_cmd[3];
     aql_pm4_ib.dw_cnt_remain = 0xA;
+#if defined(_WIN32)
+    const uint32_t command_dwords = static_cast<uint32_t>(cmd_size_b / sizeof(uint32_t));
+    aql_pm4_ib.reserved[0] = wsl::thunk::profiling::kRuntimeManifestMagic;
+    aql_pm4_ib.reserved[1] = wsl::thunk::profiling::kRuntimeManifestVersion;
+    aql_pm4_ib.reserved[2] = command_dwords;
+    aql_pm4_ib.reserved[3] =
+        wsl::thunk::profiling::CommandChecksum(static_cast<const uint32_t*>(pm4_ib_buf_),
+                                               command_dwords);
+#endif
     aql_pm4_ib.completion_signal = in_signal ? *in_signal : local_signal;
 
     memcpy(slot_data, &aql_pm4_ib, sizeof(aql_pm4_ib));

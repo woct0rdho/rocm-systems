@@ -29,6 +29,26 @@ has not completed qualification additionally requires
 does not add an ASIC to the default qualification allowlist. GFX12 is outside
 this port and reports no retained-PM4 capability.
 
+On Windows the WDDM thunk translates an AQL PM4 indirect-buffer packet into
+PM4 commands. A stream that fits the remainder of the current frame is still
+inlined there. A larger retained list is copied into a dedicated variable-size
+command buffer and submitted as the command buffer itself, because WDDM makes
+only the buffer passed to the submission fetchable; an indirect-buffer jump
+into a separate allocation is not supported. The thunk keeps two such buffers
+per queue, each capped by the 20-bit ``IT_INDIRECT_BUFFER`` length field
+(``0xfffff`` dwords, about 4 MiB), and reuses a buffer only after the monitored
+fence of the submission that consumed it has retired.
+
+The AQL-to-PM4 capability reports version 2 when this path is available. ROCR
+allows command lists up to the variable-buffer cap only for a version-2 thunk;
+a version-1 thunk retains the old 1984-dword inlined-frame budget. Lists beyond
+the effective cap are rejected by
+``hsa_ven_amd_graph_command_list_create`` with
+``HSA_STATUS_ERROR_OUT_OF_RESOURCES`` so HIP falls back to the ordinary AQL
+batch path. The old ``WRTM``/``WCMP`` manifest and checksum are not part of the
+current path; the thunk validates size and bounds and trusts the producer
+packet.
+
 Reference snapshot
 ------------------
 

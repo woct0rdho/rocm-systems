@@ -27,7 +27,9 @@
 #include "lib/common/sha256.hpp"
 
 #include <fmt/format.h>
-#include <unistd.h>
+#if defined(_WIN32)
+#    include <Windows.h>
+#endif
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -45,6 +47,23 @@ namespace common
 uint64_t
 get_process_start_ticks_since_boot(pid_t pid)
 {
+#if defined(_WIN32)
+    auto process = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
+    if(process == nullptr) return 0;
+
+    auto creation = FILETIME{};
+    auto exit     = FILETIME{};
+    auto kernel   = FILETIME{};
+    auto user     = FILETIME{};
+    const auto ok = ::GetProcessTimes(process, &creation, &exit, &kernel, &user);
+    ::CloseHandle(process);
+    if(!ok) return 0;
+
+    auto value       = ULARGE_INTEGER{};
+    value.LowPart    = creation.dwLowDateTime;
+    value.HighPart   = creation.dwHighDateTime;
+    return value.QuadPart;
+#else
     auto line = std::string{};
 
     // Read the stat file
@@ -91,6 +110,7 @@ get_process_start_ticks_since_boot(pid_t pid)
     }
 
     return start_ticks;
+#endif
 }
 
 uint64_t

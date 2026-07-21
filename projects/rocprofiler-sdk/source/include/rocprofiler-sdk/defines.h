@@ -25,6 +25,22 @@
 #include <stdint.h>
 
 /**
+ * @def ROCPROFILER_SDK_WINDOWS_MINIMAL_API
+ * @brief Expands to 1 when a client is being compiled for the native Windows SDK subset.
+ *
+ * The native Windows package supports agent and counter queries, contexts, callback and buffered
+ * dispatch counting, external correlation, marker-control selected regions, and the documented
+ * HIP/ROCTX subset. Linux-only KFD, PC-sampling, ATT, SPM, attachment, and optional output-service
+ * APIs are not exported by that package. Consumers can use this macro instead of probing for
+ * accidental missing PE symbols.
+ */
+#if defined(_WIN32)
+#    define ROCPROFILER_SDK_WINDOWS_MINIMAL_API 1
+#else
+#    define ROCPROFILER_SDK_WINDOWS_MINIMAL_API 0
+#endif
+
+/**
  * @defgroup SYMBOL_VERSIONING_GROUP Symbol Versions
  *
  * @brief The names used for the shared library versioned symbols.
@@ -101,7 +117,10 @@
 
 #if !defined(ROCPROFILER_ATTRIBUTE)
 #    if defined(_MSC_VER)
-#        define ROCPROFILER_ATTRIBUTE(...) __declspec(__VA_ARGS__)
+/* The generic attribute macro is used with GNU attributes such as pure, nonnull, and
+ * visibility. These are not valid __declspec arguments. Windows exports are handled by
+ * target-level PE/COFF export generation, so unsupported generic attributes are omitted. */
+#        define ROCPROFILER_ATTRIBUTE(...)
 #    else
 #        define ROCPROFILER_ATTRIBUTE(...) __attribute__((__VA_ARGS__))
 #    endif
@@ -139,7 +158,12 @@
 #define ROCPROFILER_IMPORT ROCPROFILER_IMPORT_DECORATOR
 
 #if !defined(ROCPROFILER_API)
-#    if defined(rocprofiler_EXPORTS)
+#    if defined(_MSC_VER)
+/* Public declarations place ROCPROFILER_API after the function declarator. MSVC does not
+ * accept __declspec(dllimport/dllexport) in that position, so Windows targets export their
+ * C API through CMake's WINDOWS_EXPORT_ALL_SYMBOLS support instead. */
+#        define ROCPROFILER_API
+#    elif defined(rocprofiler_EXPORTS)
 #        define ROCPROFILER_API ROCPROFILER_EXPORT
 #    else
 #        define ROCPROFILER_API ROCPROFILER_IMPORT

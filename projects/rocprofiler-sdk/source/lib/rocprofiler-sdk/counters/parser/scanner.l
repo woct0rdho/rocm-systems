@@ -3,6 +3,13 @@
 %{
 #include <fmt/format.h>
 
+#ifdef _WIN32
+#    include <io.h>
+#    define fileno _fileno
+#    define isatty _isatty
+#    define strdup _strdup
+#endif
+
 #include "raw_ast.hpp"
 #include "parser.h"
 using namespace std;

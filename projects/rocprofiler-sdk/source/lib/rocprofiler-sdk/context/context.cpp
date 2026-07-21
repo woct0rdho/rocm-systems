@@ -30,14 +30,18 @@
 #include "lib/rocprofiler-sdk/buffer.hpp"
 #include "lib/rocprofiler-sdk/counters/core.hpp"
 #include "lib/rocprofiler-sdk/hsa/queue_interposition.hpp"
-#include "lib/rocprofiler-sdk/kfd/kfd_profiler.hpp"
-#include "lib/rocprofiler-sdk/pc_sampling/service.hpp"
-#include "lib/rocprofiler-sdk/thread_trace/core.hpp"
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+#    include "lib/rocprofiler-sdk/kfd/kfd_profiler.hpp"
+#    include "lib/rocprofiler-sdk/pc_sampling/service.hpp"
+#    include "lib/rocprofiler-sdk/thread_trace/core.hpp"
+#endif
 
 #include <rocprofiler-sdk/buffer_tracing.h>
 #include <rocprofiler-sdk/fwd.h>
 
-#include <unistd.h>
+#if !defined(_WIN32)
+#    include <unistd.h>
+#endif
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
@@ -312,30 +316,34 @@ get_contexts_mutex()
     return _v;
 }
 
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
 bool
 spm_dispatch_counter_collection_service::intersects(
     const spm_dispatch_counter_collection_service& rhs) const
 {
     if(agents.empty() || rhs.agents.empty()) return true;
-    const auto& small = (agents.size() < rhs.agents.size()) ? agents : rhs.agents;
-    const auto& large = (agents.size() < rhs.agents.size()) ? rhs.agents : agents;
-    for(const auto& agent_id : small)
+    // |small| is a legacy MSVC macro (rpcndr.h defines it as char), so the locals are named
+    // |fewer|/|more| instead.
+    const auto& fewer = (agents.size() < rhs.agents.size()) ? agents : rhs.agents;
+    const auto& more  = (agents.size() < rhs.agents.size()) ? rhs.agents : agents;
+    for(const auto& agent_id : fewer)
     {
-        if(large.count(agent_id) > 0) return true;
+        if(more.count(agent_id) > 0) return true;
     }
     return false;
 }
+#endif
 
 bool
 dispatch_counter_collection_service::intersects(
     const dispatch_counter_collection_service& rhs) const
 {
     if(agents.empty() || rhs.agents.empty()) return true;
-    const auto& small = (agents.size() < rhs.agents.size()) ? agents : rhs.agents;
-    const auto& large = (agents.size() < rhs.agents.size()) ? rhs.agents : agents;
-    for(const auto& agent_id : small)
+    const auto& fewer = (agents.size() < rhs.agents.size()) ? agents : rhs.agents;
+    const auto& more  = (agents.size() < rhs.agents.size()) ? rhs.agents : agents;
+    for(const auto& agent_id : fewer)
     {
-        if(large.count(agent_id) > 0) return true;
+        if(more.count(agent_id) > 0) return true;
     }
     return false;
 }
@@ -554,6 +562,7 @@ start_context(rocprofiler_context_id_t context_id)
                 // still conflicts with any other counter-collection context.
                 return ROCPROFILER_STATUS_ERROR_CONTEXT_CONFLICT;
             }
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
             else if(cfg->dispatch_spm && itr->dispatch_spm &&
                     cfg->dispatch_spm->intersects(*itr->dispatch_spm))
             {
@@ -569,6 +578,7 @@ start_context(rocprofiler_context_id_t context_id)
                 // post_kernel_call.
                 return ROCPROFILER_STATUS_ERROR_CONTEXT_CONFLICT;
             }
+#endif
         }
 
         // try to find a nullptr slot first
@@ -631,14 +641,17 @@ start_context(rocprofiler_context_id_t context_id)
 
     auto status = ROCPROFILER_STATUS_SUCCESS;
 
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
     // A context that traces kernel dispatch is the only reason to arm the KFD
     // dispatch-log ring, so arm it here rather than at startup. Idempotent, and
     // early enough that the firmware is recording before the first dispatch.
     if(cfg->is_tracing_one_of(ROCPROFILER_BUFFER_TRACING_KERNEL_DISPATCH,
                               ROCPROFILER_CALLBACK_TRACING_KERNEL_DISPATCH))
         rocprofiler::kfd::arm_dispatch_log_sessions();
+#endif
 
     if(cfg->dispatch_counter_collection) rocprofiler::counters::start_context(cfg);
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
     if(cfg->dispatch_spm) status = rocprofiler::spm::start_context(cfg);
     if(cfg->device_thread_trace) cfg->device_thread_trace->start_context();
     if(cfg->dispatch_thread_trace) cfg->dispatch_thread_trace->start_context();
@@ -649,10 +662,13 @@ start_context(rocprofiler_context_id_t context_id)
     _release_pending();
 
     if(cfg->device_counter_collection) status = rocprofiler::counters::start_agent_ctx(cfg);
+#endif
 #if ROCPROFILER_SDK_HSA_PC_SAMPLING > 0
     if(cfg->pc_sampler) status = rocprofiler::pc_sampling::start_service(cfg);
 #endif
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
     if(cfg->device_spm) status = rocprofiler::SPM::spm_start_agent_ctx(cfg);
+#endif
 
     return status;
 }
@@ -720,11 +736,12 @@ stop_context(rocprofiler_context_id_t idx)
         rocprofiler::counters::stop_context(const_cast<context*>(_expected));
     }
 
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
     if(_expected->dispatch_spm) rocprofiler::spm::stop_context(const_cast<context*>(_expected));
 
     if(_expected->device_thread_trace) _expected->device_thread_trace->stop_context();
     if(_expected->dispatch_thread_trace) _expected->dispatch_thread_trace->stop_context();
-
+#endif
     // Phase three, relocked: retire the slot. The element address is stable across phase two --
     // stable_vector never moves an element once constructed -- so slot is still the entry the
     // search found.
@@ -751,6 +768,7 @@ stop_context(rocprofiler_context_id_t idx)
     rocprofiler::hsa::queue_interposition::notify_queue_interposition_consumer_context_stopped(
         _expected);
 
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
     if(_expected->device_counter_collection)
     {
         rocprofiler::counters::stop_agent_ctx(const_cast<context*>(_expected));
@@ -759,6 +777,7 @@ stop_context(rocprofiler_context_id_t idx)
     {
         rocprofiler::SPM::spm_stop_agent_ctx(_expected);
     }
+#endif
 
 #if ROCPROFILER_SDK_HSA_PC_SAMPLING > 0
     if(_expected->pc_sampler)

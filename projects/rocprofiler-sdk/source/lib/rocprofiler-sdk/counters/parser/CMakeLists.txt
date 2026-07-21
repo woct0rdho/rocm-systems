@@ -41,7 +41,9 @@ endif()
 target_sources(rocprofiler-sdk-expr-parser PRIVATE ${expr_parser_sources})
 target_include_directories(rocprofiler-sdk-expr-parser
                            PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_definitions(rocprofiler-sdk-expr-parser PRIVATE YY_NO_INPUT)
+target_compile_definitions(
+    rocprofiler-sdk-expr-parser
+    PRIVATE YY_NO_INPUT $<$<BOOL:${WIN32}>:YY_NO_UNISTD_H>)
 target_link_libraries(rocprofiler-sdk-expr-parser
                       PRIVATE rocprofiler-sdk::rocprofiler-sdk-common-library)
 target_sources(rocprofiler-sdk-object-library

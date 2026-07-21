@@ -34,7 +34,9 @@
 #include "lib/rocprofiler-sdk/hsa/queue.hpp"
 #include "lib/rocprofiler-sdk/hsa/queue_controller.hpp"
 #include "lib/rocprofiler-sdk/kernel_dispatch/profiling_time.hpp"
-#include "lib/rocprofiler-sdk/kernel_replay/local_context.hpp"
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+#    include "lib/rocprofiler-sdk/kernel_replay/local_context.hpp"
+#endif
 
 #include <rocprofiler-sdk/fwd.h>
 #include <rocprofiler-sdk/rocprofiler.h>
@@ -84,8 +86,10 @@ queue_cb(const context::context*                                  ctx,
     const bool is_enabled = [&] {
         bool enabled = false;
         ctx->dispatch_counter_collection->enabled.rlock([&](const auto& c) { enabled = c; });
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
         if(auto ov = kernel_replay::local_context_override({.handle = ctx->context_idx}))
             enabled = enabled && *ov;
+#endif
         return enabled;
     }();
 

@@ -27,7 +27,9 @@
 #include "lib/rocprofiler-sdk/agent.hpp"
 #include "lib/rocprofiler-sdk/buffer.hpp"
 #include "lib/rocprofiler-sdk/context/context.hpp"
-#include "lib/rocprofiler-sdk/counters/firmware_restrictions.hpp"
+#if !defined(_WIN32)
+#    include "lib/rocprofiler-sdk/counters/firmware_restrictions.hpp"
+#endif
 #include "lib/rocprofiler-sdk/counters/ioctl.hpp"
 #include "lib/rocprofiler-sdk/counters/metrics.hpp"
 
@@ -106,8 +108,10 @@ CounterController::CounterController()
 {
     // Pre-read metrics map file to catch failures during initial setup.
     rocprofiler::counters::loadMetrics();
+#if !defined(_WIN32)
     rocprofiler::counters::check_installed_firmware_restrictions();
     check_power_performance_level();
+#endif
 }
 
 // Adds a counter collection profile to our global cache.
@@ -140,6 +144,14 @@ CounterController::configure_agent_collection(rocprofiler_context_id_t          
                                               rocprofiler_device_counting_service_cb_t cb,
                                               void*                                    user_data)
 {
+#if defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+    static_cast<void>(context_id);
+    static_cast<void>(buffer_id);
+    static_cast<void>(agent_id);
+    static_cast<void>(cb);
+    static_cast<void>(user_data);
+    return ROCPROFILER_STATUS_ERROR_NOT_IMPLEMENTED;
+#else
     auto* ctx_p = rocprofiler::context::get_mutable_registered_context(context_id);
     if(!ctx_p) return ROCPROFILER_STATUS_ERROR_CONTEXT_INVALID;
 
@@ -190,6 +202,7 @@ CounterController::configure_agent_collection(rocprofiler_context_id_t          
     }
 
     return ROCPROFILER_STATUS_SUCCESS;
+#endif
 }
 
 // Setup the counter collection service. counter_callback_info is created here

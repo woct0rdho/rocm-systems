@@ -102,7 +102,7 @@ perform_reduction_to_single_instance(ReduceOperation                            
                                              .dispatch_id   = input_array->begin()->dispatch_id,
                                              .user_data     = input_array->begin()->user_data,
                                              .agent_id      = input_array->begin()->agent_id},
-                [](auto& a, auto& b) {
+                [](const auto& a, const auto& b) {
                     return rocprofiler_counter_record_t{
                         .id            = a.id,
                         .counter_value = a.counter_value + b.counter_value,

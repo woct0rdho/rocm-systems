@@ -63,7 +63,7 @@ if(WIN32)
     install(
         TARGETS rocprofv3-list-avail
         EXPORT rocprofiler-sdk-tool-targets
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}/rocprofiler-sdk
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/rocprofiler-sdk
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}/rocprofiler-sdk
         COMPONENT tools)

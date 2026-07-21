@@ -47,14 +47,37 @@
     ((10000 * ROCPROFILER_REGISTER_VERSION_MAJOR) +                                      \
      (100 * ROCPROFILER_REGISTER_VERSION_MINOR) + ROCPROFILER_REGISTER_VERSION_PATCH)
 
-#define ROCPROFILER_REGISTER_ATTRIBUTE(...)   __attribute__((__VA_ARGS__))
 #define ROCPROFILER_REGISTER_PP_COMBINE(X, Y) X##Y
 
-#if defined(rocprofiler_register_EXPORTS)
+#if defined(_WIN32)
+#    define ROCPROFILER_REGISTER_ATTRIBUTE(...)
+#    if defined(rocprofiler_register_EXPORTS)
+#        define ROCPROFILER_REGISTER_PUBLIC_API __declspec(dllexport)
+#    else
+#        define ROCPROFILER_REGISTER_PUBLIC_API __declspec(dllimport)
+#    endif
+#    define ROCPROFILER_REGISTER_IMPORT_API   __declspec(dllexport)
+#    define ROCPROFILER_REGISTER_HIDDEN_API
+#    define ROCPROFILER_REGISTER_INTERNAL_API
+#    define ROCPROFILER_REGISTER_VISIBILITY(MODE)
+#    define ROCPROFILER_REGISTER_INLINE       __forceinline
+#    define ROCPROFILER_REGISTER_NOINLINE     __declspec(noinline)
+#    define ROCPROFILER_REGISTER_HOT
+#    define ROCPROFILER_REGISTER_COLD
+#    define ROCPROFILER_REGISTER_CONST
+#    define ROCPROFILER_REGISTER_PURE
+#    define ROCPROFILER_REGISTER_WEAK
+#    define ROCPROFILER_REGISTER_PACKED
+#    define ROCPROFILER_REGISTER_PACKED_ALIGN(VAL) __declspec(align(VAL))
+#    define ROCPROFILER_REGISTER_LIKELY(...)       (__VA_ARGS__)
+#    define ROCPROFILER_REGISTER_UNLIKELY(...)     (__VA_ARGS__)
+#elif defined(rocprofiler_register_EXPORTS)
+#    define ROCPROFILER_REGISTER_ATTRIBUTE(...) __attribute__((__VA_ARGS__))
 // only defined in build tree
 #    define ROCPROFILER_REGISTER_VISIBILITY(MODE)                                        \
         ROCPROFILER_REGISTER_ATTRIBUTE(visibility(MODE))
 #    define ROCPROFILER_REGISTER_PUBLIC_API   ROCPROFILER_REGISTER_VISIBILITY("default")
+#    define ROCPROFILER_REGISTER_IMPORT_API   ROCPROFILER_REGISTER_PUBLIC_API
 #    define ROCPROFILER_REGISTER_HIDDEN_API   ROCPROFILER_REGISTER_VISIBILITY("hidden")
 #    define ROCPROFILER_REGISTER_INTERNAL_API ROCPROFILER_REGISTER_VISIBILITY("internal")
 #    define ROCPROFILER_REGISTER_INLINE                                                  \
@@ -96,8 +119,11 @@
 #        endif
 #    endif
 #else
+#    define ROCPROFILER_REGISTER_ATTRIBUTE(...) __attribute__((__VA_ARGS__))
 #    define ROCPROFILER_REGISTER_VISIBILITY(MODE)
 #    define ROCPROFILER_REGISTER_PUBLIC_API
+#    define ROCPROFILER_REGISTER_IMPORT_API                                         \
+        ROCPROFILER_REGISTER_ATTRIBUTE(visibility("default"))
 #    define ROCPROFILER_REGISTER_HIDDEN_API
 #    define ROCPROFILER_REGISTER_INTERNAL_API
 #endif

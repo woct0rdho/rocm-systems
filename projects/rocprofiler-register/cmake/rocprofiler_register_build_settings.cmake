@@ -30,7 +30,12 @@ if(CMAKE_DL_LIBS AND NOT "${CMAKE_DL_LIBS}" STREQUAL "dl")
 endif()
 
 foreach(_TYPE dl rt)
-    if(NOT ${_TYPE}_LIBRARY)
+    if(WIN32)
+        string(TOUPPER "${_TYPE}" _TYPE_UC)
+        rocprofiler_register_target_compile_definitions(
+            rocprofiler-register-${_TYPE}
+            INTERFACE ROCPROFILER_REGISTER_${_TYPE_UC}=0)
+    elseif(NOT ${_TYPE}_LIBRARY)
         find_library(${_TYPE}_LIBRARY NAMES ${_TYPE})
         find_package_handle_standard_args(${_TYPE}-library REQUIRED_VARS ${_TYPE}_LIBRARY)
         if(${_TYPE}-library_FOUND)

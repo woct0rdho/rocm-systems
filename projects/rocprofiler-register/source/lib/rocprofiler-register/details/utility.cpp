@@ -25,9 +25,6 @@
 #include <string>
 #include <string_view>
 
-#include <sys/types.h>
-#include <unistd.h>
-
 namespace rocprofiler_register
 {
 namespace utility

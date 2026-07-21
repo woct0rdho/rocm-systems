@@ -23,10 +23,12 @@
 #include <fmt/format.h>
 #include <glog/logging.h>
 
-#include <unistd.h>
+#include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -97,10 +99,12 @@ get_env_impl(std::string_view env_id, bool _default)
             return static_cast<bool>(std::stoi(env_var));
         }
 
-        for(size_t i = 0; i < strlen(env_var); ++i)
-            env_var[i] = tolower(env_var[i]);
+        auto value = std::string{env_var};
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
         for(const auto& itr : { "off", "false", "no", "n", "f", "0" })
-            if(strcmp(env_var, itr) == 0) return false;
+            if(value == itr) return false;
 
         return true;
     }
@@ -108,9 +112,21 @@ get_env_impl(std::string_view env_id, bool _default)
 }
 
 inline int
+set_env_string(std::string_view env_id, std::string_view value, int overwrite)
+{
+#if defined(_WIN32)
+    if(!overwrite && std::getenv(std::string{env_id}.c_str()) != nullptr) return 0;
+    return _putenv_s(std::string{env_id}.c_str(), std::string{value}.c_str());
+#else
+    return ::setenv(
+        std::string{env_id}.c_str(), std::string{value}.c_str(), overwrite);
+#endif
+}
+
+inline int
 set_env_impl(std::string_view env_id, bool value, int overwrite)
 {
-    return ::setenv(env_id.data(), (value) ? "1" : "0", overwrite);
+    return set_env_string(env_id, (value) ? "1" : "0", overwrite);
 }
 
 template <typename Tp>
@@ -119,7 +135,7 @@ set_env_impl(std::string_view env_id, Tp value, int overwrite)
 {
     auto str_value = std::stringstream{};
     str_value << value;
-    return ::setenv(env_id.data(), str_value.str().c_str(), overwrite);
+    return set_env_string(env_id, str_value.str(), overwrite);
 }
 }  // namespace
 
@@ -157,7 +173,7 @@ struct env_config
         if(env_name.empty()) return -1;
         LOG(INFO) << fmt::format(
             "setenv({}, {}, {})", env_name.c_str(), env_value.c_str(), overwrite);
-        return setenv(env_name.c_str(), env_value.c_str(), overwrite);
+        return set_env_string(env_name, env_value, overwrite);
     }
 };
 }  // namespace common

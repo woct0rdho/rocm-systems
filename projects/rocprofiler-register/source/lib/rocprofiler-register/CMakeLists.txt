@@ -6,7 +6,11 @@ add_library(rocprofiler-register::rocprofiler-register ALIAS rocprofiler-registe
 
 add_subdirectory(details)
 
-target_sources(rocprofiler-register PRIVATE rocprofiler_register.cpp)
+if(WIN32)
+    target_sources(rocprofiler-register PRIVATE rocprofiler_register_windows.cpp)
+else()
+    target_sources(rocprofiler-register PRIVATE rocprofiler_register.cpp)
+endif()
 
 if(ROCPROFILER_REGISTER_BUILD_TESTS)
     # make sure header is C-compatible
@@ -36,6 +40,8 @@ endif()
 
 install(
     TARGETS rocprofiler-register
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    COMPONENT core
-    EXPORT ${PROJECT_NAME}-library-targets)
+    EXPORT ${PROJECT_NAME}-library-targets
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    COMPONENT core)

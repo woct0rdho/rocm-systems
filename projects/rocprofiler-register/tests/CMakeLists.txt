@@ -57,6 +57,11 @@ function(rocp_register_strip_target)
     endif()
 endfunction()
 
+if(WIN32)
+    add_subdirectory(windows)
+    return()
+endif()
+
 if(NOT CMAKE_DL_LIBS)
     find_library(DL_LIBRARY NAMES dl)
     if(NOT DL_LIBRARY)

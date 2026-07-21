@@ -28,14 +28,17 @@
 #include <fmt/ranges.h>
 #include <glog/logging.h>
 
+#include <cctype>
 #include <fstream>
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
-#include <sys/types.h>
-#include <unistd.h>
+#if defined(_WIN32)
+#    include <windows.h>
+#endif
 
 namespace rocprofiler_register
 {
@@ -48,7 +51,7 @@ struct logging_config
     bool        logtostderr      = true;
     bool        alsologtostderr  = false;
     bool        logdir_gitignore = false;  // add .gitignore to logdir
-    int32_t     loglevel         = google::WARNING;
+    int32_t     loglevel         = google::GLOG_WARNING;
     std::string vlog_modules     = {};
     std::string name             = {};
     std::string logdir           = {};
@@ -118,6 +121,18 @@ init_logging(std::string_view env_prefix, logging_config cfg = logging_config{})
     static auto _once = std::once_flag{};
     std::call_once(_once, [env_prefix, &cfg]() {
         auto get_argv0 = []() {
+#if defined(_WIN32)
+            auto buffer = std::vector<char>(MAX_PATH);
+            while(true)
+            {
+                auto size = GetModuleFileNameA(
+                    nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+                if(size == 0) return std::string{"rocprofiler-register"};
+                if(size < buffer.size())
+                    return std::string{buffer.data(), static_cast<size_t>(size)};
+                buffer.resize(buffer.size() * 2);
+            }
+#else
             auto ifs  = std::ifstream{ "/proc/self/cmdline" };
             auto sarg = std::string{};
             while(ifs && !ifs.eof())
@@ -126,20 +141,21 @@ init_logging(std::string_view env_prefix, logging_config cfg = logging_config{})
                 if(!sarg.empty()) break;
             }
             return sarg;
+#endif
         };
 
         auto to_lower = [](std::string val) {
             for(auto& itr : val)
-                itr = tolower(itr);
+                itr = static_cast<char>(std::tolower(static_cast<unsigned char>(itr)));
             return val;
         };
 
         const auto env_opts = std::unordered_map<std::string_view, log_level_info>{
-            { "trace", { google::INFO, ROCP_REG_LOG_LEVEL_TRACE } },
-            { "info", { google::INFO, ROCP_REG_LOG_LEVEL_INFO } },
-            { "warning", { google::WARNING, ROCP_REG_LOG_LEVEL_WARNING } },
-            { "error", { google::ERROR, ROCP_REG_LOG_LEVEL_ERROR } },
-            { "fatal", { google::FATAL, ROCP_REG_LOG_LEVEL_NONE } }
+            { "trace", { google::GLOG_INFO, ROCP_REG_LOG_LEVEL_TRACE } },
+            { "info", { google::GLOG_INFO, ROCP_REG_LOG_LEVEL_INFO } },
+            { "warning", { google::GLOG_WARNING, ROCP_REG_LOG_LEVEL_WARNING } },
+            { "error", { google::GLOG_ERROR, ROCP_REG_LOG_LEVEL_ERROR } },
+            { "fatal", { google::GLOG_FATAL, ROCP_REG_LOG_LEVEL_NONE } }
         };
 
         auto supported = std::vector<std::string>{};
@@ -165,7 +181,7 @@ init_logging(std::string_view env_prefix, logging_config cfg = logging_config{})
             auto val = std::stol(loglvl);
             if(val < 0)
             {
-                loglvl_v = google::FATAL;
+                loglvl_v = google::GLOG_FATAL;
             }
             else
             {

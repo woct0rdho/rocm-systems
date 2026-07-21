@@ -23,6 +23,7 @@
 #include "metrics.hpp"
 #include "id_decode.hpp"
 
+#include "lib/common/dl.hpp"
 #include "lib/common/environment.hpp"
 #include "lib/common/filesystem.hpp"
 #include "lib/common/logging.hpp"
@@ -30,8 +31,10 @@
 #include "lib/common/synchronized.hpp"
 #include "lib/common/utility.hpp"
 #include "lib/rocprofiler-sdk/agent.hpp"
-#include "lib/rocprofiler-sdk/aql/helpers.hpp"
-#include "lib/rocprofiler-sdk/spm/interface.hpp"
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+#    include "lib/rocprofiler-sdk/aql/helpers.hpp"
+#    include "lib/rocprofiler-sdk/spm/interface.hpp"
+#endif
 
 #include <rocprofiler-sdk/fwd.h>
 #include <rocprofiler-sdk/cxx/details/tokenize.hpp>
@@ -46,9 +49,9 @@
 #include "yaml-cpp/node/parse.h"
 #include "yaml-cpp/parser.h"
 
-#include <dlfcn.h>  // for dladdr
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <system_error>
@@ -258,22 +261,17 @@ findViaInstallPath(const std::string& filename)
 {
     namespace fs = common::filesystem;
 
-    Dl_info dl_info = {};
     ROCP_INFO << filename << " is being looked up via install path";
-    if(dladdr(reinterpret_cast<const void*>(rocprofiler_query_available_agents), &dl_info) != 0 &&
-       dl_info.dli_fname != nullptr)
+    auto lib_path = common::dl::get_symbol_path(
+        {},
+        "rocprofiler_query_available_agents",
+        reinterpret_cast<const void*>(rocprofiler_query_available_agents),
+        true);
+    if(lib_path)
     {
-        // Resolve symlinks to get the absolute physical path of the .so file.
-        auto     ec            = std::error_code{};
-        auto     lib_path      = fs::path{dl_info.dli_fname};
-        fs::path real_lib_path = fs::canonical(lib_path, ec);
-        if(!ec)
-        {
-            lib_path = real_lib_path;
-        }
-
-        return lib_path.parent_path().parent_path() /
-               fmt::format("share/rocprofiler-sdk/{}", filename);
+        return (fs::path{*lib_path}.parent_path().parent_path() /
+                fmt::format("share/rocprofiler-sdk/{}", filename))
+            .string();
     }
     return filename;
 }
@@ -290,8 +288,13 @@ locateMetricsFile(std::string_view name)
     if(env)
     {
         metric_env_path = *env;
+#if defined(_WIN32)
+        constexpr auto path_separator = std::string_view{";"};
+#else
+        constexpr auto path_separator = std::string_view{":"};
+#endif
         auto env_paths =
-            sdk::parse::tokenize<std::vector<std::string>>(*env, std::string_view{":"});
+            sdk::parse::tokenize<std::vector<std::string>>(*env, path_separator);
         for(const auto& path : env_paths)
         {
             fs::path candidate = fs::path{path} / std::string{name};
@@ -463,6 +466,10 @@ Metric::Metric(const std::string&,  // Get rid of this...
 bool
 has_spm_support(const Metric& metric, rocprofiler_agent_id_t agent_id)
 {
+#if defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+    common::consume_args(metric, agent_id);
+    return false;
+#else
     using cache_key_t = std::pair<rocprofiler_agent_id_t, uint64_t>;
     using cache_t     = std::map<cache_key_t, bool>;
     using sync_cache  = common::Synchronized<cache_t>;
@@ -493,6 +500,7 @@ has_spm_support(const Metric& metric, rocprofiler_agent_id_t agent_id)
         data.emplace(key, supported);
         return supported;
     });
+#endif
 }
 
 }  // namespace counters

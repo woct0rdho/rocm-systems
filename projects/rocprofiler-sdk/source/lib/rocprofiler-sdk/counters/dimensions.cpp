@@ -23,9 +23,9 @@
 #include "dimensions.hpp"
 
 #include "lib/common/static_object.hpp"
+#include "lib/common/synchronized.hpp"
 #include "lib/common/utility.hpp"
 #include "lib/rocprofiler-sdk/aql/helpers.hpp"
-#include "lib/rocprofiler-sdk/aql/packet_construct.hpp"
 #include "lib/rocprofiler-sdk/counters/evaluate_ast.hpp"
 
 #include <rocprofiler-sdk/fwd.h>
@@ -35,7 +35,9 @@
 
 #include <fmt/core.h>
 
+#include <array>
 #include <cstdint>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -58,11 +60,22 @@ getBlockDimensions(rocprofiler_agent_id_t agent_id, const Metric& metric)
 
     std::vector<MetricDimension> ret;
 
-    aql::CounterPacketConstruct pkt_gen(agent_id, {metric});
-    const auto&                 events = pkt_gen.get_counter_events(metric);
+    // Dimension metadata describes the catalog topology; it is not a request to collect the
+    // metric. Construct descriptors directly so availability queries do not validate every
+    // event as a side effect. Actual counter configurations still use CounterPacketConstruct
+    // and validate descriptors before packet construction.
+    const auto query_info = aql::get_query_info(agent_id, metric);
+    auto       event_id   = uint64_t{0};
+    if(!metric.event().empty()) event_id = std::stoul(metric.event(), nullptr);
 
-    for(const auto& event : events)
+    for(uint32_t block_index = 0; block_index < query_info.instance_count; ++block_index)
     {
+        const auto event = aqlprofile_pmc_event_t{
+            .block_index = block_index,
+            .event_id    = static_cast<uint32_t>(event_id & 0xFFFFFFFF),
+            .flags       = aqlprofile_pmc_event_flags_t{metric.flags()},
+            .block_name =
+                static_cast<hsa_ven_amd_aqlprofile_block_name_t>(query_info.id)};
         auto dims   = std::map<int, uint64_t>{};
         auto status = aql::get_dim_info(agent_id, event, 0, dims);
         CHECK_EQ(status, ROCPROFILER_STATUS_SUCCESS) << rocprofiler_get_status_string(status);
@@ -81,10 +94,22 @@ getBlockDimensions(rocprofiler_agent_id_t agent_id, const Metric& metric)
         }
     }
 
+    // Keep the public metadata order stable across AQL Profile implementations. The Linux
+    // rocprofv3 contract orders block instances before the surrounding GPU topology.
+    constexpr auto dimension_order = std::array{
+        ROCPROFILER_DIMENSION_INSTANCE,
+        ROCPROFILER_DIMENSION_WGP,
+        ROCPROFILER_DIMENSION_SHADER_ARRAY,
+        ROCPROFILER_DIMENSION_SHADER_ENGINE,
+        ROCPROFILER_DIMENSION_AID,
+        ROCPROFILER_DIMENSION_XCC,
+        ROCPROFILER_DIMENSION_AGENT};
+
     ret.reserve(count.size());
-    for(const auto& [dim, size] : count)
+    for(const auto dim : dimension_order)
     {
-        ret.emplace_back(dimension_map().at(dim), size, dim);
+        if(const auto* size = common::get_val(count, dim))
+            ret.emplace_back(dimension_map().at(dim), *size, dim);
     }
 
     return ret;

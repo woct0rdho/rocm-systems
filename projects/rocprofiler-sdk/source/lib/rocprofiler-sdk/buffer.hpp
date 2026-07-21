@@ -49,7 +49,11 @@ struct instance
     static constexpr auto sync_wait_usec = std::chrono::microseconds{10};
 
     mutable std::array<buffer_t, size>         buffers       = {};
+#if defined(_WIN32)
+    mutable std::array<std::atomic_flag, size> syncer        = {};  // r/w lock
+#else
     mutable std::array<std::atomic_flag, size> syncer        = {false, false};  // r/w lock
+#endif
     mutable std::atomic<uint32_t>              buffer_idx    = {};              // array index
     mutable std::atomic<uint64_t>              drop_count    = {};
     uint64_t                                   watermark     = 0;

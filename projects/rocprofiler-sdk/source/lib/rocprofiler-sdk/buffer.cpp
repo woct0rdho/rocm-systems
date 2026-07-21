@@ -29,7 +29,9 @@
 #include "lib/rocprofiler-sdk/context/domain.hpp"
 #include "lib/rocprofiler-sdk/hsa/hsa.hpp"
 #include "lib/rocprofiler-sdk/internal_threading.hpp"
-#include "lib/rocprofiler-sdk/pc_sampling/service.hpp"
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+#    include "lib/rocprofiler-sdk/pc_sampling/service.hpp"
+#endif
 #include "lib/rocprofiler-sdk/registration.hpp"
 
 #include <rocprofiler-sdk/fwd.h>
@@ -316,7 +318,7 @@ rocprofiler_create_buffer(rocprofiler_context_id_t        context,
 rocprofiler_status_t
 rocprofiler_flush_buffer(rocprofiler_buffer_id_t buffer_id)
 {
-#if ROCPROFILER_SDK_HSA_PC_SAMPLING > 0
+#if ROCPROFILER_SDK_HSA_PC_SAMPLING > 0 && !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
     // Drain internal PC sampling buffers, if needed.
     auto status = rocprofiler::pc_sampling::flush_internal_agent_buffers(buffer_id);
     if(status != ROCPROFILER_STATUS_SUCCESS) return status;

@@ -472,6 +472,13 @@ char* yytext;
 #line 4 "scanner.l"
 #include <fmt/format.h>
 
+#ifdef _WIN32
+#    include <io.h>
+#    define fileno _fileno
+#    define isatty _isatty
+#    define strdup _strdup
+#endif
+
 #include "parser.h"
 #include "raw_ast.hpp"
 using namespace std;

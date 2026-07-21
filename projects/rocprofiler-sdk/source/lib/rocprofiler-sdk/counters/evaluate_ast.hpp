@@ -33,6 +33,10 @@
 
 namespace rocprofiler
 {
+namespace hsa
+{
+class AQLPacket;
+}
 namespace counters
 {
 struct metric_result

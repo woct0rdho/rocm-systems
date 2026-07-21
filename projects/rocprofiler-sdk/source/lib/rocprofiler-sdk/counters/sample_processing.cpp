@@ -26,6 +26,7 @@
 
 #include "lib/common/container/small_vector.hpp"
 #include "lib/common/synchronized.hpp"
+#include "lib/common/static_object.hpp"
 #include "lib/common/utility.hpp"
 #include "lib/rocprofiler-sdk/buffer.hpp"
 #include "lib/rocprofiler-sdk/context/context.hpp"
@@ -106,6 +107,7 @@ process_completed_cb(completed_cb_params_t&& params)
         {
             val.agent_id    = prof_config->agent->id;
             val.dispatch_id = _dispatch_id;
+            val.user_data   = packet.user_data;
             out.emplace_back(val);
         }
     }

@@ -27,14 +27,17 @@
 #include "lib/rocprofiler-sdk/context/correlation_id.hpp"
 #include "lib/rocprofiler-sdk/context/domain.hpp"
 #include "lib/rocprofiler-sdk/counters/core.hpp"
-#include "lib/rocprofiler-sdk/counters/device_counting.hpp"
 #include "lib/rocprofiler-sdk/external_correlation.hpp"
-#include "lib/rocprofiler-sdk/pc_sampling/types.hpp"
-#include "lib/rocprofiler-sdk/spm/core.hpp"
-#include "lib/rocprofiler-sdk/thread_trace/core.hpp"
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+#    include "lib/rocprofiler-sdk/counters/device_counting.hpp"
+#    include "lib/rocprofiler-sdk/pc_sampling/types.hpp"
+#    include "lib/rocprofiler-sdk/spm/core.hpp"
+#    include "lib/rocprofiler-sdk/thread_trace/core.hpp"
+#endif
 
 #include <rocprofiler-sdk/fwd.h>
 #include <rocprofiler-sdk/registration.h>
+#include <rocprofiler-sdk/cxx/operators.hpp>
 
 #include <array>
 #include <cstddef>
@@ -88,6 +91,7 @@ struct dispatch_counter_collection_service
     common::Synchronized<bool> enabled{false};
 };
 
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
 struct spm_dispatch_counter_collection_service
 {
     // Contains a SPM collection instance associated with this context.
@@ -131,6 +135,8 @@ struct pc_sampling_service
     std::atomic<bool> enabled{false};
 };
 
+#endif
+
 struct context
 {
     // size is used to ensure that we never read past the end of the version
@@ -142,12 +148,19 @@ struct context
     std::unique_ptr<buffer_tracing_service>   buffered_tracer    = {};
     // Only one of counter collection/agent counter collection can exists in the ctx.
     std::unique_ptr<dispatch_counter_collection_service> dispatch_counter_collection = {};
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
     std::unique_ptr<device_counting_service>             device_counter_collection   = {};
     std::unique_ptr<pc_sampling_service>                 pc_sampler                  = {};
     std::unique_ptr<thread_trace::DispatchThreadTracer>  dispatch_thread_trace       = {};
     std::unique_ptr<thread_trace::DeviceThreadTracer>    device_thread_trace         = {};
-
     std::unique_ptr<spm_dispatch_counter_collection_service> dispatch_spm = {};
+#else
+    void* device_counter_collection = nullptr;
+    void* pc_sampler                = nullptr;
+    void* dispatch_thread_trace     = nullptr;
+    void* device_thread_trace       = nullptr;
+    void* dispatch_spm              = nullptr;
+#endif
 
     template <typename KindT>
     bool is_tracing(KindT _kind) const;

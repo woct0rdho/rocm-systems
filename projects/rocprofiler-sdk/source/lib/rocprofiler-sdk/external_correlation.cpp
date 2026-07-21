@@ -28,8 +28,6 @@
 #include <rocprofiler-sdk/external_correlation.h>
 #include <rocprofiler-sdk/fwd.h>
 
-#include <unistd.h>
-
 namespace rocprofiler
 {
 namespace external_correlation
@@ -107,6 +105,17 @@ get_default_data()
 }
 
 auto f_default_tid = get_default_tid();  // make sure it is initialized
+
+bool
+valid_thread_id(rocprofiler_thread_id_t tid)
+{
+#if defined(_WIN32)
+    return tid != 0;
+#else
+    static uint64_t pid_v = common::get_pid();
+    return tid >= pid_v;
+#endif
+}
 }  // namespace
 
 rocprofiler_user_data_t
@@ -316,9 +325,8 @@ rocprofiler_push_external_correlation_id(rocprofiler_context_id_t context,
                                          rocprofiler_thread_id_t  tid,
                                          rocprofiler_user_data_t  external_correlation_id)
 {
-    // assumption is that thread ids are monotonically increasing from the pid
-    static uint64_t pid_v = getpid();
-    if(tid < pid_v) return ROCPROFILER_STATUS_ERROR_INVALID_ARGUMENT;
+    if(!rocprofiler::external_correlation::valid_thread_id(tid))
+        return ROCPROFILER_STATUS_ERROR_INVALID_ARGUMENT;
 
     auto* ctx = rocprofiler::context::get_mutable_registered_context(context);
     if(!ctx) return ROCPROFILER_STATUS_ERROR_CONTEXT_NOT_FOUND;
@@ -332,9 +340,8 @@ rocprofiler_pop_external_correlation_id(rocprofiler_context_id_t context,
                                         rocprofiler_thread_id_t  tid,
                                         rocprofiler_user_data_t* external_correlation_id)
 {
-    // assumption is that thread ids are monotonically increasing from the pid
-    static uint64_t pid_v = getpid();
-    if(tid < pid_v) return ROCPROFILER_STATUS_ERROR_INVALID_ARGUMENT;
+    if(!rocprofiler::external_correlation::valid_thread_id(tid))
+        return ROCPROFILER_STATUS_ERROR_INVALID_ARGUMENT;
 
     auto* ctx = rocprofiler::context::get_mutable_registered_context(context);
     if(!ctx) return ROCPROFILER_STATUS_ERROR_CONTEXT_NOT_FOUND;

@@ -31,9 +31,11 @@
 #include "lib/rocprofiler-sdk/counters/evaluate_ast.hpp"
 #include "lib/rocprofiler-sdk/counters/id_decode.hpp"
 #include "lib/rocprofiler-sdk/counters/metrics.hpp"
-#include "lib/rocprofiler-sdk/hsa/agent_cache.hpp"
-#include "lib/rocprofiler-sdk/hsa/queue.hpp"
-#include "lib/rocprofiler-sdk/hsa/queue_controller.hpp"
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+#    include "lib/rocprofiler-sdk/hsa/agent_cache.hpp"
+#    include "lib/rocprofiler-sdk/hsa/queue.hpp"
+#    include "lib/rocprofiler-sdk/hsa/queue_controller.hpp"
+#endif
 
 #include <rocprofiler-sdk/counters.h>
 #include <rocprofiler-sdk/experimental/counters.h>

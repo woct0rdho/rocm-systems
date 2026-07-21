@@ -310,15 +310,14 @@ endif()
 
 target_compile_definitions(amdhip64 PUBLIC USE_PROF_API=1)
 
-if(WIN32 OR NOT BUILD_SHARED_LIBS)
-    # rocprofiler-register is not support on Windows
-    set(HIP_ENABLE_ROCPROFILER_REGISTER OFF)
+if(NOT BUILD_SHARED_LIBS)
+  set(HIP_ENABLE_ROCPROFILER_REGISTER OFF)
 else()
   option(HIP_ENABLE_ROCPROFILER_REGISTER "Enable rocprofiler-register support" ON)
 endif()
 
 if(HIP_ENABLE_ROCPROFILER_REGISTER)
-    find_package(rocprofiler-register REQUIRED
+    find_package(rocprofiler-register CONFIG REQUIRED
         HINTS $ENV{rocprofiler_register_ROOT} $ENV{ROCPROFILER_REGISTER_ROOT} ${CMAKE_INSTALL_PREFIX}
         PATHS ${ROCM_PATH})
 

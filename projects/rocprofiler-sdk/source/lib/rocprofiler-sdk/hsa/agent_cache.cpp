@@ -23,11 +23,15 @@
 #include "lib/rocprofiler-sdk/hsa/agent_cache.hpp"
 #include "lib/common/environment.hpp"
 #include "lib/common/logging.hpp"
+#include "lib/common/utility.hpp"
 
 #include <fmt/format.h>
+#include <mutex>
 #include <stdexcept>
 
-#include "lib/rocprofiler-sdk/context/context.hpp"
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+#    include "lib/rocprofiler-sdk/context/context.hpp"
+#endif
 #include "lib/rocprofiler-sdk/hsa/hsa.hpp"
 
 namespace
@@ -132,6 +136,10 @@ void
 AgentCache::init_device_counting_service_queue(const CoreApiTable& api,
                                                const AmdExtTable&  ext) const
 {
+#if defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+    common::consume_args(api, ext);
+    return;
+#else
     static std::mutex           m_mutex;
     std::lock_guard<std::mutex> lock(m_mutex);
 
@@ -161,6 +169,7 @@ AgentCache::init_device_counting_service_queue(const CoreApiTable& api,
 
     CHECK(ext.hsa_amd_queue_set_priority_fn) << "no hsa_amd_queue_set_priority_fn in api table";
     ext.hsa_amd_queue_set_priority_fn(m_profile_queue, HSA_AMD_QUEUE_PRIORITY_NORMAL);
+#endif
 }
 
 AgentCache::AgentCache(const rocprofiler_agent_t* rocp_agent,
@@ -180,8 +189,12 @@ AgentCache::AgentCache(const rocprofiler_agent_t* rocp_agent,
     {
         init_cpu_pool(ext_table, *this);
         init_gpu_pool(ext_table, *this);
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
         // When on-demand queue mode is enabled, defer queue creation to start_context
         if(!use_ondemand_queue()) init_device_counting_service_queue(api, ext_table);
+#else
+        common::consume_args(api);
+#endif
     } catch(std::runtime_error& e)
     {
         ROCP_WARNING << fmt::format(

@@ -27,7 +27,9 @@
 #include "lib/rocprofiler-sdk/counters/metrics.hpp"
 #include "lib/rocprofiler-sdk/hsa/agent_cache.hpp"
 #include "lib/rocprofiler-sdk/hsa/aql_packet.hpp"
-#include "lib/rocprofiler-sdk/thread_trace/core.hpp"
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+#    include "lib/rocprofiler-sdk/thread_trace/core.hpp"
+#endif
 
 #include <rocprofiler-sdk/fwd.h>
 
@@ -104,11 +106,14 @@ protected:
     };
 
     rocprofiler_agent_id_t                             _agent;
+    rocprofiler_status_t                               _validation_status =
+        ROCPROFILER_STATUS_SUCCESS;
     std::vector<AQLProfileMetric>                      _metrics;
     std::vector<aqlprofile_pmc_event_t>                _events;
     std::map<aqlprofile_pmc_event_t, counters::Metric> _event_to_metric;
 };
 
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
 class ThreadTraceAQLPacketFactory
 {
     using thread_trace_parameter_pack = thread_trace::thread_trace_parameter_pack;
@@ -140,6 +145,7 @@ spm_construct_packet(const rocprofiler_agent_id_t                     agent_id,
 rocprofiler_status_t
 spm_can_collect(const rocprofiler_agent_id_t         agent_id,
                 const std::vector<counters::Metric>& metrics);
+#endif
 
 }  // namespace aql
 }  // namespace rocprofiler

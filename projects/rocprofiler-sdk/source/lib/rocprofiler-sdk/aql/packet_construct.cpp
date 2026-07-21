@@ -22,8 +22,11 @@
 
 #include "lib/rocprofiler-sdk/aql/packet_construct.hpp"
 #include "lib/common/logging.hpp"
-#include "lib/rocprofiler-sdk/hsa/details/fmt.hpp"
-#include "lib/rocprofiler-sdk/spm/decode.hpp"
+#include "lib/common/utility.hpp"
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+#    include "lib/rocprofiler-sdk/hsa/details/fmt.hpp"
+#    include "lib/rocprofiler-sdk/spm/decode.hpp"
+#endif
 
 #include <fmt/format.h>
 #include <hsa/hsa_ext_amd.h>
@@ -83,16 +86,29 @@ CounterPacketConstruct::CounterPacketConstruct(rocprofiler_agent_id_t           
                  .flags       = aqlprofile_pmc_event_flags_t{x.flags()},
                  .block_name  = static_cast<hsa_ven_amd_aqlprofile_block_name_t>(query_info.id)});
 
-            bool validate_event_result;
+            bool validate_event_result = false;
 
             auto aql_agent = *CHECK_NOTNULL(rocprofiler::agent::get_aql_agent(agent));
-
-            LOG_IF(FATAL,
-                   aqlprofile_validate_pmc_event(aql_agent,
-                                                 &_metrics.back().events.back(),
-                                                 &validate_event_result) != HSA_STATUS_SUCCESS);
-            ROCP_FATAL_IF(!validate_event_result)
-                << "Invalid Metric: " << block_index << " " << event_id;
+            auto validate_status = aqlprofile_validate_pmc_event(
+                aql_agent, &_metrics.back().events.back(), &validate_event_result);
+            if(validate_status != HSA_STATUS_SUCCESS || !validate_event_result)
+            {
+                ROCP_ERROR << fmt::format(
+                    "Invalid metric {} for agent {}: block={} block_index={} event_id={} "
+                    "aql_status={} validated={}",
+                    x.name(),
+                    agent.handle,
+                    query_info.id,
+                    block_index,
+                    event_id,
+                    static_cast<int>(validate_status),
+                    validate_event_result);
+                _validation_status = ROCPROFILER_STATUS_ERROR_METRIC_NOT_VALID_FOR_AGENT;
+                // Keep the descriptor for topology-only dimension queries, but never include
+                // an invalid event in the packet submitted to AQL Profile.
+                _metrics.back().instances.pop_back();
+                continue;
+            }
             _event_to_metric[_metrics.back().events.back()] = x;
         }
     }
@@ -134,6 +150,7 @@ CounterPacketConstruct::construct_packet(const CoreApiTable& coreapi, const AmdE
     return std::make_unique<hsa::CounterAQLPacket>(*aql_agent, pool, _events);
 }
 
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
 ThreadTraceAQLPacketFactory::ThreadTraceAQLPacketFactory(const hsa::AgentCache&             agent,
                                                          const thread_trace_parameter_pack& params,
                                                          const CoreApiTable&                coreapi,
@@ -232,6 +249,8 @@ ThreadTraceAQLPacketFactory::construct_unload_marker_packet(uint64_t id)
     return std::make_unique<hsa::CodeobjMarkerAQLPacket>(tracepool, id, 0, 0, false, true);
 }
 
+#endif
+
 std::vector<aqlprofile_pmc_event_t>
 CounterPacketConstruct::get_all_events() const
 {
@@ -269,6 +288,8 @@ CounterPacketConstruct::get_counter_events(const counters::Metric& metric) const
 rocprofiler_status_t
 CounterPacketConstruct::can_collect()
 {
+    if(_validation_status != ROCPROFILER_STATUS_SUCCESS) return _validation_status;
+
     // Verify that the counters fit within harrdware limits
     std::map<std::pair<hsa_ven_amd_aqlprofile_block_name_t, uint32_t>, int64_t> counter_count;
     std::map<std::pair<hsa_ven_amd_aqlprofile_block_name_t, uint32_t>, int64_t> max_allowed;
@@ -297,6 +318,7 @@ CounterPacketConstruct::can_collect()
     return ROCPROFILER_STATUS_SUCCESS;
 }
 
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
 /** @brief Constructs the packet using the contained input parameters.
  * Writes into ID map and spm descriptor used to decode SPM data
  */
@@ -436,6 +458,7 @@ spm_can_collect(const rocprofiler_agent_id_t agent_id, const std::vector<counter
     }
     return ROCPROFILER_STATUS_SUCCESS;
 }
+#endif
 
 }  // namespace aql
 }  // namespace rocprofiler

@@ -62,13 +62,17 @@ public:
 
     void exit()
     {
-        std::unique_lock<std::mutex> lk(mut);
+        auto joining = std::thread{};
+        {
+            auto lk = std::unique_lock<std::mutex>{mut};
+            valid.store(false);
+            cv.notify_all();
+            if(consumer.joinable()) joining = std::move(consumer);
+        }
 
-        valid.store(false);
-        cv.notify_all();
-
-        if(!exited) cv.wait(lk, [&] { return exited.load(); });
-        if(consumer.joinable()) consumer.join();
+        // The consumer must acquire mut once more to observe valid == false.
+        // Never hold that mutex while waiting for the thread to terminate.
+        if(joining.joinable()) joining.join();
     }
 
     void add(DataType&& params)

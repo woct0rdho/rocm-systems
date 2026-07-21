@@ -27,17 +27,21 @@
 #include "lib/rocprofiler-sdk/hsa/agent_cache.hpp"
 #include "lib/rocprofiler-sdk/hsa/queue.hpp"
 #include "lib/rocprofiler-sdk/hsa/queue_interposition.hpp"
-#include "lib/rocprofiler-sdk/kfd/kfd_correlation.hpp"
-#include "lib/rocprofiler-sdk/kfd/kfd_profiler.hpp"
-#include "lib/rocprofiler-sdk/kfd/signal_less.hpp"
-#include "lib/rocprofiler-sdk/kfd/signal_less_gate.hpp"
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+#    include "lib/rocprofiler-sdk/kfd/kfd_correlation.hpp"
+#    include "lib/rocprofiler-sdk/kfd/kfd_profiler.hpp"
+#    include "lib/rocprofiler-sdk/kfd/signal_less.hpp"
+#    include "lib/rocprofiler-sdk/kfd/signal_less_gate.hpp"
+#endif
 
 #include <hsa/amd_hsa_queue.h>
 #include <hsa/amd_hsa_signal.h>
 #include <hsa/hsa_ext_amd.h>
 
 #include <rocprofiler-sdk/fwd.h>
-#include <unistd.h>
+#if !defined(_WIN32)
+#    include <unistd.h>
+#endif
 #include <algorithm>
 #include <cstdint>
 #include <memory>
@@ -49,6 +53,7 @@ namespace hsa
 {
 namespace
 {
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
 // Read AGENT's own GPU-clock counter -- the same tick domain as fw_record::ts for
 // records emitted by AGENT. Called exactly twice per queue lifetime, never
 // per dispatch. Returns 0 on any failure or on an untrustworthy sentinel; the
@@ -82,6 +87,7 @@ gpu_tick_now(const CoreApiTable& core, hsa_agent_t agent)
     return 0;
 #endif
 }
+#endif
 
 // HSA Intercept Functions (create_queue/destroy_queue)
 hsa_status_t
@@ -151,8 +157,15 @@ create_queue(hsa_agent_t        agent,
 hsa_status_t
 destroy_queue(hsa_queue_t* hsa_queue)
 {
-    if(get_queue_controller()) get_queue_controller()->destroy_queue(hsa_queue);
+    auto* controller = get_queue_controller();
+    if(!controller) return HSA_STATUS_ERROR_INVALID_QUEUE;
+    const auto original_destroy = controller->get_core_table().hsa_queue_destroy_fn;
+    controller->destroy_queue(hsa_queue);
+#if defined(_WIN32)
+    return original_destroy ? original_destroy(hsa_queue) : HSA_STATUS_ERROR_INVALID_QUEUE;
+#else
     return HSA_STATUS_SUCCESS;
+#endif
 }
 
 #if defined(HSA_AMD_EXT_API_TABLE_STEP_VERSION) && HSA_AMD_EXT_API_TABLE_STEP_VERSION >= 0x10
@@ -425,7 +438,7 @@ QueueController::add_queue(hsa_queue_t*           id,
             for(const auto& [cbid, cb_data] : callbacks)
             {
                 auto& [agent, cb] = cb_data;
-                if(agent.id == default_agent.id || agent.id == agent_id)
+                if(agent.id.handle == default_agent.id.handle || agent.id.handle == agent_id.handle)
                 {
                     map[id]->register_callback(cbid, cb);
                 }
@@ -433,6 +446,7 @@ QueueController::add_queue(hsa_queue_t*           id,
         });
     });
 
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
     // signal-less live-queue bookkeeping and window open. Gated on
     // is_compute -- only a compute queue's doorbell can source a CP dispatch-log
     // record -- and on fork safety. Inert with the feature off. Every live
@@ -480,6 +494,7 @@ QueueController::add_queue(hsa_queue_t*           id,
             if(_disable) kfd::signal_less_disable_permanently();
         }
     }
+#endif
 
     // Interposition-state creation wants the same answer as the signal-less gate:
     // only a compute queue's AQL ring can be interposed.
@@ -501,6 +516,7 @@ QueueController::destroy_queue(hsa_queue_t* id)
 
     const auto _queue_token = queue->get_id().handle;
 
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
     // close this queue's owner window. Inert with the feature off and
     // gated for fork safety. Holds at most one of {gate, DoorbellMap, hub, registry}
     // at any instant, so no lock cycle exists. Never blocks on the reader.
@@ -560,10 +576,13 @@ QueueController::destroy_queue(hsa_queue_t* id)
         // Release drain_mu here (end of the `if` scope) -- BEFORE destroy_queue_state/
         // sync/erase, i.e. before anything can free amd_queue_t.
     }
+#endif
 
     queue_interposition::destroy_queue_state(id);
     queue->sync();
+#if !defined(_WIN32)
     if(queue->block_signal.handle != 0) get_core_table().hsa_signal_destroy_fn(queue->block_signal);
+#endif
     _queues.wlock([&](auto& map) { map.erase(id); });
 }
 
@@ -840,11 +859,13 @@ enable_queue_intercept()
 {
     for(const auto& itr : context::get_registered_contexts())
     {
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
         constexpr auto expected_context_size = 224UL;
         static_assert(
             sizeof(context::context) == expected_context_size,
             "If you added a new field to context struct, make sure there is a check here if it "
             "requires queue interception. Once you have done so, increment expected_context_size");
+#endif
 
         bool has_kernel_tracing = itr->is_tracing(ROCPROFILER_CALLBACK_TRACING_KERNEL_DISPATCH) ||
                                   itr->is_tracing(ROCPROFILER_BUFFER_TRACING_KERNEL_DISPATCH);
@@ -855,6 +876,9 @@ enable_queue_intercept()
         // Keep interception active for HIP_GRAPH subscribers (drives kernel_dispatch_count).
         bool has_hip_graph_tracing = itr->is_tracing(ROCPROFILER_BUFFER_TRACING_HIP_GRAPH);
 
+#if defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+        if(itr->dispatch_counter_collection) return true;
+#else
         // Kernel replay drives its multi-pass loop from WriteInterceptor, so it needs the queue
         // interceptor even when no other service is configured.
         bool has_kernel_replay = itr->is_tracing(ROCPROFILER_CALLBACK_TRACING_KERNEL_REPLAY);
@@ -869,6 +893,7 @@ enable_queue_intercept()
            itr->dispatch_thread_trace || has_hip_graph_tracing || has_kernel_replay ||
            has_hip_event_tracing)
             return true;
+#endif
     }
     return false;
 }
@@ -933,6 +958,7 @@ queue_controller_init(RocAttachDispatchTable* attach_table)
 std::optional<uint32_t>
 capture_doorbell_key(const hsa_queue_t* intercept_queue)
 {
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
     // Extract the queue's hardware doorbell pointer from its intercept queue's
     // doorbell signal (HSA-internal amd_signal_t layout; same pattern as
     // hsa/async_copy.cpp). nullopt if unavailable -> caller falls back to HSA.
@@ -955,6 +981,10 @@ capture_doorbell_key(const hsa_queue_t* intercept_queue)
     // firmware record (kfd::doorbell_off_to_page_slot). The 4 KiB / 1024-dword
     // mask is baked in -- no sysconf, no bind (open_window binds now).
     return kfd::doorbell_ptr_to_page_slot(hwptr);
+#else
+    (void) intercept_queue;
+    return std::nullopt;
+#endif
 }
 
 }  // namespace hsa

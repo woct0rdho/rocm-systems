@@ -162,6 +162,14 @@ endif()
   endif()
 endif()
 
+# CPU-only Windows tests for the WDDM thunk and the runtime binary contract.
+option(ROCR_BUILD_WINDOWS_TESTS "Build CPU-only Windows ROCr/libhsakmt tests" OFF)
+if(WIN32 AND ROCR_BUILD_WINDOWS_TESTS)
+  enable_testing()
+  include(CTest)
+  add_subdirectory(libhsakmt/tests/wddm)
+endif()
+
 # Optionally record the package's find module in the user's package cache.
 if ( NOT DEFINED EXPORT_TO_USER_PACKAGE_REGISTRY )
   set ( EXPORT_TO_USER_PACKAGE_REGISTRY "off")

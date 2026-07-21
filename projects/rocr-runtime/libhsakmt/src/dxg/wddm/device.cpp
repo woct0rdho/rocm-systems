@@ -114,6 +114,25 @@ WDDMDevice::WDDMDevice(D3DKMT_HANDLE adapter, LUID adapter_luid, uint32_t node_i
   CreatePagingQueue();
   InitCmdbufInfo();
   QuerySegmentInfo();
+
+  const bool software_queue_available =
+      device_info_.hwsInfo.hwsMask.computeHwsEnabled &&
+      device_info_.hwsInfo.hwsMask.aql_queue == 0;
+  profiling_capability_ = profiling::DetectCapability(device_info_.major, device_info_.minor,
+                                                      device_info_.stepping, cmdbuf_aql_frame_size_,
+                                                      software_queue_available);
+  if (profiling_capability_.supported) {
+    // Leave the hardware AQL queue enabled for normal compute. The software
+    // queue is required only when a vendor (AQL Profile / retained PM4) packet
+    // is actually submitted; selecting it unconditionally routes every normal
+    // dispatch through AQL->PM4 and costs most of the decode throughput.
+    dxg_runtime->vendor_packet_process = 1;
+  }
+  pr_rocr_info("hwsInfo: aql_queue=%d computeHwsEnabled=%d aql_profile_pm4=%d"
+               " max_pm4_dwords=%" PRIu32 "\n",
+               device_info_.hwsInfo.hwsMask.aql_queue,
+               device_info_.hwsInfo.hwsMask.computeHwsEnabled,
+               profiling_capability_.supported ? 1 : 0, profiling_capability_.max_pm4_dwords);
 }
 
 WDDMDevice::~WDDMDevice() {
@@ -748,7 +767,7 @@ void WDDMDevice::InitCmdbufInfo(void) {
   // Only a vendor-specific (PMC) frame uses the headroom above, but all frames
   // are sized alike, so cap the ring depth instead of letting the whole
   // allocation scale with the frame size.
-  constexpr uint32_t kCmdbufBudgetBytes = 2 * 1024 * 1024;
+  constexpr uint32_t kCmdbufBudgetBytes = 8 * 1024 * 1024;
 
   cmdbuf_aql_frame_num_ =
       std::clamp(kCmdbufBudgetBytes / cmdbuf_aql_frame_size_, 1u, kMaxAqlFrameNum);

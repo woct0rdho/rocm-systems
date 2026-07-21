@@ -1527,9 +1527,12 @@ bool AqlQueue::ExceptionHandler(hsa_signal_value_t error_code, void* arg) {
                 !(queue->agent_->supported_isas()[0]->GetMajorVersion() == 11
                   && queue->agent_->supported_isas()[0]->GetMinorVersion() < 5)) {
 
+#ifdef HSA_PC_SAMPLING_SUPPORT
     if (pcs::PcsRuntime::instance()->SessionsActive())
       fprintf(stderr, "GPU core dump skipped because PC Sampling active\n");
-    else if (amd::coredump::dump_gpu_core(&suspended_queues))
+    else
+#endif
+    if (amd::coredump::dump_gpu_core(&suspended_queues))
       fprintf(stderr, "GPU core dump failed\n");
     // supports_core_dump flag is overwritten to avoid generate core dump file again
     // caught by a different exception handler. Such as VMFaultHandler.

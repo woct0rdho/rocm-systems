@@ -333,10 +333,12 @@ void SurfaceGpuList(std::vector<int32_t>& gpu_list, bool xnack_mode, bool enable
         core::Runtime::runtime_singleton_->flag().disable_dev_mem_queue_buf();
         core::Runtime::runtime_singleton_->flag().disable_sdma_hdp_flush();
 
-        // HSA tool registration stays disabled on native-Windows DXG. WSL DXG
-        // needs it enabled so that rocprofiler-sdk receives the HSA API table.
-        if (!core::Runtime::runtime_singleton_->thunkLoader()->IsWslDxg())
-          core::Runtime::runtime_singleton_->flag().set_disable_tool_register(true);
+        // HSA tool registration stays enabled on DXG: rocprofiler-sdk receives the HSA API
+        // table through rocprofiler-register on both native Windows and WSL, and the Windows
+        // SDK's queue interception depends on it. Linux keeps the registration disabled here.
+#if defined(__linux__)
+        core::Runtime::runtime_singleton_->flag().set_disable_tool_register(true);
+#endif
       }
 
       // Instantiate a Gpu device. The IO links

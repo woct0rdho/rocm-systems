@@ -30,7 +30,13 @@
 
 #include "lib/aqlprofile/core/ip_discovery.h"
 
-#define __maybe_unused __attribute__((__unused__))
+#if !defined(__maybe_unused)
+#    if defined(_WIN32)
+#        define __maybe_unused
+#    else
+#        define __maybe_unused __attribute__((__unused__))
+#    endif
+#endif
 
 #include "lib/aqlprofile/linux/registers/sienna_cichlid_ip_offset.h"
 #include "lib/aqlprofile/util/reg_offsets.h"

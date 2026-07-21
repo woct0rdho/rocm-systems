@@ -33,6 +33,22 @@ static const uint32_t AMD_AQL_PM4_IB_DW_COUNT_REMAIN = 10;
 // Size of 'reserved' array of amd_aql_pm4_ib_packet_t packet
 static const uint32_t AMD_AQL_PM4_IB_RESERVED_COUNT = 8;
 
+// AQL Profile construction manifest carried in the reserved words on Windows.
+static const uint32_t AMD_AQL_PM4_IB_MANIFEST_MAGIC = 0x504d4357u;  // "WCMP"
+static const uint32_t AMD_AQL_PM4_IB_MANIFEST_VERSION = 1;
+static const uint32_t AMD_AQL_PM4_IB_MANIFEST_FLAG_EVENT_IDS_VALIDATED = 1u << 0;
+static const uint32_t AMD_AQL_PM4_IB_MANIFEST_FLAG_INSTANCES_VALIDATED = 1u << 1;
+static const uint32_t AMD_AQL_PM4_IB_MANIFEST_REQUIRED_FLAGS =
+    AMD_AQL_PM4_IB_MANIFEST_FLAG_EVENT_IDS_VALIDATED |
+    AMD_AQL_PM4_IB_MANIFEST_FLAG_INSTANCES_VALIDATED;
+
+typedef enum {
+  AMD_AQL_PM4_IB_STAGE_NONE = 0,
+  AMD_AQL_PM4_IB_STAGE_START = 1,
+  AMD_AQL_PM4_IB_STAGE_READ = 2,
+  AMD_AQL_PM4_IB_STAGE_STOP = 3,
+} amd_aql_pm4_ib_stage_t;
+
 // AQL Vendor Specific Packet which carry PM4 IB command
 typedef struct {
   uint16_t header;

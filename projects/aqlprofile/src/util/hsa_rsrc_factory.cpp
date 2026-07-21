@@ -32,8 +32,6 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#include <io.h>
-#include <fcntl.h>
 #else
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -50,6 +48,45 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifdef _WIN32
+namespace {
+
+bool Utf8PathToWide(const std::string& path, std::wstring* wide_path) {
+  const int size =
+      MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.c_str(), -1, nullptr, 0);
+  if (size <= 0) return false;
+
+  wide_path->resize(static_cast<size_t>(size));
+  if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.c_str(), -1, wide_path->data(),
+                          size) != size) {
+    wide_path->clear();
+    return false;
+  }
+
+  wide_path->resize(static_cast<size_t>(size - 1));
+  return true;
+}
+
+class ScopedFileHandle {
+ public:
+  explicit ScopedFileHandle(HANDLE handle) : handle_(handle) {}
+  ~ScopedFileHandle() {
+    if (valid()) CloseHandle(handle_);
+  }
+
+  ScopedFileHandle(const ScopedFileHandle&) = delete;
+  ScopedFileHandle& operator=(const ScopedFileHandle&) = delete;
+
+  bool valid() const { return handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE; }
+  HANDLE get() const { return handle_; }
+
+ private:
+  HANDLE handle_;
+};
+
+}  // namespace
+#endif
 
 // Callback function to get available in the system agents
 hsa_status_t HsaRsrcFactory::GetHsaAgentsCallback(hsa_agent_t agent, void* data) {
@@ -530,23 +567,42 @@ bool HsaRsrcFactory::LoadAndFinalize(const AgentInfo* agent_info, const char* br
   std::string filename(brig_path);
   std::clog << "Code object filename: " << filename << std::endl;
 
-  // Open the file containing code object
+  // Open the file containing code object. On Windows, hsa_file_t is a native HANDLE.
 #ifdef _WIN32
-  hsa_file_t file_handle = _open(filename.c_str(), _O_RDONLY | _O_BINARY);
+  std::wstring wide_filename;
+  if (!Utf8PathToWide(filename, &wide_filename)) {
+    std::cerr << "Error: failed to convert code object path '" << filename
+              << "' to UTF-16, Win32 error " << GetLastError() << std::endl;
+    assert(false);
+    return false;
+  }
+
+  ScopedFileHandle file_owner(CreateFileW(wide_filename.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                          nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+  if (!file_owner.valid()) {
+    std::cerr << "Error: failed to load '" << filename << "', Win32 error " << GetLastError()
+              << std::endl;
+    assert(false);
+    return false;
+  }
+  hsa_file_t file_handle = file_owner.get();
 #else
   hsa_file_t file_handle = open(filename.c_str(), O_RDONLY);
-#endif
   if (file_handle == -1) {
     std::cerr << "Error: failed to load '" << filename << "'" << std::endl;
     assert(false);
     return false;
   }
+#endif
 
   // Create code object reader
   hsa_code_object_reader_t code_obj_rdr = {0};
   status = hsa_code_object_reader_create_from_file(file_handle, &code_obj_rdr);
   if (status != HSA_STATUS_SUCCESS) {
     std::cerr << "Failed to create code object reader '" << filename << "'" << std::endl;
+#ifndef _WIN32
+    close(file_handle);
+#endif
     return false;
   }
 
@@ -570,14 +626,15 @@ bool HsaRsrcFactory::LoadAndFinalize(const AgentInfo* agent_info, const char* br
                                      &kernelSymbol);
   CHECK_STATUS("Error in looking up kernel symbol", status);
 
-#ifdef _WIN32
-  _close(file_handle);
-#else
+  status = hsa_code_object_reader_destroy(code_obj_rdr);
+  CHECK_STATUS("Error in destroying code object reader", status);
+
+#ifndef _WIN32
   close(file_handle);
 #endif
 
-  status = hsa_code_object_reader_destroy(code_obj_rdr);
-  CHECK_STATUS("Error in destroying code object reader", status);
+  // The Windows HANDLE remains valid until after the reader is destroyed and is
+  // released by file_owner when this function returns.
 
   // Update output parameter
   *code_desc = kernelSymbol;

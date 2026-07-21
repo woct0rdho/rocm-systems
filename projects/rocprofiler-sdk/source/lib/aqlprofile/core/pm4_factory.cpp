@@ -25,11 +25,14 @@
 #include <mutex>
 #include <shared_mutex>
 
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/ioctl.h>
+#include <cstdio>
 #include <cstring>
-#include <libdrm/amdgpu_drm.h>
+#if !defined(_WIN32)
+#    include <fcntl.h>
+#    include <unistd.h>
+#    include <sys/ioctl.h>
+#    include <libdrm/amdgpu_drm.h>
+#endif
 
 namespace aql_profile
 {
@@ -64,6 +67,9 @@ namespace
 void
 populate_cu_bitmap_from_drm(AgentInfo& agent_info)
 {
+#if defined(_WIN32)
+    (void) agent_info;
+#else
     if(Pm4Factory::GetGpuId(agent_info.name) < GFX11_GPU_ID) return;
 
     for(int minor = 128; minor < 192; ++minor)
@@ -100,6 +106,7 @@ populate_cu_bitmap_from_drm(AgentInfo& agent_info)
             return;
         }
     }
+#endif
 }
 
 struct locked_agent_cache

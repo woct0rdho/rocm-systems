@@ -89,8 +89,8 @@ ROCTX_EXTERN_C_INIT
  *
  * @param[in] message The message associated with the event.
  */
-void
-roctxMarkA(const char* message) ROCTX_API ROCTX_NONNULL(1);
+ROCTX_API void
+roctxMarkA(const char* message) ROCTX_NONNULL(1);
 
 /** @} */
 
@@ -117,8 +117,8 @@ roctxMarkA(const char* message) ROCTX_API ROCTX_NONNULL(1);
  * @return Returns the level this nested range is started at. Nested range
  * levels are 0 based.
  */
-int
-roctxRangePushA(const char* message) ROCTX_API ROCTX_NONNULL(1);
+ROCTX_API int
+roctxRangePushA(const char* message) ROCTX_NONNULL(1);
 
 /**
  * Stop the current nested range.
@@ -130,8 +130,8 @@ roctxRangePushA(const char* message) ROCTX_API ROCTX_NONNULL(1);
  * @return Returns the level the stopped nested range was started at, or a
  * negative value if there was no nested range active.
  */
-int
-roctxRangePop() ROCTX_API;
+ROCTX_API int
+roctxRangePop();
 
 /**
  * @brief Starts a process range.
@@ -143,16 +143,16 @@ roctxRangePop() ROCTX_API;
  *
  * @return Returns the ID of the new range.
  */
-roctx_range_id_t
-roctxRangeStartA(const char* message) ROCTX_API ROCTX_NONNULL(1);
+ROCTX_API roctx_range_id_t
+roctxRangeStartA(const char* message) ROCTX_NONNULL(1);
 
 /**
  * Stop a process range.
  *
  * @param [in] id ::roctx_range_id_t returned from ::roctxRangeStartA to stop
  */
-void
-roctxRangeStop(roctx_range_id_t id) ROCTX_API;
+ROCTX_API void
+roctxRangeStop(roctx_range_id_t id);
 
 /** @} */
 
@@ -177,8 +177,8 @@ roctxRangeStop(roctx_range_id_t id) ROCTX_API;
  * failure while executing the request or lack of support. If the profiling tool supports pausing
  * but is already paused, the tool should ignore the request and return zero.
  */
-int
-roctxProfilerPause(roctx_thread_id_t tid) ROCTX_API;
+ROCTX_API int
+roctxProfilerPause(roctx_thread_id_t tid);
 
 /**
  * @brief Request any currently running profiling tool that is should resume collecting data.
@@ -195,8 +195,8 @@ roctxProfilerPause(roctx_thread_id_t tid) ROCTX_API;
  * failure while executing the request or lack of support. If the profiling tool is supports
  * resuming but is already active, the tool should ignore the request and return zero.
  */
-int
-roctxProfilerResume(roctx_thread_id_t tid) ROCTX_API;
+ROCTX_API int
+roctxProfilerResume(roctx_thread_id_t tid);
 
 /** @} */
 
@@ -220,8 +220,8 @@ roctxProfilerResume(roctx_thread_id_t tid) ROCTX_API;
  * @return int A profiling tool may choose to set this value to a non-zero value to indicate a
  * failure while executing the request or lack of support
  */
-int
-roctxNameOsThread(const char* name) ROCTX_API ROCTX_NONNULL(1);
+ROCTX_API int
+roctxNameOsThread(const char* name) ROCTX_NONNULL(1);
 
 /**
  * @brief Indicate to a profiling tool that, where possible, you would like the given HSA agent
@@ -236,8 +236,8 @@ roctxNameOsThread(const char* name) ROCTX_API ROCTX_NONNULL(1);
  * @return int A profiling tool may choose to set this value to a non-zero value to indicate a
  * failure while executing the request or lack of support
  */
-int
-roctxNameHsaAgent(const char* name, const struct hsa_agent_s* agent) ROCTX_API ROCTX_NONNULL(1, 2);
+ROCTX_API int
+roctxNameHsaAgent(const char* name, const struct hsa_agent_s* agent) ROCTX_NONNULL(1, 2);
 
 /**
  * @brief Indicate to a profiling tool that, where possible, you would like the given HIP device id
@@ -252,8 +252,8 @@ roctxNameHsaAgent(const char* name, const struct hsa_agent_s* agent) ROCTX_API R
  * @return int A profiling tool may choose to set this value to a non-zero value to indicate a
  * failure while executing the request or lack of support
  */
-int
-roctxNameHipDevice(const char* name, int device_id) ROCTX_API ROCTX_NONNULL(1);
+ROCTX_API int
+roctxNameHipDevice(const char* name, int device_id) ROCTX_NONNULL(1);
 
 /**
  * @brief Indicate to a profiling tool that, where possible, you would like the given HIP stream
@@ -268,8 +268,8 @@ roctxNameHipDevice(const char* name, int device_id) ROCTX_API ROCTX_NONNULL(1);
  * @return int A profiling tool may choose to set this value to a non-zero value to indicate a
  * failure while executing the request or lack of support
  */
-int
-roctxNameHipStream(const char* name, const struct ihipStream_t* stream) ROCTX_API ROCTX_NONNULL(1);
+ROCTX_API int
+roctxNameHipStream(const char* name, const struct ihipStream_t* stream) ROCTX_NONNULL(1);
 
 /** @} */
 
@@ -287,8 +287,8 @@ roctxNameHipStream(const char* name, const struct ihipStream_t* stream) ROCTX_AP
  * @return int A profiling tool may choose to set this value to a non-zero value to indicate a
  * failure while executing the request or lack of support
  */
-int
-roctxGetThreadId(roctx_thread_id_t* tid) ROCTX_API ROCTX_NONNULL(1);
+ROCTX_API int
+roctxGetThreadId(roctx_thread_id_t* tid) ROCTX_NONNULL(1);
 
 /** @} */
 

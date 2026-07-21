@@ -29,6 +29,8 @@ set_target_properties(
     rocprofiler-sdk-roctx-shared-library
     PROPERTIES OUTPUT_NAME rocprofiler-sdk-roctx
                LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/${CMAKE_INSTALL_LIBDIR}
+               RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/${CMAKE_INSTALL_BINDIR}
+               ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/${CMAKE_INSTALL_LIBDIR}
                SOVERSION ${PROJECT_VERSION_MAJOR}
                VERSION ${PROJECT_VERSION}
                SKIP_BUILD_RPATH OFF
@@ -38,6 +40,8 @@ set_target_properties(
 
 install(
     TARGETS rocprofiler-sdk-roctx-shared-library
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    COMPONENT roctx
-    EXPORT rocprofiler-sdk-roctx-targets)
+    EXPORT rocprofiler-sdk-roctx-targets
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    COMPONENT roctx)

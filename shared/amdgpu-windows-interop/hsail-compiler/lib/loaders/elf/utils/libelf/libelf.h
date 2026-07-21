@@ -29,7 +29,11 @@
 #ifndef	_LIBELF_H_
 #define	_LIBELF_H_
 
+#ifdef _WIN32
+#include "compat.h"
+#else
 #include <sys/types.h>
+#endif
 #include <sys/queue.h>
 #include <elfdefinitions.h>
 #ifndef EM_HSAIL

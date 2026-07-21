@@ -28,6 +28,7 @@
 #include <string.h>
 #include <assert.h>
 #include <cinttypes>
+#include <vector>
 #include <sys/types.h>
 #if defined(__linux__)
 #include <sys/mman.h>
@@ -43,7 +44,7 @@ struct Allocation {
   Allocation()
       : handle(0), cpu_addr(0), gpu_addr(0), size(0), userptr(false),
         user_data(nullptr), size_requested(0), node_id(0), mem_flags_value(0),
-        dmabuf_fd(-1), rocr_userdata(nullptr) {}
+        dmabuf_fd(-1), rocr_userdata(nullptr), pending_free(false) {}
   Allocation(wsl::thunk::GpuMemoryHandle handle_arg, void *cpu_addr_arg,
              uint64_t gpu_addr_arg, size_t size_arg, bool userptr_arg = false,
              void *user_data_arg = nullptr, size_t user_size_arg = 0,
@@ -51,7 +52,8 @@ struct Allocation {
       : handle(handle_arg), cpu_addr(cpu_addr_arg), gpu_addr(gpu_addr_arg),
         size(size_arg), userptr(userptr_arg), user_data(user_data_arg),
         size_requested(user_size_arg), node_id(node_id_arg),
-        mem_flags_value(mem_flags_value_arg), dmabuf_fd(-1), rocr_userdata(nullptr) {}
+        mem_flags_value(mem_flags_value_arg), dmabuf_fd(-1), rocr_userdata(nullptr),
+        pending_free(false) {}
 
   wsl::thunk::GpuMemoryHandle handle;
   void *cpu_addr;
@@ -64,10 +66,12 @@ struct Allocation {
   HSAuint32 mem_flags_value;
   int dmabuf_fd;
   void *rocr_userdata;
+  bool pending_free;
 };
 
 static std::map<const void *, Allocation>* allocation_map_ = new std::map<const void *, Allocation>();
 static std::mutex* allocation_map_lock_ = new std::mutex();
+static std::vector<void*> deferred_fragment_frees_;
 static rocr::SimpleHeap<BlockAllocator>* fragment_allocator_ = new rocr::SimpleHeap<BlockAllocator>();
 
 // ================================================================================================
@@ -87,6 +91,18 @@ static Allocation* FindAllocation(const void* ptr, size_t size) {
   }
 }
 
+static Allocation* FindGpuAllocation(uint64_t address, uint64_t size) {
+  if (address == 0 || size == 0 || size > UINT64_MAX - address) return nullptr;
+  for (auto& entry : *allocation_map_) {
+    auto& allocation = entry.second;
+    if (address >= allocation.gpu_addr) {
+      const uint64_t offset = address - allocation.gpu_addr;
+      if (offset <= allocation.size && size <= allocation.size - offset) return &allocation;
+    }
+  }
+  return nullptr;
+}
+
 // ================================================================================================
 void clear_allocation_map(void) {
   //delete allocation_map_lock_;
@@ -94,6 +110,7 @@ void clear_allocation_map(void) {
   std::lock_guard<std::mutex> lock(*allocation_map_lock_);
   delete allocation_map_;
   allocation_map_ = new std::map<const void *, Allocation>();
+  deferred_fragment_frees_.clear();
 }
 
 // ================================================================================================
@@ -344,26 +361,48 @@ HSAKMT_STATUS hsaKmtFreeMemoryInternal(void *MemoryAddress,
     return HSAKMT_STATUS_INVALID_PARAMETER;
 
   if (!SkipSubAlloc) {
-    if (fragment_allocator_->free(MemoryAddress))
-      return HSAKMT_STATUS_SUCCESS;
+    bool defer_fragment_free = false;
+    {
+      std::lock_guard<std::mutex> guard(*allocation_map_lock_);
+      Allocation* allocation = FindAllocation(MemoryAddress, SizeInBytes);
+      if (allocation != nullptr) {
+        auto* gpu_mem = wsl::thunk::GpuMemory::Convert(allocation->handle);
+        if (gpu_mem != nullptr && gpu_mem->IsQueueReferenced()) {
+          bool already_deferred = false;
+          for (const auto* pending : deferred_fragment_frees_) {
+            if (pending == MemoryAddress) {
+              already_deferred = true;
+              break;
+            }
+          }
+          if (!already_deferred) deferred_fragment_frees_.push_back(MemoryAddress);
+          defer_fragment_free = true;
+        }
+      }
+    }
+    if (defer_fragment_free) return HSAKMT_STATUS_SUCCESS;
+    if (fragment_allocator_->free(MemoryAddress)) return HSAKMT_STATUS_SUCCESS;
   }
 
   wsl::thunk::GpuMemory *gpu_mem = nullptr;
   {
-    std::lock_guard<std::mutex> gard(*allocation_map_lock_);
+    std::lock_guard<std::mutex> guard(*allocation_map_lock_);
     auto it = allocation_map_->find(MemoryAddress);
-    if (it == allocation_map_->end()) {
-      return HSAKMT_STATUS_ERROR;
-    }
+    if (it == allocation_map_->end()) return HSAKMT_STATUS_ERROR;
 
     gpu_mem = wsl::thunk::GpuMemory::Convert(it->second.handle);
-    if (gpu_mem->IsQueueReferenced())
-      return HSAKMT_STATUS_ERROR;
+    if (gpu_mem->IsQueueReferenced()) {
+      // AQL Profile may release its buffers immediately after observing packet
+      // completion while the WDDM submission fence is still retiring. Accept the
+      // free, make the allocation unavailable to new submissions, and complete
+      // destruction when the queue drops its final retained reference.
+      it->second.pending_free = true;
+      return HSAKMT_STATUS_SUCCESS;
+    }
 
     wsl::thunk::GpuMemoryDescFlags flags;
     flags.reserved = gpu_mem->Flags();
-    if (flags.is_imported_vram_ipc &&
-      gpu_mem->DecSharedReference()) {
+    if (flags.is_imported_vram_ipc && gpu_mem->DecSharedReference()) {
       pr_info("memory is still referenced\n");
       return HSAKMT_STATUS_SUCCESS;
     }
@@ -407,25 +446,100 @@ bool queue_acquire_buffer(void *MemoryAddress) {
   return true;
 }
 
+void queue_release_buffer_reference(wsl::thunk::GpuMemory* memory);
+
 bool queue_release_buffer(void *MemoryAddress) {
-  if (!MemoryAddress)
-    return false;
+  if (!MemoryAddress) return false;
 
   wsl::thunk::GpuMemory *gpu_mem = nullptr;
   {
-    std::lock_guard<std::mutex> gard(*allocation_map_lock_);
+    std::lock_guard<std::mutex> guard(*allocation_map_lock_);
     auto it = allocation_map_->find(MemoryAddress);
-    if (it == allocation_map_->end()) {
-      return HSAKMT_STATUS_ERROR;
-    }
-
+    if (it == allocation_map_->end()) return false;
     gpu_mem = wsl::thunk::GpuMemory::Convert(it->second.handle);
-    gpu_mem->PutQueueReference();
   }
-  if (gpu_mem == nullptr)
+  if (gpu_mem == nullptr) return false;
+  queue_release_buffer_reference(gpu_mem);
+  return true;
+}
+
+bool queue_acquire_buffer_range(uint64_t gpu_address, uint64_t size,
+                                wsl::thunk::WDDMDevice* expected_device,
+                                wsl::thunk::GpuMemory** memory,
+                                const void** cpu_address) {
+  if (gpu_address == 0 || size == 0 || size > UINT64_MAX - gpu_address ||
+      memory == nullptr || cpu_address == nullptr) {
+    return false;
+  }
+
+  std::lock_guard<std::mutex> guard(*allocation_map_lock_);
+  Allocation* allocation = FindGpuAllocation(gpu_address, size);
+  if (allocation == nullptr || allocation->pending_free || gpu_address < allocation->gpu_addr)
     return false;
 
+  auto* gpu_mem = wsl::thunk::GpuMemory::Convert(allocation->handle);
+  if (gpu_mem == nullptr || gpu_mem->GetDevice() != expected_device || allocation->cpu_addr == nullptr)
+    return false;
+
+  const uint64_t offset = gpu_address - allocation->gpu_addr;
+  if (offset > allocation->size || size > allocation->size - offset) return false;
+
+  gpu_mem->GetQueueReference();
+  *memory = gpu_mem;
+  *cpu_address = static_cast<const uint8_t*>(allocation->cpu_addr) + offset;
   return true;
+}
+
+void queue_release_buffer_reference(wsl::thunk::GpuMemory* memory) {
+  if (memory == nullptr) return;
+
+  std::vector<void*> fragment_frees;
+  wsl::thunk::GpuMemory* memory_to_delete = nullptr;
+  {
+    std::lock_guard<std::mutex> guard(*allocation_map_lock_);
+    if (!memory->PutQueueReference()) return;
+
+    for (auto it = allocation_map_->begin(); it != allocation_map_->end(); ++it) {
+      if (wsl::thunk::GpuMemory::Convert(it->second.handle) != memory) continue;
+
+      const auto allocation_begin = reinterpret_cast<uintptr_t>(it->second.cpu_addr);
+      for (auto pending = deferred_fragment_frees_.begin();
+           pending != deferred_fragment_frees_.end();) {
+        const auto address = reinterpret_cast<uintptr_t>(*pending);
+        if (address >= allocation_begin && address - allocation_begin < it->second.size) {
+          fragment_frees.push_back(*pending);
+          pending = deferred_fragment_frees_.erase(pending);
+        } else {
+          ++pending;
+        }
+      }
+
+      if (it->second.pending_free && fragment_frees.empty()) {
+        wsl::thunk::GpuMemoryDescFlags flags;
+        flags.reserved = memory->Flags();
+        if (flags.is_imported_vram_ipc && memory->DecSharedReference()) {
+          it->second.pending_free = false;
+          break;
+        }
+        if (it->second.dmabuf_fd >= 0) {
+#if defined(__linux__)
+          close(it->second.dmabuf_fd);
+#endif
+          it->second.dmabuf_fd = -1;
+        }
+        allocation_map_->erase(it);
+        memory_to_delete = memory;
+      }
+      break;
+    }
+  }
+
+  for (auto* address : fragment_frees) {
+    const bool released = fragment_allocator_->free(address);
+    assert(released && "deferred fragment allocation is no longer owned");
+    (void) released;
+  }
+  delete memory_to_delete;
 }
 
 wsl::thunk::GpuMemory *get_gpu_mem(void *MemoryAddress) {

@@ -69,23 +69,6 @@ WDDMDevice::WDDMDevice(D3DKMT_HANDLE adapter, LUID adapter_luid, uint32_t node_i
 
   NTSTATUS ret = ParseDeviceInfo();
   pr_rocr_info("kmd_version:%" PRIu32 "\n", device_info_.kmd_version);
-  device_info_.hwsInfo.hwsMask.aql_queue &= !dxg_runtime->use_pm4_;
-  // The KMD only accepts PM4 packets on COMPUTE0, but wkmi defaults compute_schedid
-  // to COMPUTE1 whenever AQL-on-compute1 is supported. Override to COMPUTE0 for the
-  // PM4 path.
-  if (dxg_runtime->use_pm4_) {
-     if (EngineOrdinal(kSchedulerIdCompute0, &device_info_) >= 0) {
-       device_info_.compute_schedid = kSchedulerIdCompute0;
-     } else {
-       pr_err("PM4 path requires COMPUTE0 schedId=%" PRIu32 " but it is not present; keeping compute_schedid=%" PRIu32 "\n",
-              kSchedulerIdCompute0, device_info_.compute_schedid);
-     }
-  }
-  pr_rocr_info("hwsInfo: aql_queue=%d computeHwsEnabled=%d use_pm4_override=%" PRIu64
-           " compute_schedid=%" PRIu32 "\n",
-           device_info_.hwsInfo.hwsMask.aql_queue,
-           device_info_.hwsInfo.hwsMask.computeHwsEnabled,
-           (uint64_t)dxg_runtime->use_pm4_, device_info_.compute_schedid);
 
   if (ret == STATUS_OBJECT_NAME_NOT_FOUND || ret == STATUS_REVISION_MISMATCH) {
     // Skip adapter
@@ -113,6 +96,27 @@ WDDMDevice::WDDMDevice(D3DKMT_HANDLE adapter, LUID adapter_luid, uint32_t node_i
   CreatePagingQueue();
   InitCmdbufInfo();
   QuerySegmentInfo();
+
+#if defined(__linux__)
+  // The WSL thunk continues to use its established software AQL-to-PM4 queue.
+  device_info_.hwsInfo.hwsMask.aql_queue = 0;
+#else
+  profiling_capability_ = profiling::DetectCapability(
+      device_info_.major, device_info_.minor, device_info_.stepping,
+      cmdbuf_aql_frame_size_, true);
+  if (profiling_capability_.supported) {
+    // A software queue is required to validate and translate vendor packets before
+    // they reach WDDM. This is selected from detected target/runtime capability,
+    // never from a process environment switch, so the queue keeps the compute engine
+    // the KMD assigned it.
+    device_info_.hwsInfo.hwsMask.aql_queue = 0;
+  }
+#endif
+  pr_rocr_info("hwsInfo: aql_queue=%d computeHwsEnabled=%d aql_profile_pm4=%d compute_schedid=%" PRIu32 "\n",
+               device_info_.hwsInfo.hwsMask.aql_queue,
+               device_info_.hwsInfo.hwsMask.computeHwsEnabled,
+               profiling_capability_.supported ? 1 : 0,
+               device_info_.compute_schedid);
 }
 
 WDDMDevice::~WDDMDevice() {
@@ -681,6 +685,13 @@ void WDDMDevice::InitCmdbufInfo(void) {
   cmdbuf_aql_frame_size_ += 128;
 
   cmdbuf_aql_frame_size_ = rocr::AlignUp(cmdbuf_aql_frame_size_, 0x10);
+
+  // Large compatible gfx11 counter groups can produce substantial read packets. Reserve a
+  // qualified frame for the packet plus profiling timestamps,
+  // barriers, cache flushes, completion signaling, and the queue read-pointer update.
+  constexpr uint32_t gfx11_aql_profile_frame_size = profiling::kQualifiedFrameBytes;
+  if (device_info_.major >= 11 && cmdbuf_aql_frame_size_ < gfx11_aql_profile_frame_size)
+    cmdbuf_aql_frame_size_ = gfx11_aql_profile_frame_size;
 
   cmdbuf_size_ = rocr::AlignUp(cmdbuf_aql_frame_num_ * cmdbuf_aql_frame_size_, 0x1000);
 }

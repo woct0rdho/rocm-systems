@@ -59,10 +59,21 @@ void __atomic_load(const T* object, typename std::remove_volatile<T>::type* ret,
     *ret = InterlockedOr64(
       reinterpret_cast<volatile LONG64*>(const_cast<typename std::remove_const<T>::type*>(object)),
       0);
-  } else {
+  } else if constexpr (sizeof(T) == 4) {
     *ret = InterlockedOr(
       reinterpret_cast<volatile LONG*>(const_cast<typename std::remove_const<T>::type*>(object)),
       0);
+  } else if constexpr (sizeof(T) == 2) {
+    *ret = InterlockedOr16(
+      reinterpret_cast<volatile SHORT*>(const_cast<typename std::remove_const<T>::type*>(object)),
+      0);
+  } else if constexpr (sizeof(T) == 1) {
+    *ret = InterlockedOr8(
+      reinterpret_cast<volatile CHAR*>(const_cast<typename std::remove_const<T>::type*>(object)),
+      0);
+  } else {
+    static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8,
+                  "Unsupported Windows atomic load size");
   }
 }
 
@@ -72,10 +83,21 @@ void __atomic_store(const T* object, typename std::remove_volatile<T>::type* val
     InterlockedExchange64(
       reinterpret_cast<volatile LONG64*>(const_cast<typename std::remove_const<T>::type*>(object)),
       *val);
-  } else {
+  } else if constexpr (sizeof(T) == 4) {
     InterlockedExchange(
       reinterpret_cast<volatile LONG*>(const_cast<typename std::remove_const<T>::type*>(object)),
       *val);
+  } else if constexpr (sizeof(T) == 2) {
+    InterlockedExchange16(
+      reinterpret_cast<volatile SHORT*>(const_cast<typename std::remove_const<T>::type*>(object)),
+      *val);
+  } else if constexpr (sizeof(T) == 1) {
+    InterlockedExchange8(
+      reinterpret_cast<volatile CHAR*>(const_cast<typename std::remove_const<T>::type*>(object)),
+      *val);
+  } else {
+    static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8,
+                  "Unsupported Windows atomic store size");
   }
 }
 

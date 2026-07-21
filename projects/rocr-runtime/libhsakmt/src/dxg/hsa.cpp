@@ -9,6 +9,9 @@
 #endif
 #include "hsa-runtime/inc/hsa.h"
 #include "hsa-runtime/inc/hsa_ven_amd_loader.h"
+#if !defined(__linux__)
+#include "hsa-runtime/core/inc/signal.h"
+#endif
 
 static hsa_status_t (*fn_hsa_ven_amd_loader_query_host_address)(
     const void *device_address, const void **host_address);
@@ -87,6 +90,10 @@ void hsakmt_hsa_signal_store_screlease(hsa_signal_t hsa_signal,
     fn_hsa_signal_store_screlease(hsa_signal, value);
 }
 
+void* hsakmt_hsa_signal_acquire(hsa_signal_t) { return nullptr; }
+
+void hsakmt_hsa_signal_release(void*) {}
+
 hsa_status_t hsakmt_hsa_ven_amd_loader_query_host_address(
     const void *device_address, const void **host_address) {
   if (fn_hsa_ven_amd_loader_query_host_address)
@@ -110,6 +117,30 @@ hsa_signal_value_t hsakmt_hsa_signal_wait_relaxed(
 void hsakmt_hsa_signal_store_screlease(hsa_signal_t hsa_signal,
                                       hsa_signal_value_t value) {
   hsa_signal_store_screlease(hsa_signal, value);
+}
+
+void* hsakmt_hsa_signal_acquire(hsa_signal_t signal) {
+#if defined(_WIN32)
+  if (signal.handle == 0) return nullptr;
+  const auto* shared = rocr::core::SharedSignal::Convert(signal);
+  MEMORY_BASIC_INFORMATION info{};
+  if (::VirtualQuery(shared, &info, sizeof(info)) != sizeof(info) || info.State != MEM_COMMIT ||
+      (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+    return nullptr;
+  }
+  const uint64_t region_base = reinterpret_cast<uint64_t>(info.BaseAddress);
+  const uint64_t region_size = static_cast<uint64_t>(info.RegionSize);
+  const uint64_t address = reinterpret_cast<uint64_t>(shared);
+  if (region_size > UINT64_MAX - region_base || address < region_base ||
+      sizeof(*shared) > region_base + region_size - address || !shared->IsValid()) {
+    return nullptr;
+  }
+#endif
+  return rocr::core::Signal::DuplicateHandle(signal);
+}
+
+void hsakmt_hsa_signal_release(void* signal) {
+  if (signal != nullptr) static_cast<rocr::core::Signal*>(signal)->Release();
 }
 
 hsa_status_t hsakmt_hsa_ven_amd_loader_query_host_address(

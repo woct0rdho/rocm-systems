@@ -30,6 +30,7 @@
 #include <hsa/hsa_api_trace.h>
 
 #include <optional>
+#include <string>
 #include <unordered_set>
 #include <vector>
 

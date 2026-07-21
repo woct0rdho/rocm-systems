@@ -116,6 +116,13 @@ auto agent_json = std::map<rocprofiler_agent_id_t, std::string>{};
 
 ROCPROFILER_EXTERN_C_INIT
 
+int
+availability_status(const char** message)
+{
+    if(message) *message = "";
+    return 0;
+}
+
 size_t
 get_number_of_agents()
 {

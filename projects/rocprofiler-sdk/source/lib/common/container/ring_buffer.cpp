@@ -26,7 +26,11 @@
 
 #include <fmt/format.h>
 
-#include <sys/mman.h>
+#if defined(_WIN32)
+#    include <Windows.h>
+#else
+#    include <sys/mman.h>
+#endif
 #include <atomic>
 #include <cerrno>
 #include <cstddef>
@@ -96,7 +100,16 @@ ring_buffer::init(size_t _size)
     m_read_count  = 0;
     m_write_count = 0;
 
-    // Map twice the buffer size.
+    // Allocate a contiguous process-local buffer. The record buffer handles wrapping explicitly.
+#if defined(_WIN32)
+    m_ptr = ::VirtualAlloc(nullptr, m_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if(m_ptr == nullptr)
+    {
+        const auto error = ::GetLastError();
+        destroy();
+        ROCP_FATAL << fmt::format("VirtualAlloc failed with error {}", error);
+    }
+#else
     if((m_ptr =
             mmap(nullptr, m_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0)) ==
        MAP_FAILED)
@@ -105,6 +118,7 @@ ring_buffer::init(size_t _size)
         auto _err = errno;
         ROCP_FATAL << fmt::format("mmap failed with errno {} :: {}", _err, strerror(_err));
     }
+#endif
 }
 
 void
@@ -112,9 +126,15 @@ ring_buffer::destroy()
 {
     if(m_ptr && m_init)
     {
+#if defined(_WIN32)
+        if(!::VirtualFree(m_ptr, 0, MEM_RELEASE))
+            ROCP_WARNING << fmt::format("ring_buffer: VirtualFree failed with error {}",
+                                        ::GetLastError());
+#else
         // Unmap the mapped virtual memory.
         auto ret = munmap(m_ptr, m_size);
         if(ret != 0) perror("ring_buffer: munmap failed");
+#endif
     }
     m_init        = false;
     m_size        = 0;

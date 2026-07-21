@@ -183,6 +183,7 @@ if(ROCPROFILER_BUILD_DOCS)
         REPO_BRANCH "main")
 endif()
 
+if(NOT ROCPROFILER_BUILD_WINDOWS_MINIMAL)
 # perfetto
 rocprofiler_checkout_git_submodule(
     RECURSIVE
@@ -241,6 +242,7 @@ else()
     add_library(otf2::otf2 ALIAS otf2)
     target_link_libraries(otf2 INTERFACE PkgConfig::OTF2)
 endif()
+endif()
 
 #
 # JSON
@@ -265,6 +267,7 @@ endif()
 #
 # SQLite3
 #
+if(NOT ROCPROFILER_BUILD_WINDOWS_MINIMAL)
 if(ROCPROFILER_BUILD_SQLITE3)
     # checkout submodule if not already checked out or clone repo if no .gitmodules file
     rocprofiler_checkout_git_submodule(
@@ -307,10 +310,12 @@ else()
     find_package(SQLite3 REQUIRED)
     target_link_libraries(rocprofiler-sdk-sqlite3 INTERFACE SQLite::SQLite3)
 endif()
+endif()
 
 #
 # PyBind11
 #
+if(NOT ROCPROFILER_BUILD_WINDOWS_MINIMAL)
 if(ROCPROFILER_BUILD_PYBIND11)
     # checkout submodule if not already checked out or clone repo if no .gitmodules file
     rocprofiler_checkout_git_submodule(
@@ -327,10 +332,12 @@ else()
     find_package(pybind11 REQUIRED)
     target_link_libraries(rocprofiler-sdk-pybind11 INTERFACE pybind11::pybind11)
 endif()
+endif()
 
 #
 # GOTCHA
 #
+if(NOT ROCPROFILER_BUILD_WINDOWS_MINIMAL)
 if(ROCPROFILER_BUILD_GOTCHA)
     # checkout submodule if not already checked out or clone repo if no .gitmodules file
     rocprofiler_checkout_git_submodule(
@@ -368,6 +375,7 @@ else()
     elseif(TARGET gotcha)
         target_link_libraries(rocprofiler-sdk-gotcha INTERFACE gotcha)
     endif()
+endif()
 endif()
 
 cmake_policy(POP)

@@ -42,6 +42,13 @@ option(CLR_BUILD_HIP "Build HIP" OFF)
 option(CLR_BUILD_OCL "Build OCL" OFF)
 option(USE_NEW_HOSTCALL_IMPL
   "Use the new phase/occupancy-based hostcall implementation" OFF)
+option(ROCCLR_BUILD_WINDOWS_TESTS "Build CPU-only Windows CLR/ROCr tests" OFF)
+
+if(WIN32 AND ROCCLR_BUILD_WINDOWS_TESTS)
+    enable_testing()
+    include(CTest)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+endif()
 
 # Set default build type
 if(NOT CMAKE_BUILD_TYPE)
@@ -128,6 +135,59 @@ elseif(HIP_PLATFORM STREQUAL "amd")
 endif()
 if(CLR_BUILD_HIP)
     add_subdirectory(hipamd)
+endif()
+
+if(WIN32 AND CLR_BUILD_HIP AND ROCCLR_BUILD_WINDOWS_TESTS)
+    find_package(rocprofiler-register CONFIG REQUIRED)
+
+    add_test(NAME clr.windows.runtime-binary
+        COMMAND Python3::Interpreter
+                ${CMAKE_CURRENT_SOURCE_DIR}/rocclr/device/rocm/tests/runtime_validation.py
+                --runtime $<TARGET_FILE:amdhip64>
+                --build-directory ${CMAKE_BINARY_DIR}
+                --cache ${CMAKE_BINARY_DIR}/CMakeCache.txt
+                --output ${CMAKE_BINARY_DIR}/validation/hip-runtime-build.txt)
+    set_tests_properties(clr.windows.runtime-binary PROPERTIES
+        LABELS "windows;unit;cpu-only;pe"
+        TIMEOUT 30
+        PASS_REGULAR_EXPRESSION "hip_runtime_validation=passed")
+
+    add_library(clr-windows-registration-profiler SHARED
+        rocclr/device/rocm/tests/windows_registration_profiler.cpp)
+    set_target_properties(clr-windows-registration-profiler PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF
+        OUTPUT_NAME rocprofiler-sdk)
+
+    add_executable(clr-windows-registration-test
+        rocclr/device/rocm/tests/windows_registration_test.cpp)
+    target_link_libraries(clr-windows-registration-test PRIVATE
+        rocprofiler-register::rocprofiler-register)
+    set_target_properties(clr-windows-registration-test PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_compile_options(clr-windows-registration-test PRIVATE /EHsc)
+
+    foreach(_registration_mode normal late)
+        add_test(NAME clr.windows.registration.${_registration_mode}
+            COMMAND $<TARGET_FILE:clr-windows-registration-test>
+                    $<TARGET_FILE:clr-windows-registration-profiler>
+                    $<TARGET_FILE:amdhip64>
+                    $<TARGET_FILE:rocprofiler-register::rocprofiler-register>
+                    ${_registration_mode})
+        set_tests_properties(clr.windows.registration.${_registration_mode} PROPERTIES
+            LABELS "windows;unit;cpu-only;registration"
+            TIMEOUT 30
+            PASS_REGULAR_EXPRESSION
+                "windows_hip_registration=${_registration_mode} passed hsa_loaded=no gpu_work_executed=no")
+        if(ROCM_KPACK_ENABLED)
+            set_property(TEST clr.windows.registration.${_registration_mode} APPEND PROPERTY
+                ENVIRONMENT_MODIFICATION
+                    "PATH=path_list_prepend:${ROCM_PATH}/bin")
+        endif()
+    endforeach()
 endif()
 if(CLR_BUILD_OCL)
     add_subdirectory(opencl)

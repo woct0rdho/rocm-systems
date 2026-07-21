@@ -841,19 +841,20 @@ bool Device::init() {
   const char* gpu_enable_pal_env = getenv("GPU_ENABLE_PAL");
   bool gpu_enable_pal_is_empty_string = (gpu_enable_pal_env != nullptr && gpu_enable_pal_env[0] == '\0');
 
+  // A Windows build without the PAL backend must default to ROCr. Otherwise the
+  // default value selects code that was not compiled and device initialization
+  // returns false without attempting either available backend.
+#if defined(WITH_PAL_DEVICE)
+  constexpr uint kWindowsDefaultGpuEnablePal = 1;
+#else
+  constexpr uint kWindowsDefaultGpuEnablePal = 0;
+#endif
+
   // Bug fix: atoi("") returns 0, but empty string should mean "use platform default"
   if (gpu_enable_pal_is_empty_string) {
-    if (IS_WINDOWS) {
-      // Windows default: PAL path
-      GPU_ENABLE_PAL = 1;
-    } else {
-      // Linux default: ROCr path
-      GPU_ENABLE_PAL = 0;
-    }
+    GPU_ENABLE_PAL = IS_WINDOWS ? kWindowsDefaultGpuEnablePal : 0;
   } else if (IS_WINDOWS && flagIsDefault(GPU_ENABLE_PAL)) {
-    // On Windows by default keep PAL path for now, until we completely switch to ROCr backend
-    // Without this, roc::Device::init() returns true & disables PAL path in below code
-    GPU_ENABLE_PAL = 1;
+    GPU_ENABLE_PAL = kWindowsDefaultGpuEnablePal;
   }
 
 // IMPORTANT: Note that we are initialiing HSA stack first and then

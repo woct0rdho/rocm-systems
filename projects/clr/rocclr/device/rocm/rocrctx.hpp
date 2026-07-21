@@ -189,13 +189,8 @@ class Hsa : public amd::AllStatic {
                                    void (*callback)(hsa_status_t status, hsa_queue_t* source,
                                                     void* data),
                                    void* data, uint32_t private_segment_size,
-                                   uint32_t group_segment_size, hsa_queue_t** queue) {
-    return ROCR_DYN(hsa_queue_create)(agent, size, type, callback, data, private_segment_size,
-                                      group_segment_size, queue);
-  }
-  static hsa_status_t queue_destroy(hsa_queue_t* queue) {
-    return ROCR_DYN(hsa_queue_destroy)(queue);
-  }
+                                   uint32_t group_segment_size, hsa_queue_t** queue);
+  static hsa_status_t queue_destroy(hsa_queue_t* queue);
   static hsa_status_t amd_queue_get_info(hsa_queue_t* queue,
                                          hsa_queue_info_attribute_t attribute, void* value) {
     return ROCR_DYN(hsa_amd_queue_get_info)(queue, attribute, value);

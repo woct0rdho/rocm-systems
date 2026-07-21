@@ -33,6 +33,33 @@ rocprofiler_add_option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 rocprofiler_add_option(
     ROCPROFILER_BUILD_CI "Enable continuous integration default values for options" OFF
     ADVANCED)
+rocprofiler_add_option(
+    ROCPROFILER_BUILD_WINDOWS_MINIMAL
+    "Build the basic native Windows rocprofv3 availability/profiling subset" OFF)
+rocprofiler_add_option(
+    ROCPROFILER_BUILD_WINDOWS_TESTS
+    "Enable focused native Windows tests without the Linux-oriented test graph" OFF)
+rocprofiler_add_option(
+    ROCPROFILER_BUILD_WINDOWS_INTEGRATION_TESTS
+    "Enable safe process-level native Windows tests" OFF)
+set(ROCPROFILER_WINDOWS_TEST_VENV_ROOT
+    ""
+    CACHE PATH "Windows test venv root")
+set(ROCPROFILER_WINDOWS_TEST_RUNTIME_ROOT
+    ""
+    CACHE PATH "Windows test HIP/CLR/ROCr installation root")
+set(ROCPROFILER_WINDOWS_TEST_OUTPUT_ROOT
+    ""
+    CACHE PATH "Windows validation output root outside the installed package")
+set(ROCPROFILER_WINDOWS_HSA_INCLUDE_DIR
+    ""
+    CACHE PATH "Windows HSA header directory used by the minimal build")
+set(ROCPROFILER_WINDOWS_HSA_LIBRARY
+    ""
+    CACHE FILEPATH "Windows HIP/HSA import library used by the minimal build")
+set(ROCPROFILER_WINDOWS_HSA_VERSION
+    "1.14.0"
+    CACHE STRING "HSA runtime package compatibility version for the Windows imported target")
 
 rocprofiler_add_option(ROCPROFILER_BUILD_TESTS "Enable building the tests"
                        ${ROCPROFILER_BUILD_CI})
@@ -107,6 +134,29 @@ rocprofiler_add_option(ROCPROFILER_BUILD_DEPRECATED_WARNINGS
 rocprofiler_add_option(
     ROCPROFILER_BUILD_AQLPROFILE
     "Enable building with internal AQLProfile library (recommended)" ON ADVANCED)
+
+if(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+    if(NOT WIN32)
+        message(FATAL_ERROR "ROCPROFILER_BUILD_WINDOWS_MINIMAL is only supported on Windows")
+    endif()
+
+    set(CMAKE_CXX_STANDARD 20)
+    add_compile_options("/EHsc" "/utf-8")
+    foreach(
+        _OPT
+        ROCPROFILER_BUILD_TESTS
+        ROCPROFILER_BUILD_SAMPLES
+        ROCPROFILER_BUILD_BENCHMARK
+        ROCPROFILER_BUILD_DOCS
+        ROCPROFILER_BUILD_GHC_FS
+        ROCPROFILER_BUILD_SQLITE3
+        ROCPROFILER_BUILD_PYBIND11
+        ROCPROFILER_BUILD_GOTCHA)
+        set(${_OPT}
+            OFF
+            CACHE BOOL "Disabled by ROCPROFILER_BUILD_WINDOWS_MINIMAL" FORCE)
+    endforeach()
+endif()
 
 # In the future, we will do this even with clang-tidy enabled
 foreach(_OPT ROCPROFILER_BUILD_WERROR)

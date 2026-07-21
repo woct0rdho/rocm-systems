@@ -60,6 +60,15 @@ set_target_properties(
                INSTALL_RPATH "\$ORIGIN:\$ORIGIN/..:\$ORIGIN/../rocm_sysdeps/lib")
 
 if(WIN32)
+    # A Windows DLL cannot resolve a sibling in a nested directory during package-level
+    # direct-load tests, so the availability library is published beside the SDK DLL.
+    set_target_properties(
+        rocprofv3-list-avail
+        PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/${CMAKE_INSTALL_BINDIR}
+                   ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/${CMAKE_INSTALL_LIBDIR})
+endif()
+
+if(WIN32)
     install(
         TARGETS rocprofv3-list-avail
         EXPORT rocprofiler-sdk-tool-targets

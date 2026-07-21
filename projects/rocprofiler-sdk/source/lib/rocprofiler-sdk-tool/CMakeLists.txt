@@ -27,6 +27,11 @@ if(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         COMPONENT tools)
+
+    # The availability DLL is the only list-avail implementation the Windows-minimal
+    # backend builds, and the launcher and installed-prefix checks load it from bin
+    # beside rocprofiler-sdk.dll.
+    add_subdirectory(list-avail)
 else()
     set(TOOL_HEADERS
         att_no_intercept.hpp

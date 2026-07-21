@@ -1,0 +1,30 @@
+@echo off
+setlocal
+set "PATH=%~dp0;%PATH%"
+set "ROCPROFILER_WINDOWS_CORE_BIN=%~dp0"
+set "ROCPROF_LIST_AVAIL_TOOL_LIBRARY=%~dp0rocprofiler-sdk\rocprofv3-list-avail.dll"
+set "ROCPROFILER_METRICS_PATH=%~dp0..\share\rocprofiler-sdk"
+if defined ROCPROFV3_PYTHON goto use_override
+if exist "%~dp0python.exe" goto use_packaged
+where py.exe >nul 2>nul
+if not errorlevel 1 goto use_py
+where python.exe >nul 2>nul
+if not errorlevel 1 goto use_python
+echo [rocprofv3-avail] Fatal error: no supported Python interpreter was found. Set ROCPROFV3_PYTHON or add Python 3 to PATH. 1>&2
+exit /b 1
+
+:use_override
+"%ROCPROFV3_PYTHON%" "%~dp0rocprofv3-avail" %*
+exit /b %ERRORLEVEL%
+
+:use_packaged
+"%~dp0python.exe" "%~dp0rocprofv3-avail" %*
+exit /b %ERRORLEVEL%
+
+:use_py
+py.exe -3 "%~dp0rocprofv3-avail" %*
+exit /b %ERRORLEVEL%
+
+:use_python
+python.exe "%~dp0rocprofv3-avail" %*
+exit /b %ERRORLEVEL%

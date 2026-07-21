@@ -29,6 +29,7 @@
 #include <string>
 #include "aqlprofile-sdk/aql_profile_v2.h"
 
+#include "core/amd_aql_pm4_ib_packet.h"
 #include "core/aql_profile_exception.h"
 
 #ifdef _WIN32
@@ -49,8 +50,16 @@ typedef hsa_ven_amd_aqlprofile_data_callback_t data_callback_t;
 typedef hsa_ext_amd_aql_pm4_packet_t packet_t;
 typedef hsa_ven_amd_aqlprofile_event_t event_t;
 
+struct Pm4PacketMetadata {
+  amd_aql_pm4_ib_stage_t stage = AMD_AQL_PM4_IB_STAGE_NONE;
+  uint64_t profile_key = 0;
+  uint32_t event_count = 0;
+  uint32_t command_checksum = 0;
+};
+
+uint32_t Pm4CommandChecksum(const void* commands, uint32_t command_size);
 void PopulateAql(const void* cmd_buffer, uint32_t cmd_size, pm4_builder::CmdBuilder* cmd_writer,
-                 packet_t* aql_packet);
+                 packet_t* aql_packet, Pm4PacketMetadata metadata = {});
 void* LegacyAqlAcquire(const packet_t* aql_packet, void* data);
 void* LegacyAqlRelease(const packet_t* aql_packet, void* data);
 void* LegacyPm4(const packet_t* aql_packet, void* data);

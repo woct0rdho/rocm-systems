@@ -69,6 +69,23 @@ using aql_profile::event_exception;
 using aql_profile::event_t;
 using ::aql_profile::Pm4Factory;
 
+uint64_t PmcProfileKey(const aqlprofile_pmc_profile_t& profile) {
+  uint64_t value = 1469598103934665603ull;
+  auto hash_word = [&value](uint64_t word) {
+    value ^= word;
+    value *= 1099511628211ull;
+  };
+  hash_word(profile.agent.handle);
+  hash_word(profile.event_count);
+  for (uint32_t i = 0; i < profile.event_count; ++i) {
+    hash_word(profile.events[i].block_name);
+    hash_word(profile.events[i].block_index);
+    hash_word(profile.events[i].event_id);
+    hash_word(profile.events[i].flags.raw);
+  }
+  return value == 0 ? 1 : value;
+}
+
 uint32_t HandleSQFlagsBlock(Pm4Factory* pm4_factory, const aqlprofile_pmc_event_t& event) {
   auto visible_id = event.event_id;
   if (event.flags.sq_flags.accum == AQLPROFILE_ACCUMULATION_LO_RES)
@@ -277,14 +294,23 @@ hsa_status_t _internal_aqlprofile_pmc_create_packets(
   pm4_builder::CmdBuilder* cmd_writer = pm4_factory->GetCmdBuilder();
   uint8_t* cmdbuf = reinterpret_cast<uint8_t*>(memorymgr->GetCmdBuf());
 
+  const uint64_t profile_key = PmcProfileKey(profile);
+  auto metadata = [&](amd_aql_pm4_ib_stage_t stage, const pm4_builder::CmdBuffer& cmd) {
+    return aql_profile::Pm4PacketMetadata{stage, profile_key, profile.event_count,
+                                          aql_profile::Pm4CommandChecksum(cmd.Data(), cmd.Size())};
+  };
+
   memcpy_cb(cmdbuf, read_cmd.Data(), read_cmd.Size(), userdata);
-  aql_profile::PopulateAql(cmdbuf, read_cmd.Size(), cmd_writer, &packets->read_packet);
+  aql_profile::PopulateAql(cmdbuf, read_cmd.Size(), cmd_writer, &packets->read_packet,
+                           metadata(AMD_AQL_PM4_IB_STAGE_READ, read_cmd));
   cmdbuf += read_size;
   memcpy_cb(cmdbuf, start_cmd.Data(), start_cmd.Size(), userdata);
-  aql_profile::PopulateAql(cmdbuf, start_cmd.Size(), cmd_writer, &packets->start_packet);
+  aql_profile::PopulateAql(cmdbuf, start_cmd.Size(), cmd_writer, &packets->start_packet,
+                           metadata(AMD_AQL_PM4_IB_STAGE_START, start_cmd));
   cmdbuf += start_size;
   memcpy_cb(cmdbuf, stop_cmd.Data(), stop_cmd.Size(), userdata);
-  aql_profile::PopulateAql(cmdbuf, stop_cmd.Size(), cmd_writer, &packets->stop_packet);
+  aql_profile::PopulateAql(cmdbuf, stop_cmd.Size(), cmd_writer, &packets->stop_packet,
+                           metadata(AMD_AQL_PM4_IB_STAGE_STOP, stop_cmd));
 
   return HSA_STATUS_SUCCESS;
 }

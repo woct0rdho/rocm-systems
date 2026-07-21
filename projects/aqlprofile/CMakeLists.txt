@@ -61,8 +61,12 @@ if ( NOT WIN32 AND "${CMAKE_BUILD_TYPE}" STREQUAL release )
   add_custom_command ( TARGET ${AQLPROFILE_TARGET} POST_BUILD COMMAND ${CMAKE_STRIP} *aqlprofile*.so )
 endif ()
 
-# Enable/disable test
+# Enable/disable tests
 option(AQLPROFILE_BUILD_TESTS "Build tests for AQLProfile" OFF)
+option(AQLPROFILE_INSTALL_TESTS "Install tests for AQLProfile" OFF)
+option(AQLPROFILE_BUILD_WINDOWS_PROBE "Build the Windows DLL and HSA extension loader probe" OFF)
+set(AQLPROFILE_WINDOWS_HSA_RUNTIME "" CACHE FILEPATH
+    "Absolute path to the Windows HIP/HSA runtime used by the Windows probes")
 
 ## Build tests
 if(AQLPROFILE_BUILD_TESTS)
@@ -101,6 +105,17 @@ if(NOT WIN32)
 endif()
 endif()
 
+if(WIN32 AND AQLPROFILE_BUILD_WINDOWS_PROBE)
+  enable_testing()
+  include(CTest)
+  if(NOT IS_ABSOLUTE "${AQLPROFILE_WINDOWS_HSA_RUNTIME}" OR
+     NOT EXISTS "${AQLPROFILE_WINDOWS_HSA_RUNTIME}")
+    message(FATAL_ERROR
+      "AQLPROFILE_WINDOWS_HSA_RUNTIME must name an existing absolute amdhip64_7.dll path")
+  endif()
+  add_subdirectory(${TEST_DIR}/windows)
+endif()
+
 if(AQLPROFILE_INSTALL_TESTS)
     # Install Integration Tests
     install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/test/integration/
@@ -110,10 +125,24 @@ endif()
 
 ## Add the install directives for the runtime library.
 set ( DEST_NAME ${AQLPROFILE_NAME} )
-install ( TARGETS ${AQLPROFILE_TARGET} LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT runtime )
-install ( TARGETS ${AQLPROFILE_TARGET} LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT asan )
+if ( ENABLE_ASAN_PACKAGING )
+  set ( AQLPROFILE_RUNTIME_COMPONENT asan )
+else ()
+  set ( AQLPROFILE_RUNTIME_COMPONENT runtime )
+endif ()
+install ( TARGETS ${AQLPROFILE_TARGET}
+          RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT ${AQLPROFILE_RUNTIME_COMPONENT}
+          LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT ${AQLPROFILE_RUNTIME_COMPONENT}
+          ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT development )
 
-## Add the packaging directives for the runtime library.
+if ( WIN32 )
+  install ( FILES ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.md
+            DESTINATION ${CMAKE_INSTALL_DOCDIR}
+            COMPONENT ${AQLPROFILE_RUNTIME_COMPONENT} )
+endif ()
+
+## Add the Linux packaging directives for the runtime library.
+if ( NOT WIN32 )
 if ( ENABLE_ASAN_PACKAGING )
   set (CPACK_PACKAGE_NAME ${AQLPROFILE_NAME}-asan)
   # ASAN Package requires only asan component with libraries and license file
@@ -256,3 +285,4 @@ cpack_add_component(
     DESCRIPTION "Tests for the AQLProfile"
     DEPENDS runtime)
 endif()
+endif ()

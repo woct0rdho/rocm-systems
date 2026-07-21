@@ -350,8 +350,10 @@ private:
                 }
                 sa_cu_mask_.at(se).at(sa) = cu_bm;
 
-                const uint32_t max_cu_bit = 31u - __builtin_clz(cu_bm);
-                const uint32_t max_wgp    = max_cu_bit / 2u;
+                uint32_t max_cu_bit = 0;
+                for(auto remaining = cu_bm; remaining > 1u; remaining >>= 1u)
+                    ++max_cu_bit;
+                const uint32_t max_wgp = max_cu_bit / 2u;
                 if(max_wgp > max_wgp_index) max_wgp_index = max_wgp;
             }
         }

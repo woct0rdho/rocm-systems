@@ -431,8 +431,17 @@ public:
 
     static uint32_t sq_control2_enable_value()
     {
+        // Restricting SQ counting to VMIDs 8-15 keeps graphics work submitted in lower VMIDs
+        // out of the counters on systems where that was observed, because KFD/HSA allocates
+        // the user queues there. WDDM assigns VMIDs from its own pool, so the same restriction
+        // would exclude the profiled queues and every SQ counter would read back as zero.
+#if defined(_WIN32)
+        constexpr uint32_t vmid_enable = 0xFFFF;
+#else
+        constexpr uint32_t vmid_enable = 0xFF00;
+#endif
         uint32_t sq_cntr_ctrl = SET_REG_FIELD_BITS(SQ_PERFCOUNTER_CTRL2, FORCE_EN, true) |
-                                SET_REG_FIELD_BITS(SQ_PERFCOUNTER_CTRL2, VMID_EN, 0xFF00);
+                                SET_REG_FIELD_BITS(SQ_PERFCOUNTER_CTRL2, VMID_EN, vmid_enable);
         return sq_cntr_ctrl;
     }
 

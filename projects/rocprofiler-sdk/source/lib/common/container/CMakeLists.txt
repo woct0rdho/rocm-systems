@@ -12,8 +12,12 @@ set(containers_headers
     small_vector.hpp
     stable_vector.hpp
     static_vector.hpp)
-set(containers_sources ring_buffer.cpp record_header_buffer.cpp ring_buffer.cpp
-                       small_vector.cpp)
+if(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+    set(containers_sources ring_buffer.cpp record_header_buffer.cpp small_vector.cpp)
+else()
+    set(containers_sources ring_buffer.cpp record_header_buffer.cpp ring_buffer.cpp
+                           small_vector.cpp)
+endif()
 
 target_sources(rocprofiler-sdk-common-library PRIVATE ${containers_sources}
                                                       ${containers_headers})

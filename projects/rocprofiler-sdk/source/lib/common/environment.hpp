@@ -24,11 +24,11 @@
 
 #include "lib/common/logging.hpp"
 
-#include <unistd.h>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <vector>
 
 namespace rocprofiler
 {
@@ -40,6 +40,10 @@ struct sfinae
 {};
 
 std::optional<std::string> get_env_direct(std::string_view);
+
+int set_env_direct(std::string_view, std::string_view, int override);
+
+int unset_env_direct(std::string_view);
 
 std::string get_env(std::string_view, std::string_view);
 
@@ -139,8 +143,8 @@ struct env_config
                       << "\", " << overwrite << ")\n";
         }
         auto _ow = (overwrite < 0) ? 1 : overwrite;
-        return (env_value.empty() && _ow > 0) ? unsetenv(env_name.c_str())
-                                              : setenv(env_name.c_str(), env_value.c_str(), _ow);
+        return (env_value.empty() && _ow > 0) ? impl::unset_env_direct(env_name)
+                                              : impl::set_env_direct(env_name, env_value, _ow);
     }
 };
 

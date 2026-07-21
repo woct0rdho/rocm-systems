@@ -25,7 +25,11 @@
 #include "lib/common/defines.hpp"
 #include "lib/common/logging.hpp"
 
-#include <unistd.h>
+#if defined(_WIN32)
+#    include <Windows.h>
+#else
+#    include <unistd.h>
+#endif
 #include <cerrno>
 #include <cstring>
 #include <ctime>
@@ -40,6 +44,7 @@ namespace common
 {
 namespace
 {
+#if !defined(_WIN32)
 std::string_view
 get_clock_name(clockid_t _id)
 {
@@ -63,6 +68,7 @@ get_clock_name(clockid_t _id)
     return "CLOCK_UNKNOWN";
 #undef CLOCK_NAME_CASE_STATEMENT
 }
+#endif
 
 auto _process_init_ns = timestamp_ns();
 }  // namespace
@@ -70,6 +76,10 @@ auto _process_init_ns = timestamp_ns();
 uint64_t
 get_clock_period_ns_impl(clockid_t _clk_id)
 {
+#if defined(_WIN32)
+    (void) _clk_id;
+    return 1;
+#else
     constexpr auto nanosec = std::nano::den;
 
     struct timespec ts;
@@ -89,6 +99,7 @@ get_clock_period_ns_impl(clockid_t _clk_id)
     }
 
     return (static_cast<uint64_t>(ts.tv_sec) * nanosec) + static_cast<uint64_t>(ts.tv_nsec);
+#endif
 }
 
 uint64_t
@@ -102,6 +113,12 @@ std::vector<std::string>
 read_command_line(pid_t _pid)
 {
     auto _cmdline = std::vector<std::string>{};
+#if defined(_WIN32)
+    if(_pid == getpid())
+    {
+        if(const auto* cmd = ::GetCommandLineA(); cmd && *cmd != '\0') _cmdline.emplace_back(cmd);
+    }
+#else
     auto fcmdline = std::stringstream{};
     fcmdline << "/proc/" << _pid << "/cmdline";
     auto ifs = std::ifstream{fcmdline.str().c_str()};
@@ -127,6 +144,7 @@ read_command_line(pid_t _pid)
         }
         ifs.close();
     }
+#endif
 
     return _cmdline;
 }

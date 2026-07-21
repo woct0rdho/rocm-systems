@@ -25,7 +25,6 @@
 #include "lib/common/logging.hpp"
 #include "lib/common/mpl.hpp"
 
-#include <unistd.h>
 #include <array>
 #include <cstdint>
 #include <cstring>

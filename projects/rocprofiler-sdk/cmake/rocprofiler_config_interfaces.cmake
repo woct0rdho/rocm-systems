@@ -21,8 +21,13 @@ target_compile_definitions(
     rocprofiler-sdk-headers INTERFACE $<BUILD_INTERFACE:AMD_INTERNAL_BUILD=1>
                                       $<BUILD_INTERFACE:__HIP_PLATFORM_AMD__=1>)
 
-# ensure the env overrides the appending /opt/rocm later
-string(REPLACE ":" ";" CMAKE_PREFIX_PATH "$ENV{CMAKE_PREFIX_PATH};${CMAKE_PREFIX_PATH}")
+# Ensure the environment overrides the default ROCm search path. Do not split Windows
+# drive-letter paths on ':'.
+if(WIN32)
+    set(CMAKE_PREFIX_PATH "$ENV{CMAKE_PREFIX_PATH};${CMAKE_PREFIX_PATH}")
+else()
+    string(REPLACE ":" ";" CMAKE_PREFIX_PATH "$ENV{CMAKE_PREFIX_PATH};${CMAKE_PREFIX_PATH}")
+endif()
 
 list(APPEND CMAKE_PREFIX_PATH "$ENV{HOME}/.local")
 
@@ -48,22 +53,24 @@ endif()
 #
 # ----------------------------------------------------------------------------------------#
 
-set(CMAKE_THREAD_PREFER_PTHREAD ON)
-set(THREADS_PREFER_PTHREAD_FLAG OFF)
-
-find_library(pthread_LIBRARY NAMES pthread pthreads)
-find_package_handle_standard_args(pthread-library REQUIRED_VARS pthread_LIBRARY)
-
-find_library(pthread_LIBRARY NAMES pthread pthreads)
-find_package_handle_standard_args(pthread-library REQUIRED_VARS pthread_LIBRARY)
-
-if(pthread_LIBRARY)
-    target_link_libraries(rocprofiler-sdk-threading INTERFACE ${pthread_LIBRARY})
+if(WIN32)
+    find_package(Threads REQUIRED)
+    target_link_libraries(rocprofiler-sdk-threading INTERFACE Threads::Threads)
 else()
-    find_package(Threads ${rocprofiler_FIND_QUIETLY} ${rocprofiler_FIND_REQUIREMENT})
+    set(CMAKE_THREAD_PREFER_PTHREAD ON)
+    set(THREADS_PREFER_PTHREAD_FLAG OFF)
 
-    if(Threads_FOUND)
-        target_link_libraries(rocprofiler-sdk-threading INTERFACE Threads::Threads)
+    find_library(pthread_LIBRARY NAMES pthread pthreads)
+    find_package_handle_standard_args(pthread-library REQUIRED_VARS pthread_LIBRARY)
+
+    if(pthread_LIBRARY)
+        target_link_libraries(rocprofiler-sdk-threading INTERFACE ${pthread_LIBRARY})
+    else()
+        find_package(Threads ${rocprofiler_FIND_QUIETLY} ${rocprofiler_FIND_REQUIREMENT})
+
+        if(Threads_FOUND)
+            target_link_libraries(rocprofiler-sdk-threading INTERFACE Threads::Threads)
+        endif()
     endif()
 endif()
 
@@ -73,14 +80,16 @@ endif()
 #
 # ----------------------------------------------------------------------------------------#
 
-foreach(_LIB dl rt)
-    find_library(${_LIB}_LIBRARY NAMES ${_LIB})
-    find_package_handle_standard_args(${_LIB}-library REQUIRED_VARS ${_LIB}_LIBRARY)
+if(NOT WIN32)
+    foreach(_LIB dl rt)
+        find_library(${_LIB}_LIBRARY NAMES ${_LIB})
+        find_package_handle_standard_args(${_LIB}-library REQUIRED_VARS ${_LIB}_LIBRARY)
 
-    if(${_LIB}_LIBRARY)
-        target_link_libraries(rocprofiler-sdk-threading INTERFACE ${${_LIB}_LIBRARY})
-    endif()
-endforeach()
+        if(${_LIB}_LIBRARY)
+            target_link_libraries(rocprofiler-sdk-threading INTERFACE ${${_LIB}_LIBRARY})
+        endif()
+    endforeach()
+endif()
 
 # ----------------------------------------------------------------------------------------#
 #
@@ -148,17 +157,42 @@ find_package(rocprof-trace-decoder 0.2.1 CONFIG)
 #
 # ----------------------------------------------------------------------------------------#
 
-find_package(
-    hsa-runtime64
-    1.14
-    REQUIRED
-    CONFIG
-    HINTS
-    ${rocm_version_DIR}
-    ${ROCM_PATH}
-    PATHS
-    ${rocm_version_DIR}
-    ${ROCM_PATH})
+if(WIN32 AND ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+    if(NOT IS_DIRECTORY "${ROCPROFILER_WINDOWS_HSA_INCLUDE_DIR}")
+        message(
+            FATAL_ERROR
+                "ROCPROFILER_WINDOWS_HSA_INCLUDE_DIR is not a directory: ${ROCPROFILER_WINDOWS_HSA_INCLUDE_DIR}"
+            )
+    endif()
+    if(NOT EXISTS "${ROCPROFILER_WINDOWS_HSA_LIBRARY}")
+        message(
+            FATAL_ERROR
+                "ROCPROFILER_WINDOWS_HSA_LIBRARY does not exist: ${ROCPROFILER_WINDOWS_HSA_LIBRARY}"
+            )
+    endif()
+
+    add_library(rocprofiler-sdk-windows-hsa-runtime INTERFACE)
+    add_library(hsa-runtime64::hsa-runtime64 ALIAS
+                rocprofiler-sdk-windows-hsa-runtime)
+    target_include_directories(
+        rocprofiler-sdk-windows-hsa-runtime
+        INTERFACE "${ROCPROFILER_WINDOWS_HSA_INCLUDE_DIR}")
+    target_link_libraries(rocprofiler-sdk-windows-hsa-runtime
+                          INTERFACE "${ROCPROFILER_WINDOWS_HSA_LIBRARY}")
+    set(hsa-runtime64_VERSION "${ROCPROFILER_WINDOWS_HSA_VERSION}")
+else()
+    find_package(
+        hsa-runtime64
+        1.14
+        REQUIRED
+        CONFIG
+        HINTS
+        ${rocm_version_DIR}
+        ${ROCM_PATH}
+        PATHS
+        ${rocm_version_DIR}
+        ${ROCM_PATH})
+endif()
 
 string(REPLACE "." ";" HSA_RUNTIME_VERSION "${hsa-runtime64_VERSION}")
 
@@ -207,12 +241,14 @@ target_link_libraries(rocprofiler-sdk-ptl INTERFACE PTL::ptl-static)
 #
 # ----------------------------------------------------------------------------------------#
 
-find_package(LibElf QUIET)
-if(LibElf_FOUND)
-    target_link_libraries(rocprofiler-sdk-elf INTERFACE elf::elf)
-else()
-    find_package(libelf REQUIRED)
-    target_link_libraries(rocprofiler-sdk-elf INTERFACE libelf::libelf)
+if(NOT WIN32)
+    find_package(LibElf QUIET)
+    if(LibElf_FOUND)
+        target_link_libraries(rocprofiler-sdk-elf INTERFACE elf::elf)
+    else()
+        find_package(libelf REQUIRED)
+        target_link_libraries(rocprofiler-sdk-elf INTERFACE libelf::libelf)
+    endif()
 endif()
 
 # ----------------------------------------------------------------------------------------#
@@ -221,8 +257,10 @@ endif()
 #
 # ----------------------------------------------------------------------------------------#
 
-find_package(libdw REQUIRED)
-target_link_libraries(rocprofiler-sdk-dw INTERFACE libdw::libdw)
+if(NOT WIN32)
+    find_package(libdw REQUIRED)
+    target_link_libraries(rocprofiler-sdk-dw INTERFACE libdw::libdw)
+endif()
 
 # ----------------------------------------------------------------------------------------#
 #
@@ -249,21 +287,23 @@ endif()
 #
 # ----------------------------------------------------------------------------------------#
 
-find_package(
-    hsakmt
-    REQUIRED
-    CONFIG
-    HINTS
-    ${rocm_version_DIR}
-    ${ROCM_PATH}
-    PATHS
-    ${rocm_version_DIR}
-    ${ROCM_PATH}
-    PATH_SUFFIXES
-    lib/cmake/hsakmt)
+if(NOT WIN32)
+    find_package(
+        hsakmt
+        REQUIRED
+        CONFIG
+        HINTS
+        ${rocm_version_DIR}
+        ${ROCM_PATH}
+        PATHS
+        ${rocm_version_DIR}
+        ${ROCM_PATH}
+        PATH_SUFFIXES
+        lib/cmake/hsakmt)
 
-target_link_libraries(rocprofiler-sdk-hsakmt INTERFACE hsakmt::hsakmt)
-rocprofiler_config_nolink_target(rocprofiler-sdk-hsakmt-nolink hsakmt::hsakmt)
+    target_link_libraries(rocprofiler-sdk-hsakmt INTERFACE hsakmt::hsakmt)
+    rocprofiler_config_nolink_target(rocprofiler-sdk-hsakmt-nolink hsakmt::hsakmt)
+endif()
 
 # ----------------------------------------------------------------------------------------#
 #
@@ -271,6 +311,7 @@ rocprofiler_config_nolink_target(rocprofiler-sdk-hsakmt-nolink hsakmt::hsakmt)
 #
 # ----------------------------------------------------------------------------------------#
 
+if(NOT WIN32)
 find_package(PkgConfig)
 
 if(PkgConfig_FOUND)
@@ -315,6 +356,7 @@ else()
     target_link_libraries(rocprofiler-sdk-drm INTERFACE ${drm_LIBRARY}
                                                         ${drm_amdgpu_LIBRARY})
 endif()
+endif()
 
 # ----------------------------------------------------------------------------------------#
 #
@@ -324,7 +366,9 @@ endif()
 
 # get_target_property(ELFIO_INCLUDE_DIR elfio::elfio INTERFACE_INCLUDE_DIRECTORIES)
 # target_include_directories(rocprofiler-sdk-elfio SYSTEM INTERFACE ${ELFIO_INCLUDE_DIR})
-target_link_libraries(rocprofiler-sdk-elfio INTERFACE elfio::elfio)
+if(NOT WIN32)
+    target_link_libraries(rocprofiler-sdk-elfio INTERFACE elfio::elfio)
+endif()
 
 # ----------------------------------------------------------------------------------------#
 #
@@ -332,7 +376,9 @@ target_link_libraries(rocprofiler-sdk-elfio INTERFACE elfio::elfio)
 #
 # ----------------------------------------------------------------------------------------#
 
-target_link_libraries(rocprofiler-sdk-otf2 INTERFACE otf2::otf2)
+if(NOT WIN32)
+    target_link_libraries(rocprofiler-sdk-otf2 INTERFACE otf2::otf2)
+endif()
 
 # ----------------------------------------------------------------------------------------#
 #

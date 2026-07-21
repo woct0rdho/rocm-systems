@@ -25,9 +25,13 @@
 #include "lib/common/defines.hpp"
 #include "lib/common/logging.hpp"
 
-#include <sys/syscall.h>
-#include <sys/utsname.h>
-#include <unistd.h>
+#if defined(_WIN32)
+#    include <Windows.h>
+#else
+#    include <sys/syscall.h>
+#    include <sys/utsname.h>
+#    include <unistd.h>
+#endif
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -57,16 +61,41 @@ uint64_t
 get_clock_period_ns_impl(clockid_t _clk_id);
 
 inline uint64_t
+get_pid()
+{
+#if defined(_WIN32)
+    return static_cast<uint64_t>(::GetCurrentProcessId());
+#else
+    return static_cast<uint64_t>(::getpid());
+#endif
+}
+
+inline uint64_t
 get_tid()
 {
+#if defined(_WIN32)
+    return static_cast<uint64_t>(::GetCurrentThreadId());
+#else
     // system calls are expensive so store this in a thread-local
     static thread_local uint64_t _v = ::syscall(__NR_gettid);
     return _v;
+#endif
 }
 
 inline uint64_t
 get_ticks(clockid_t clk_id_v) noexcept
 {
+#if defined(_WIN32)
+    (void) clk_id_v;
+    auto counter   = LARGE_INTEGER{};
+    auto frequency = LARGE_INTEGER{};
+    ::QueryPerformanceCounter(&counter);
+    ::QueryPerformanceFrequency(&frequency);
+    constexpr auto nanosec = std::nano::den;
+    const auto     ticks   = static_cast<uint64_t>(counter.QuadPart);
+    const auto     freq    = static_cast<uint64_t>(frequency.QuadPart);
+    return ((ticks / freq) * nanosec) + (((ticks % freq) * nanosec) / freq);
+#else
     constexpr auto nanosec = std::nano::den;
     auto&&         ts      = timespec{};
     auto           ret     = clock_gettime(clk_id_v, &ts);
@@ -78,9 +107,14 @@ get_ticks(clockid_t clk_id_v) noexcept
     }
 
     return (static_cast<uint64_t>(ts.tv_sec) * nanosec) + static_cast<uint64_t>(ts.tv_nsec);
+#endif
 }
 
+#if defined(_WIN32)
+static constexpr int default_clock_id = 0;
+#else
 static constexpr int default_clock_id = CLOCK_BOOTTIME;
+#endif
 
 // CLOCK_MONOTONIC_RAW equates to HSA-runtime library implementation of os::ReadAccurateClock()
 // CLOCK_BOOTTIME equates to HSA-runtime library implementation of os::ReadSystemClock()

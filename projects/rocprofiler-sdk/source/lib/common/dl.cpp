@@ -20,7 +20,9 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#define _GNU_SOURCE 1
+#if !defined(_WIN32)
+#    define _GNU_SOURCE 1
+#endif
 
 #include "lib/common/dl.hpp"
 #include "lib/common/environment.hpp"
@@ -32,11 +34,15 @@
 
 #include <fmt/format.h>
 
-#include <dlfcn.h>
-#include <elf.h>
-#include <link.h>
-#include <sys/types.h>
-#include <unistd.h>
+#if defined(_WIN32)
+#    include <Windows.h>
+#else
+#    include <dlfcn.h>
+#    include <elf.h>
+#    include <link.h>
+#    include <sys/types.h>
+#    include <unistd.h>
+#endif
 
 #include <fstream>
 #include <optional>
@@ -55,11 +61,50 @@ namespace
 namespace fs = ::rocprofiler::common::filesystem;
 
 const auto default_link_open_modes = open_modes_vec_t{(RTLD_LAZY | RTLD_NOLOAD)};
+
+#if defined(_WIN32)
+std::string
+path_to_utf8(const fs::path& path)
+{
+    const auto value = path.u8string();
+    return {reinterpret_cast<const char*>(value.data()), value.size()};
+}
+
+std::optional<std::string>
+get_module_path(HMODULE module, bool canonicalize = false)
+{
+    if(module == nullptr) return std::nullopt;
+
+    auto path = std::vector<wchar_t>(MAX_PATH);
+    while(true)
+    {
+        const auto size = ::GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size()));
+        if(size == 0) return std::nullopt;
+        if(size < path.size() - 1)
+        {
+            auto fs_path = fs::path{std::wstring_view{path.data(), size}};
+            auto ec      = std::error_code{};
+            auto result  = (canonicalize) ? fs::canonical(fs_path, ec) : fs::absolute(fs_path, ec);
+            if(ec) return std::nullopt;
+            return path_to_utf8(result);
+        }
+        path.resize(path.size() * 2);
+    }
+}
+#endif
 }  // namespace
 
 std::optional<std::string>
 get_linked_path(std::string_view _name, open_modes_vec_t&& _open_modes)
 {
+#if defined(_WIN32)
+    (void) _open_modes;
+    if(_name.empty()) return path_to_utf8(fs::current_path());
+
+    const auto name   = std::string{_name};
+    const auto module = ::GetModuleHandleA(name.c_str());
+    return get_module_path(module);
+#else
     auto dl_iterate_callback = [](struct dl_phdr_info* info, size_t, void* data) -> int {
         auto* _data     = static_cast<std::vector<std::string>*>(data);
         auto  _existing = std::unordered_set<std::string>{};
@@ -126,6 +171,7 @@ get_linked_path(std::string_view _name, open_modes_vec_t&& _open_modes)
     }
 
     return std::nullopt;
+#endif
 }
 
 std::optional<std::string>
@@ -134,6 +180,27 @@ get_symbol_path(const std::vector<std::string>& _lib_names,
                 const void*                     _addr,
                 bool                            _canonicalize)
 {
+#if defined(_WIN32)
+    if(_addr != nullptr)
+    {
+        auto module = HMODULE{};
+        if(::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(_addr),
+                               &module) != 0)
+            return get_module_path(module, _canonicalize);
+    }
+
+    const auto symbol_name = std::string{_sym_name};
+    for(const auto& lib_name : _lib_names)
+    {
+        const auto module = ::GetModuleHandleA(lib_name.c_str());
+        if(module != nullptr && ::GetProcAddress(module, symbol_name.c_str()) != nullptr)
+            return get_module_path(module, _canonicalize);
+    }
+
+    return std::nullopt;
+#else
     if(auto dl_info = Dl_info{}; _addr && dladdr(_addr, &dl_info) != 0 && dl_info.dli_fname)
     {
         ROCP_CI_LOG_IF(WARNING,
@@ -192,6 +259,7 @@ get_symbol_path(const std::vector<std::string>& _lib_names,
     }
 
     return std::nullopt;
+#endif
 }
 }  // namespace dl
 }  // namespace common

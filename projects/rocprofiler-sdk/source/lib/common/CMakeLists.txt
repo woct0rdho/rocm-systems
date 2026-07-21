@@ -6,7 +6,6 @@ rocprofiler_activate_clang_tidy()
 set(common_sources
     demangle.cpp
     dl.cpp
-    elf_utils.cpp
     environment.cpp
     logging.cpp
     md5sum.cpp
@@ -18,6 +17,9 @@ set(common_sources
     string_entry.cpp
     utility.cpp
     uuid_v7.cpp)
+if(NOT ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+    list(APPEND common_sources elf_utils.cpp)
+endif()
 set(common_headers
     abi.hpp
     defines.hpp

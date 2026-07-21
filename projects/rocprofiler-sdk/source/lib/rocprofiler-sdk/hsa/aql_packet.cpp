@@ -23,10 +23,12 @@
 #include "lib/rocprofiler-sdk/hsa/aql_packet.hpp"
 #include "lib/common/logging.hpp"
 #include "lib/rocprofiler-sdk/hsa/agent_cache.hpp"
-#include "lib/rocprofiler-sdk/kfd/resource.hpp"
-#include "lib/rocprofiler-sdk/spm/decode.hpp"
-#include "lib/rocprofiler-sdk/spm/interface.hpp"
-#include "lib/rocprofiler-sdk/thread_trace/dl.hpp"
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+#    include "lib/rocprofiler-sdk/kfd/resource.hpp"
+#    include "lib/rocprofiler-sdk/spm/decode.hpp"
+#    include "lib/rocprofiler-sdk/spm/interface.hpp"
+#    include "lib/rocprofiler-sdk/thread_trace/dl.hpp"
+#endif
 
 #include <fmt/format.h>
 #include <cstddef>
@@ -149,6 +151,7 @@ CounterAQLPacket::CounterAQLPacket(aqlprofile_agent_handle_t                  ag
     empty                       = false;
 }
 
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
 hsa_status_t
 TraceMemoryPool::Alloc(void** ptr, size_t size, desc_t flags, void* data)
 {
@@ -540,5 +543,6 @@ SPMPacket::~SPMPacket()
         handle.handle = 0;
     }
 }
+#endif
 }  // namespace hsa
 }  // namespace rocprofiler

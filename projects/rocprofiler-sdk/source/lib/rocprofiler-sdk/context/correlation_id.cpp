@@ -26,7 +26,9 @@
 #include "lib/common/utility.hpp"
 #include "lib/rocprofiler-sdk/buffer.hpp"
 #include "lib/rocprofiler-sdk/context/context.hpp"
-#include "lib/rocprofiler-sdk/kfd/signal_less_gate.hpp"
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+#    include "lib/rocprofiler-sdk/kfd/signal_less_gate.hpp"
+#endif
 #include "lib/rocprofiler-sdk/registration.hpp"
 
 #include <rocprofiler-sdk/fwd.h>
@@ -248,7 +250,9 @@ correlation_id_finalize()
                 // emitted and the id is intentionally not retired here: its kernel may
                 // still be running, and force-retiring would release state the GPU can
                 // still reach.
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
                 if(kfd::signal_less_id_is_leaked(itr->internal)) continue;
+#endif
 
                 ++ndangling;
                 ROCP_WARNING << "retiring dangling correlation ID " << itr->internal

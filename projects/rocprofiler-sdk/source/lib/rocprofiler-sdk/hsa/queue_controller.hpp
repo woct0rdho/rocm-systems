@@ -24,7 +24,9 @@
 
 #include "lib/rocprofiler-sdk/hsa/profile_serializer.hpp"
 #include "lib/rocprofiler-sdk/hsa/queue.hpp"
-#include "lib/rocprofiler-sdk/kfd/doorbell_map.hpp"
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+#    include "lib/rocprofiler-sdk/kfd/doorbell_map.hpp"
+#endif
 
 #include "lib/rocprofiler-sdk-attach/table.h"
 
@@ -129,9 +131,25 @@ private:
     common::Synchronized<client_id_map_t> _callback_cache     = {};
     agent_cache_map_t                     _supported_agents   = {};
     std::atomic<bool>                     _serialized_enabled = {false};
-    common::Synchronized<
-        std::unordered_map<rocprofiler_agent_id_t,
-                           std::shared_ptr<common::Synchronized<hsa::profiler_serializer>>>>
+    struct agent_id_hash
+    {
+        size_t operator()(rocprofiler_agent_id_t value) const noexcept
+        {
+            return std::hash<uint64_t>{}(value.handle);
+        }
+    };
+    struct agent_id_equal
+    {
+        bool operator()(rocprofiler_agent_id_t lhs, rocprofiler_agent_id_t rhs) const noexcept
+        {
+            return lhs.handle == rhs.handle;
+        }
+    };
+    common::Synchronized<std::unordered_map<rocprofiler_agent_id_t,
+                                             std::shared_ptr<common::Synchronized<
+                                                 hsa::profiler_serializer>>,
+                                             agent_id_hash,
+                                             agent_id_equal>>
         _profiler_serializer;
 };
 

@@ -61,11 +61,42 @@ void PopulateAql(const uint32_t* ib_packet, packet_t* aql_packet) {
 #endif
 }
 
+uint32_t Pm4CommandChecksum(const void* commands, uint32_t command_size) {
+  assert(commands != nullptr);
+  assert((command_size % sizeof(uint32_t)) == 0);
+  const auto* dwords = static_cast<const uint32_t*>(commands);
+  uint32_t value = 2166136261u;
+  for (uint32_t i = 0; i < command_size / sizeof(uint32_t); ++i) {
+    value ^= dwords[i];
+    value *= 16777619u;
+  }
+  return value;
+}
+
 void PopulateAql(const void* cmd_buffer, uint32_t cmd_size, pm4_builder::CmdBuilder* cmd_writer,
-                 packet_t* aql_packet) {
+                 packet_t* aql_packet, Pm4PacketMetadata metadata) {
   pm4_builder::CmdBuffer ib_buffer;
   cmd_writer->BuildIndirectBufferCmd(&ib_buffer, cmd_buffer, (size_t)cmd_size);
   PopulateAql((const uint32_t*)ib_buffer.Data(), aql_packet);
+
+#if defined(_WIN32)
+  if (metadata.stage != AMD_AQL_PM4_IB_STAGE_NONE) {
+    assert(metadata.profile_key != 0);
+    assert(metadata.event_count > 0 && metadata.event_count <= 0xffffff);
+    auto* packet = reinterpret_cast<amd_aql_pm4_ib_packet_t*>(aql_packet);
+    packet->reserved[0] = AMD_AQL_PM4_IB_MANIFEST_MAGIC;
+    packet->reserved[1] = AMD_AQL_PM4_IB_MANIFEST_VERSION;
+    packet->reserved[2] = static_cast<uint32_t>(metadata.stage);
+    packet->reserved[3] = cmd_size / sizeof(uint32_t);
+    packet->reserved[4] = metadata.command_checksum;
+    packet->reserved[5] = static_cast<uint32_t>(metadata.profile_key);
+    packet->reserved[6] = static_cast<uint32_t>(metadata.profile_key >> 32);
+    packet->reserved[7] =
+        (metadata.event_count << 8) | AMD_AQL_PM4_IB_MANIFEST_REQUIRED_FLAGS;
+  }
+#else
+  (void)metadata;
+#endif
 }
 
 }  // namespace aql_profile

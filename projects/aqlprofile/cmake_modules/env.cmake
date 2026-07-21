@@ -17,6 +17,7 @@ endif ()
 # Designated initializers in aql_profile.cpp require C++20 on MSVC
 if ( MSVC )
   set(CMAKE_CXX_STANDARD 20)
+  add_compile_options("/utf-8")
   if(DEFINED ENV{CMAKE_BUILD_PARALLEL_LEVEL})
     add_compile_options("/MP$ENV{CMAKE_BUILD_PARALLEL_LEVEL}")
   endif()

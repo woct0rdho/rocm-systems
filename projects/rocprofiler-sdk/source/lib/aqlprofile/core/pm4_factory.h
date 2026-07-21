@@ -183,12 +183,10 @@ public:
     {
         const GpuBlockInfo* info = block_map_.Get(event->block_name);
         if(info == nullptr) throw std::runtime_error("Bad Block");
-        // Checking that the block index is in proper range
+        // Check both dimensions before any register selector or instance mask is built.
         if(event->block_index >= info->instance_count) throw std::runtime_error("Bad Index");
-            // Checking that the counter event index is in proper range
-#if 0
-    if (event->counter_id > info->event_id_max)
-      throw event_exception(std::string("Bad event ID, "), *event);
+#if defined(_WIN32)
+        if(event->event_id > info->event_id_max) throw std::runtime_error("Bad event ID");
 #endif
         return info;
     }
@@ -198,13 +196,12 @@ public:
     {
         const GpuBlockInfo* info = block_map_.Get(event->block_name);
         if(info == nullptr) throw event_exception(std::string("Bad block, "), *event);
-        // Checking that the block index is in proper range
+        // Check both dimensions before any register selector or instance mask is built.
         if(event->block_index >= info->instance_count)
             throw event_exception(std::string("Bad block index, "), *event);
-            // Checking that the counter event index is in proper range
-#if 0
-    if (event->counter_id > info->event_id_max)
-      throw event_exception(std::string("Bad event ID, "), *event);
+#if defined(_WIN32)
+        if(event->counter_id > info->event_id_max)
+            throw event_exception(std::string("Bad event ID, "), *event);
 #endif
         return info;
     }

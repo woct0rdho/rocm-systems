@@ -36,6 +36,10 @@ target_link_libraries(
             $<BUILD_INTERFACE:rocprofiler-sdk::rocprofiler-sdk-drm>
             $<BUILD_INTERFACE:rocprofiler-sdk::rocprofiler-sdk-hsa-runtime-nolink>)
 set_target_properties(rocprofiler-sdk-aqlprofile PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if(WIN32)
+    target_compile_definitions(rocprofiler-sdk-aqlprofile
+                               PRIVATE NOMINMAX __maybe_unused= __unused__=)
+endif()
 
 add_subdirectory(core)
 add_subdirectory(util)

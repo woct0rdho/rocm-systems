@@ -31,8 +31,6 @@
 #        define NOMINMAX
 #    endif
 #    include <windows.h>
-#    include <io.h>
-#    include <fcntl.h>
 #else
 #    include <dlfcn.h>
 #    include <fcntl.h>
@@ -53,6 +51,56 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifdef _WIN32
+namespace
+{
+bool
+Utf8PathToWide(const std::string& path, std::wstring* wide_path)
+{
+    const int size =
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.c_str(), -1, nullptr, 0);
+    if(size <= 0) return false;
+
+    wide_path->resize(static_cast<size_t>(size));
+    if(MultiByteToWideChar(CP_UTF8,
+                           MB_ERR_INVALID_CHARS,
+                           path.c_str(),
+                           -1,
+                           wide_path->data(),
+                           size) != size)
+    {
+        wide_path->clear();
+        return false;
+    }
+
+    wide_path->resize(static_cast<size_t>(size - 1));
+    return true;
+}
+
+class ScopedFileHandle
+{
+public:
+    explicit ScopedFileHandle(HANDLE handle)
+    : handle_(handle)
+    {}
+
+    ~ScopedFileHandle()
+    {
+        if(valid()) CloseHandle(handle_);
+    }
+
+    ScopedFileHandle(const ScopedFileHandle&)            = delete;
+    ScopedFileHandle& operator=(const ScopedFileHandle&) = delete;
+
+    bool valid() const { return handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE; }
+    HANDLE get() const { return handle_; }
+
+private:
+    HANDLE handle_;
+};
+}  // namespace
+#endif
 
 #define HSA_AMD_INTERFACE_VERSION                                                                  \
     ROCPROFILER_COMPUTE_VERSION(HSA_AMD_INTERFACE_VERSION_MAJOR, HSA_AMD_INTERFACE_VERSION_MINOR, 0)
@@ -589,6 +637,9 @@ uint8_t*
 HsaRsrcFactory::AllocateCmdMemory(const AgentInfo* agent_info, size_t size)
 {
     size         = (size + MEM_PAGE_MASK) & ~MEM_PAGE_MASK;
+#if defined(_WIN32)
+    uint8_t* ptr = AllocateSysMemory(agent_info, size);
+#else
     uint8_t* ptr = (agent_info->is_apu && CMD_MEMORY_MMAP)
                        ? reinterpret_cast<uint8_t*>(mmap(nullptr,
                                                          size,
@@ -597,6 +648,7 @@ HsaRsrcFactory::AllocateCmdMemory(const AgentInfo* agent_info, size_t size)
                                                          0,
                                                          0))
                        : AllocateSysMemory(agent_info, size);
+#endif
     return ptr;
 }
 
@@ -684,17 +736,38 @@ HsaRsrcFactory::LoadAndFinalize(const AgentInfo*         agent_info,
     std::string filename(brig_path);
     std::clog << "Code object filename: " << filename << std::endl;
 
-    // Open the file containing code object
+    // Open the file containing code object. On Windows, hsa_file_t is a native HANDLE.
 #ifdef _WIN32
-    hsa_file_t file_handle = _open(filename.c_str(), _O_RDONLY | _O_BINARY);
+    std::wstring wide_filename;
+    if(!Utf8PathToWide(filename, &wide_filename))
+    {
+        ROCP_CI_LOG(FATAL) << "Error: failed to convert code object path '" << filename
+                           << "' to UTF-16, Win32 error " << GetLastError();
+        return false;
+    }
+
+    ScopedFileHandle file_owner(CreateFileW(wide_filename.c_str(),
+                                            GENERIC_READ,
+                                            FILE_SHARE_READ,
+                                            nullptr,
+                                            OPEN_EXISTING,
+                                            FILE_ATTRIBUTE_NORMAL,
+                                            nullptr));
+    if(!file_owner.valid())
+    {
+        ROCP_CI_LOG(FATAL) << "Error: failed to load '" << filename << "', Win32 error "
+                           << GetLastError();
+        return false;
+    }
+    hsa_file_t file_handle = file_owner.get();
 #else
     hsa_file_t file_handle = open(filename.c_str(), O_RDONLY);
-#endif
     if(file_handle == -1)
     {
         ROCP_CI_LOG(FATAL) << "Error: failed to load '" << filename << "'";
         return false;
     }
+#endif
 
     // Create code object reader
     hsa_code_object_reader_t code_obj_rdr = {0};
@@ -703,6 +776,9 @@ HsaRsrcFactory::LoadAndFinalize(const AgentInfo*         agent_info,
     if(status != HSA_STATUS_SUCCESS)
     {
         ROCP_CI_LOG(FATAL) << "Failed to create code object reader '" << filename << "'";
+#ifndef _WIN32
+        close(file_handle);
+#endif
         return false;
     }
 
@@ -726,15 +802,16 @@ HsaRsrcFactory::LoadAndFinalize(const AgentInfo*         agent_info,
         *executable, nullptr, kernel_name, agent_info->dev_id, 0, &kernelSymbol);
     CHECK_STATUS("Error in looking up kernel symbol", status);
 
-#ifdef _WIN32
-    _close(file_handle);
-#else
-    close(file_handle);
-#endif
-
     status =
         rocprofiler::aqlprofile::get_core_table()->hsa_code_object_reader_destroy_fn(code_obj_rdr);
     CHECK_STATUS("Error in destroying code object reader", status);
+
+#ifndef _WIN32
+    close(file_handle);
+#endif
+
+    // The Windows HANDLE remains valid until after the reader is destroyed and is
+    // released by file_owner when this function returns.
 
     // Update output parameter
     *code_desc = kernelSymbol;

@@ -124,13 +124,15 @@ add_subdirectory(external)
 add_subdirectory(source)
 
 include(rocprofiler_config_install)
-include(rocprofiler_config_install_roctx)
-include(rocprofiler_config_install_rocpd)
-# rocattach is only supported on x86_64 for now
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
-    include(rocprofiler_config_install_rocattach)
+if(NOT ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+    include(rocprofiler_config_install_roctx)
+    include(rocprofiler_config_install_rocpd)
+    # rocattach is only supported on x86_64 for now
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
+        include(rocprofiler_config_install_rocattach)
+    endif()
+    include(rocprofiler_config_install_tests)
 endif()
-include(rocprofiler_config_install_tests)
 
 # ROCPROFILER_BUILD_INTEGRATION_TESTS is not a standard option. If not defined, set it as
 # a local (non-cached) variable equal to ROCPROFILER_BUILD_TESTS. If one only wants to
@@ -143,6 +145,10 @@ if(ROCPROFILER_BUILD_TESTS AND ROCPROFILER_BUILD_INTEGRATION_TESTS)
     add_subdirectory(tests)
 endif()
 
+if(WIN32 AND ROCPROFILER_BUILD_WINDOWS_TESTS)
+    add_subdirectory(tests/windows)
+endif()
+
 if(ROCPROFILER_BUILD_SAMPLES)
     add_subdirectory(samples)
 endif()
@@ -151,6 +157,8 @@ if(ROCPROFILER_BUILD_BENCHMARK)
     add_subdirectory(benchmark)
 endif()
 
-include(rocprofiler_config_packaging)
+if(NOT ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+    include(rocprofiler_config_packaging)
+endif()
 
 rocprofiler_print_features()

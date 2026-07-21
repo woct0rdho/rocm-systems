@@ -32,6 +32,7 @@ if(CMAKE_DL_LIBS AND NOT "${CMAKE_DL_LIBS}" STREQUAL "dl")
         CACHE FILEPATH "dynamic linking system library")
 endif()
 
+if(NOT WIN32)
 foreach(_TYPE dl rt)
     if(NOT ${_TYPE}_LIBRARY)
         find_library(${_TYPE}_LIBRARY NAMES ${_TYPE})
@@ -57,6 +58,7 @@ foreach(_TYPE dl rt)
         endif()
     endif()
 endforeach()
+endif()
 
 target_link_libraries(rocprofiler-sdk-build-flags
                       INTERFACE rocprofiler-sdk::rocprofiler-sdk-dl)
@@ -64,8 +66,13 @@ target_link_libraries(rocprofiler-sdk-build-flags
 # ----------------------------------------------------------------------------------------#
 # set the compiler flags
 #
-rocprofiler_target_compile_options(rocprofiler-sdk-build-flags
-                                   INTERFACE "-W" "-Wall" "-Wno-unknown-pragmas")
+if(MSVC)
+    target_compile_options(rocprofiler-sdk-build-flags INTERFACE "/W3")
+    target_compile_definitions(rocprofiler-sdk-build-flags INTERFACE NOMINMAX)
+else()
+    rocprofiler_target_compile_options(rocprofiler-sdk-build-flags
+                                       INTERFACE "-W" "-Wall" "-Wno-unknown-pragmas")
+endif()
 
 # compiler version specific flags
 function(set_compiler_options compiler_id version)

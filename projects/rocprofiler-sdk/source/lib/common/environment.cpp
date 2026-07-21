@@ -26,7 +26,12 @@
 
 #include <fmt/format.h>
 
-#include <sys/auxv.h>
+#if defined(_WIN32)
+#    include <Windows.h>
+#else
+#    include <sys/auxv.h>
+#    include <unistd.h>
+#endif
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
@@ -42,6 +47,61 @@ namespace common
 {
 namespace impl
 {
+#if defined(_WIN32)
+namespace
+{
+std::optional<std::wstring>
+to_wide(std::string_view value)
+{
+    if(value.empty()) return std::wstring{};
+    const auto size = ::MultiByteToWideChar(CP_UTF8,
+                                             MB_ERR_INVALID_CHARS,
+                                             value.data(),
+                                             static_cast<int>(value.size()),
+                                             nullptr,
+                                             0);
+    if(size <= 0) return std::nullopt;
+
+    auto result = std::wstring(static_cast<size_t>(size), L'\0');
+    if(::MultiByteToWideChar(CP_UTF8,
+                             MB_ERR_INVALID_CHARS,
+                             value.data(),
+                             static_cast<int>(value.size()),
+                             result.data(),
+                             size) != size)
+        return std::nullopt;
+    return result;
+}
+
+std::optional<std::string>
+to_utf8(std::wstring_view value)
+{
+    if(value.empty()) return std::string{};
+    const auto size = ::WideCharToMultiByte(CP_UTF8,
+                                             WC_ERR_INVALID_CHARS,
+                                             value.data(),
+                                             static_cast<int>(value.size()),
+                                             nullptr,
+                                             0,
+                                             nullptr,
+                                             nullptr);
+    if(size <= 0) return std::nullopt;
+
+    auto result = std::string(static_cast<size_t>(size), '\0');
+    if(::WideCharToMultiByte(CP_UTF8,
+                             WC_ERR_INVALID_CHARS,
+                             value.data(),
+                             static_cast<int>(value.size()),
+                             result.data(),
+                             size,
+                             nullptr,
+                             nullptr) != size)
+        return std::nullopt;
+    return result;
+}
+}  // namespace
+#endif
+
 // Safely read environment variable directly from environ array.
 // This avoids issues with bash's custom getenv() implementation which
 // breaks when setenv() is called before bash initializes its internal tables.
@@ -53,7 +113,27 @@ namespace impl
 std::optional<std::string>
 get_env_direct(std::string_view name)
 {
-    if(name.empty() || !environ) return std::nullopt;
+    if(name.empty()) return std::nullopt;
+
+#if defined(_WIN32)
+    const auto env_name = to_wide(name);
+    if(!env_name) return std::nullopt;
+
+    ::SetLastError(ERROR_SUCCESS);
+    const auto size = ::GetEnvironmentVariableW(env_name->c_str(), nullptr, 0);
+    if(size == 0)
+    {
+        if(::GetLastError() == ERROR_ENVVAR_NOT_FOUND) return std::nullopt;
+        return std::string{};
+    }
+
+    auto value = std::vector<wchar_t>(size);
+    const auto written =
+        ::GetEnvironmentVariableW(env_name->c_str(), value.data(), static_cast<DWORD>(value.size()));
+    if(written == 0 || written >= value.size()) return std::nullopt;
+    return to_utf8(std::wstring_view{value.data(), written});
+#else
+    if(!environ) return std::nullopt;
 
     for(char** env = environ; *env; ++env)
     {
@@ -67,6 +147,40 @@ get_env_direct(std::string_view name)
     }
 
     return std::nullopt;
+#endif
+}
+
+int
+set_env_direct(std::string_view name, std::string_view value, int override)
+{
+    if(name.empty()) return -1;
+
+#if defined(_WIN32)
+    if(override == 0 && get_env_direct(name).has_value()) return 0;
+    const auto env_name  = to_wide(name);
+    const auto env_value = to_wide(value);
+    if(!env_name || !env_value) return -1;
+    return (::SetEnvironmentVariableW(env_name->c_str(), env_value->c_str()) != 0) ? 0 : -1;
+#else
+    auto env_name  = std::string{name};
+    auto env_value = std::string{value};
+    return ::setenv(env_name.c_str(), env_value.c_str(), override);
+#endif
+}
+
+int
+unset_env_direct(std::string_view name)
+{
+    if(name.empty()) return -1;
+
+#if defined(_WIN32)
+    const auto env_name = to_wide(name);
+    if(!env_name) return -1;
+    return (::SetEnvironmentVariableW(env_name->c_str(), nullptr) != 0) ? 0 : -1;
+#else
+    auto env_name = std::string{name};
+    return ::unsetenv(env_name.c_str());
+#endif
 }
 
 std::string
@@ -152,12 +266,10 @@ get_env(std::string_view env_id,
     return _default;
 }
 
-// set_env uses standard ::setenv() (no wrapper needed).
-// Unlike getenv(), bash does not interpose setenv(), so it works correctly.
 int
 set_env(std::string_view env_id, bool value, int override)
 {
-    return ::setenv(env_id.data(), (value) ? "1" : "0", override);
+    return set_env_direct(env_id, (value) ? "1" : "0", override);
 }
 
 template <typename Tp>
@@ -168,7 +280,7 @@ set_env(std::string_view env_id,
 {
     auto str_value = std::stringstream{};
     str_value << value;
-    return ::setenv(env_id.data(), str_value.str().c_str(), override);
+    return set_env_direct(env_id, str_value.str(), override);
 }
 
 #define SPECIALIZE_GET_ENV(TYPE)                                                                   \
@@ -212,8 +324,12 @@ is_at_secure()
     // AT_SECURE is set by the kernel when the program was executed in a way that
     // requires "secure execution" (setuid/setgid, file capabilities, etc.).
     // Cache the value since it cannot change during the lifetime of the process.
+#if defined(_WIN32)
+    return false;
+#else
     static const bool _v = (::getauxval(AT_SECURE) != 0);
     return _v;
+#endif
 }
 
 env_store::env_store(std::initializer_list<env_config>&& _container)

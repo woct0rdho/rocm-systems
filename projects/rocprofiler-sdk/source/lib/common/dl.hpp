@@ -28,9 +28,18 @@
 #include <string_view>
 #include <vector>
 
-#include <dlfcn.h>
-#include <sys/types.h>
-#include <unistd.h>
+#if defined(_WIN32)
+#    if !defined(RTLD_LAZY)
+#        define RTLD_LAZY 0x1
+#    endif
+#    if !defined(RTLD_NOLOAD)
+#        define RTLD_NOLOAD 0x4
+#    endif
+#else
+#    include <dlfcn.h>
+#    include <sys/types.h>
+#    include <unistd.h>
+#endif
 
 namespace rocprofiler
 {

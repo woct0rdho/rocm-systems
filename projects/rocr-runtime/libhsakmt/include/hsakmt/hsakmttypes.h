@@ -138,6 +138,14 @@ typedef struct _HsaVersionInfo
     HSAuint32    KernelInterfaceMinorVersion;    // supported kernel interface minor version
 } HsaVersionInfo;
 
+#if defined(_WIN32)
+// Validated Windows WDDM AQL Profile PM4 indirect-buffer capability.
+typedef struct _HsaWddmAqlProfileCapability {
+    HSAuint32 Version;
+    HSAuint32 MaxPm4Dwords;
+} HsaWddmAqlProfileCapability;
+#endif
+
 //
 // HSA Topology Discovery Infrastructure structure definitions.
 // The infrastructure implementation is based on design specified in the Kernel HSA Driver ADD

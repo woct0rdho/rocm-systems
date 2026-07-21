@@ -2,7 +2,7 @@
 setlocal
 set "PATH=%~dp0;%PATH%"
 set "ROCPROFILER_WINDOWS_CORE_BIN=%~dp0"
-set "ROCPROF_LIST_AVAIL_TOOL_LIBRARY=%~dp0rocprofiler-sdk\rocprofv3-list-avail.dll"
+set "ROCPROF_LIST_AVAIL_TOOL_LIBRARY=%~dp0rocprofv3-list-avail.dll"
 set "ROCPROFILER_METRICS_PATH=%~dp0..\share\rocprofiler-sdk"
 if defined ROCPROFV3_PYTHON goto use_override
 if exist "%~dp0python.exe" goto use_packaged

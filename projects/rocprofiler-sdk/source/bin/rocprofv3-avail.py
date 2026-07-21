@@ -590,7 +590,6 @@ def main(argv=None):
         ROCPROF_LIST_AVAIL_TOOL_LIBRARY = os.path.join(
             rocm_runtime_root,
             "bin",
-            "rocprofiler-sdk",
             "rocprofv3-list-avail.dll",
         )
         metrics_path = os.path.join(rocm_runtime_root, "share", "rocprofiler-sdk")

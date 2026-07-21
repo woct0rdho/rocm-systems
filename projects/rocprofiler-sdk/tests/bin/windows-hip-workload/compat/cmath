@@ -1,0 +1,20 @@
+// Compatibility shim for Clang HIP with the Visual Studio 18 standard library.
+// MSVC 14.51 adds Clang-only comparison overloads that collide with Clang's
+// device math declarations. Load the common CRT/STL prerequisites normally,
+// then expose the CRT-backed <cmath> declarations while that header is parsed.
+
+#pragma once
+
+#include <yvals.h>
+#include <cstdlib>
+#include <xtr1common>
+
+#pragma push_macro("__clang__")
+#pragma push_macro("_M_CEE")
+#undef __clang__
+#ifndef _M_CEE
+#    define _M_CEE 1
+#endif
+#include_next <cmath>
+#pragma pop_macro("_M_CEE")
+#pragma pop_macro("__clang__")

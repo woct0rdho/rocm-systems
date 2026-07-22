@@ -3168,7 +3168,14 @@ void GpuAgent::TranslateTime(core::Signal* signal, hsa_amd_profiling_dispatch_ti
   uint64_t start, end;
   signal->GetRawTs(false, start, end);
 
-  if ((start == 0) || (end == 0) || (start < t0_.GPUClockCounter) || (end < t0_.GPUClockCounter)) {
+  // AQL timestamps on Windows can have a different epoch from the clock
+  // calibration and may legitimately be less than the calibration captured at
+  // runtime startup. TranslateTime detects and corrects that epoch mismatch.
+  if ((start == 0) || (end == 0)
+#ifndef _WIN32
+      || (start < t0_.GPUClockCounter) || (end < t0_.GPUClockCounter)
+#endif
+  ) {
     debug_print("Signal %p time stamps may be invalid (start=%" PRIu64 ", end=%" PRIu64 ", t0=%" PRIu64 ").\n",
                 &signal->signal_, start, end, t0_.GPUClockCounter);
     time.start = 0;
@@ -3186,7 +3193,11 @@ void GpuAgent::TranslateTime(core::Signal* signal, hsa_amd_profiling_async_copy_
   uint64_t start, end;
   signal->GetRawTs(true, start, end);
 
-  if ((start == 0) || (end == 0) || (start < t0_.GPUClockCounter) || (end < t0_.GPUClockCounter)) {
+  if ((start == 0) || (end == 0)
+#ifndef _WIN32
+      || (start < t0_.GPUClockCounter) || (end < t0_.GPUClockCounter)
+#endif
+  ) {
     debug_print("Signal %p async copy time stamps may be invalid (start=%" PRIu64 ", end=%" PRIu64 ", t0=%" PRIu64 ").\n",
                 &signal->signal_, start, end, t0_.GPUClockCounter);
     time.start = 0;
@@ -3262,16 +3273,24 @@ uint64_t GpuAgent::TranslateTime(uint64_t tick) {
   }
 
 #ifdef _WIN32
-  // Detect epoch mismatch: only trigger when translated time is in the future,
-  // which proves AQL timestamps have an epoch offset from D3DKMT's GPU clock.
-  // If TranslateTime is called long after dispatch, system_tick <= now, so no
-  // false offset is computed.  Retries on subsequent calls until detected.
+  // Detect an epoch mismatch in either direction. A timestamp generated after
+  // runtime startup cannot translate to before t0; likewise, it cannot be in
+  // the future. Both cases prove that AQL timestamps and D3DKMT's GPU clock
+  // share a frequency but use different epochs (for example after a GPU reset).
   if (gpu_clock_offset_ == 0) {
-    int64_t now = int64_t(os::TimeNanos());
-    if (int64_t(system_tick) > now) {
-      gpu_clock_offset_ = int64_t(double(int64_t(system_tick) - now) / ratio);
-      // Re-translate this first event with the corrected offset.
-      elapsed = int64_t(ratio * double((int64_t(tick) - gpu_clock_offset_) - int64_t(t1_.GPUClockCounter)));
+    const int64_t now = int64_t(os::TimeNanos());
+    const int64_t translated_tick = int64_t(system_tick);
+    if ((translated_tick < int64_t(t0_.SystemClockCounter)) || (translated_tick > now)) {
+      gpu_clock_offset_ = int64_t(double(translated_tick - now) / ratio);
+
+      // Use the same current calibration that the paired endpoint will see.
+      // Otherwise this first corrected endpoint can use stale t1_ while the
+      // next TranslateTime call refreshes it, reversing a short interval.
+      SyncClocks();
+      ratio = double(t1_.SystemClockCounter - t0_.SystemClockCounter) /
+          double(t1_.GPUClockCounter - t0_.GPUClockCounter);
+      elapsed = int64_t(
+          ratio * double((int64_t(tick) - gpu_clock_offset_) - int64_t(t1_.GPUClockCounter)));
       system_tick = uint64_t(elapsed) + t1_.SystemClockCounter;
     }
   }

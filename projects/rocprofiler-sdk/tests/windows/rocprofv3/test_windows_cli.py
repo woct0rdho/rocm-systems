@@ -23,12 +23,16 @@ def load_rocprofv3():
 
 def load_availability():
     script = Path(os.environ["ROCPROFV3_TEST_SCRIPT"]).resolve()
-    availability_script = script.parent.parent / "lib" / "python" / "rocprofv3" / "avail.py"
+    availability_script = (
+        script.parent.parent / "lib" / "python" / "rocprofv3" / "avail.py"
+    )
     spec = importlib.util.spec_from_file_location(
         "rocprofv3_availability_unit", availability_script
     )
     if spec is None or spec.loader is None:
-        raise RuntimeError(f"could not import availability module from {availability_script}")
+        raise RuntimeError(
+            f"could not import availability module from {availability_script}"
+        )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -46,10 +50,7 @@ def require_fatal(capsys, callback, pattern: str):
     assert pattern in capsys.readouterr().err
 
 
-
-def test_kernel_trace_conversion_normalizes_agent_identity(
-    rocprofv3, tmp_path, capsys
-):
+def test_kernel_trace_conversion_normalizes_agent_identity(rocprofv3, tmp_path, capsys):
     activity = tmp_path / "activity.json"
     activity.write_text(
         json.dumps(
@@ -127,11 +128,7 @@ def test_kernel_trace_filters_explicit_enqueue_order_and_formatted_name(
     activity = tmp_path / "reversed-activity.json"
     activity.write_text(
         json.dumps(
-            {
-                "traceEvents": [
-                    by_ordinal[ordinal] for ordinal in (5, 2, 6, 3, 1, 4)
-                ]
-            }
+            {"traceEvents": [by_ordinal[ordinal] for ordinal in (5, 2, 6, 3, 1, 4)]}
         ),
         encoding="utf-8",
     )
@@ -144,9 +141,7 @@ def test_kernel_trace_filters_explicit_enqueue_order_and_formatted_name(
         mangled_kernels=False,
         truncate_kernels=False,
     )
-    assert rocprofv3.write_windows_kernel_csv(
-        activity, ranged, 4242, ranged_args
-    ) == 1
+    assert rocprofv3.write_windows_kernel_csv(activity, ranged, 4242, ranged_args) == 1
     with ranged.open(encoding="utf-8", newline="") as stream:
         ranged_rows = list(csv.DictReader(stream))
     assert [int(row["Dispatch_Id"]) for row in ranged_rows] == [3]
@@ -163,12 +158,14 @@ def test_kernel_trace_filters_explicit_enqueue_order_and_formatted_name(
         mangled_kernels=True,
         truncate_kernels=False,
     )
-    assert rocprofv3.write_windows_kernel_csv(
-        activity, mangled, 4242, mangled_args
-    ) == 3
+    assert (
+        rocprofv3.write_windows_kernel_csv(activity, mangled, 4242, mangled_args) == 3
+    )
     with mangled.open(encoding="utf-8", newline="") as stream:
         mangled_rows = list(csv.DictReader(stream))
-    assert all(row["Kernel_Name"].startswith("_Z15dispatch_vector") for row in mangled_rows)
+    assert all(
+        row["Kernel_Name"].startswith("_Z15dispatch_vector") for row in mangled_rows
+    )
 
     truncated = tmp_path / "truncated.csv"
     truncated_args = SimpleNamespace(
@@ -178,13 +175,53 @@ def test_kernel_trace_filters_explicit_enqueue_order_and_formatted_name(
         mangled_kernels=False,
         truncate_kernels=True,
     )
-    assert rocprofv3.write_windows_kernel_csv(
-        activity, truncated, 4242, truncated_args
-    ) == 3
+    assert (
+        rocprofv3.write_windows_kernel_csv(activity, truncated, 4242, truncated_args)
+        == 3
+    )
     with truncated.open(encoding="utf-8", newline="") as stream:
         truncated_rows = list(csv.DictReader(stream))
     assert [row["Dispatch_Id"] for row in truncated_rows] == ["1", "3", "5"]
     assert {row["Kernel_Name"] for row in truncated_rows} == {"dispatch_vector"}
+
+
+def test_kernel_statistics_use_linux_sample_accumulator(rocprofv3):
+    rows = [
+        {
+            "Kernel_Name": "dispatch_vector",
+            "Start_Timestamp": "100",
+            "End_Timestamp": "110",
+        },
+        {
+            "Kernel_Name": "dispatch_vector",
+            "Start_Timestamp": "200",
+            "End_Timestamp": "220",
+        },
+        {
+            "Kernel_Name": "dispatch_resource",
+            "Start_Timestamp": "300",
+            "End_Timestamp": "330",
+        },
+    ]
+    stats = rocprofv3.windows_kernel_stats_rows(rows)
+    assert [row["Name"] for row in stats] == [
+        "dispatch_resource",
+        "dispatch_vector",
+    ]
+    by_name = {row["Name"]: row for row in stats}
+    assert by_name["dispatch_vector"] == {
+        "Name": "dispatch_vector",
+        "Calls": 2,
+        "TotalDurationNs": 30,
+        "AverageNs": "15.000000",
+        "Percentage": "50.00",
+        "MinNs": 10,
+        "MaxNs": 20,
+        "StdDev": "7.071068",
+    }
+    assert by_name["dispatch_resource"]["Calls"] == 1
+    assert by_name["dispatch_resource"]["StdDev"] == "0.00000000e+00"
+    assert sum(float(row["Percentage"]) for row in stats) == pytest.approx(100.0)
 
 
 def test_hip_and_graph_trace_conversion(rocprofv3, tmp_path):
@@ -319,9 +356,7 @@ def test_roctx_long_utf8_message_conversion(rocprofv3, tmp_path):
     assert marker_rows[0]["Message"] == message
 
 
-def test_hip_trace_rejects_unmatched_and_existing_output(
-    rocprofv3, tmp_path, capsys
-):
+def test_hip_trace_rejects_unmatched_and_existing_output(rocprofv3, tmp_path, capsys):
     trace = tmp_path / "unmatched.log"
     trace.write_text(
         "event=hip_api phase=enter operation=hipMalloc correlation_id=9 "
@@ -347,7 +382,6 @@ def test_hip_trace_rejects_unmatched_and_existing_output(
         "output already exists",
     )
     assert output.read_bytes() == retained
-
 
 
 def test_pid_output_collision_stops_suspended_target(rocprofv3, tmp_path, capsys):
@@ -376,10 +410,7 @@ def test_pid_output_collision_stops_suspended_target(rocprofv3, tmp_path, capsys
     assert not rocprofv3.windows_output_reservation_path(retained["output"]).exists()
 
 
-
-def test_sdk_counter_environment_uses_common_contract(
-    rocprofv3, tmp_path, monkeypatch
-):
+def test_sdk_counter_environment_uses_common_contract(rocprofv3, tmp_path, monkeypatch):
     runtime_path = tmp_path / "runtime" / "bin"
     sdk_path = tmp_path / "sdk" / "bin" / "rocprofiler-sdk.dll"
     tool_path = tmp_path / "tool" / "bin" / "rocprofiler-sdk-tool.dll"
@@ -444,18 +475,18 @@ def test_sdk_counter_environment_uses_common_contract(
         ["csv", "json"],
         4242,
         kernel_trace=True,
+        stats=True,
     )
     assert [path.name for path in outputs] == [
         "profile-4242_agent_info.csv",
         "profile-4242_counter_collection.csv",
         "profile-4242_kernel_trace.csv",
+        "profile-4242_kernel_stats.csv",
         "profile-4242_results.json",
     ]
 
 
-def test_availability_initialization_failure_is_reported(
-    tmp_path, monkeypatch, capsys
-):
+def test_availability_initialization_failure_is_reported(tmp_path, monkeypatch, capsys):
     class StatusFunction:
         def __call__(self, message):
             pointer = ctypes.cast(message, ctypes.POINTER(ctypes.c_char_p))
@@ -477,13 +508,9 @@ def test_availability_initialization_failure_is_reported(
     assert availability.loadLibrary.c_lib is None
 
 
-def test_sdk_result_status_distinguishes_profiler_failures(
-    rocprofv3, tmp_path, capsys
-):
+def test_sdk_result_status_distinguishes_profiler_failures(rocprofv3, tmp_path, capsys):
     result = tmp_path / "result.txt"
-    result.write_text(
-        "version=1\nstatus=success_records\ndetail=\n", encoding="utf-8"
-    )
+    result.write_text("version=1\nstatus=success_records\ndetail=\n", encoding="utf-8")
     output = tmp_path / "counter_collection.csv"
     output.write_text("records\n", encoding="utf-8")
     assert rocprofv3.windows_sdk_result_status(result, 7, [output]) == 7
@@ -496,8 +523,7 @@ def test_sdk_result_status_distinguishes_profiler_failures(
     )
 
     result.write_text(
-        "version=1\nstatus=output_publication_failed\n"
-        "detail=could not write output\n",
+        "version=1\nstatus=output_publication_failed\ndetail=could not write output\n",
         encoding="utf-8",
     )
     require_fatal(

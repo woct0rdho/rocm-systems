@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import ctypes
 import hashlib
 import json
@@ -10,7 +9,6 @@ import os
 from pathlib import Path
 import re
 import shutil
-import sqlite3
 import subprocess
 import sys
 import time
@@ -20,6 +18,7 @@ COMMON = Path(__file__).resolve().parent / "common"
 if str(COMMON) not in sys.path:
     sys.path.insert(0, str(COMMON))
 
+from output_readers import open_rocpd, read_csv, read_json
 from process_cleanup import assert_target_stopped
 from windows_job import run_in_job
 
@@ -77,11 +76,6 @@ def run_wrapper(
             + f"\n{text}"
         )
     return result, text
-
-
-def read_csv(path: Path) -> list[dict[str, str]]:
-    with path.open("r", encoding="utf-8", newline="") as stream:
-        return list(csv.DictReader(stream))
 
 
 def main() -> int:
@@ -483,10 +477,8 @@ def main() -> int:
                                 f"installed run {iteration} kernel/counter mismatch "
                                 f"for {field}: {counter[field]} != {kernel[field]}"
                             )
-                document = json.loads(
-                    (pmc_directory / f"{output_name}_results.json").read_text(
-                        encoding="utf-8"
-                    )
+                document = read_json(
+                    pmc_directory / f"{output_name}_results.json"
                 )
                 tool_document = document["rocprofiler-sdk-tool"]
                 if isinstance(tool_document, list):
@@ -555,13 +547,10 @@ def main() -> int:
                 raise RuntimeError("installed ROCpd run omitted its dispatch summary")
             if (rocpd_directory / "windows-installed-rocpd_results.json").exists():
                 raise RuntimeError("installed ROCpd-only run retained its internal JSON")
-            schema_manifest = json.loads(
-                (
-                    prefix
-                    / "share/rocprofiler-sdk-rocpd/latest-schema.json"
-                ).read_text(encoding="utf-8")
+            schema_manifest = read_json(
+                prefix / "share/rocprofiler-sdk-rocpd/latest-schema.json"
             )
-            with sqlite3.connect(rocpd_database) as connection:
+            with open_rocpd(rocpd_database) as connection:
                 integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
                 foreign_key_errors = connection.execute(
                     "PRAGMA foreign_key_check"

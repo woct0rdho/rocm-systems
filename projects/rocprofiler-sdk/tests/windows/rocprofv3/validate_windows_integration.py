@@ -326,7 +326,10 @@ def test_windows_integration_case():
                 stats["stddev"], math.sqrt(abs(total_variance)), rel_tol=1.0e-12
             )
             operation_entries = stats["operations"]
-            assert [entry["key"] for entry in operation_entries] == sorted(expected)
+            expected_order = sorted(
+                expected, key=lambda name: (-expected[name]["sum"], name)
+            )
+            assert [entry["key"] for entry in operation_entries] == expected_order
             assert operation_entries[0]["value"]["cereal_class_version"] == 0
             assert all(
                 "cereal_class_version" not in entry["value"]

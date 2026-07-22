@@ -10,6 +10,7 @@ set(TOOL_OUTPUT_HEADERS
     counter_info.hpp
     csv.hpp
     csv_output_file.hpp
+    csv_output_helpers.hpp
     domain_type.hpp
     format_path.hpp
     generateCSV.hpp

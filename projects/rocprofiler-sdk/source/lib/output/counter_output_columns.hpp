@@ -86,6 +86,40 @@ inline constexpr auto agent_info_columns = std::array<std::string_view, 53>{
     "Product_Name",
     "Model_Name"};
 
+inline constexpr auto statistics_columns = std::array<std::string_view, 8>{
+    "Name",
+    "Calls",
+    "TotalDurationNs",
+    "AverageNs",
+    "Percentage",
+    "MinNs",
+    "MaxNs",
+    "StdDev"};
+
+inline constexpr auto kernel_trace_columns = std::array<std::string_view, 22>{
+    "Kind",
+    "Agent_Id",
+    "Queue_Id",
+    "Stream_Id",
+    "Thread_Id",
+    "Dispatch_Id",
+    "Kernel_Id",
+    "Kernel_Name",
+    "Correlation_Id",
+    "Start_Timestamp",
+    "End_Timestamp",
+    "LDS_Block_Size",
+    "Scratch_Size",
+    "VGPR_Count",
+    "Accum_VGPR_Count",
+    "SGPR_Count",
+    "Workgroup_Size_X",
+    "Workgroup_Size_Y",
+    "Workgroup_Size_Z",
+    "Grid_Size_X",
+    "Grid_Size_Y",
+    "Grid_Size_Z"};
+
 inline constexpr auto counter_collection_columns = std::array<std::string_view, 19>{
     "Correlation_Id",
     "Dispatch_Id",

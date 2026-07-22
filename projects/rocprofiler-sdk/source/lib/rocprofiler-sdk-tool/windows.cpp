@@ -539,17 +539,8 @@ replace_all(std::string value, std::string_view key, std::string_view replacemen
 std::string
 format_output_value(std::string value)
 {
-    const auto pid = std::to_string(::GetCurrentProcessId());
-    auto hostname = std::string{"localhost"};
-    auto hostname_buffer = std::vector<char>(MAX_COMPUTERNAME_LENGTH + 1, '\0');
-    auto hostname_size = static_cast<DWORD>(hostname_buffer.size());
-    if(::GetComputerNameA(hostname_buffer.data(), &hostname_size))
-        hostname.assign(hostname_buffer.data(), hostname_size);
-    value = replace_all(std::move(value), "%pid%", pid);
-    value = replace_all(std::move(value), "{pid}", pid);
-    value = replace_all(std::move(value), "%cwd%", fs::current_path().string());
-    value = replace_all(std::move(value), "%hostname%", hostname);
-    return value;
+    return replace_all(
+        std::move(value), "%pid%", std::to_string(::GetCurrentProcessId()));
 }
 
 fs::path

@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "workload": {
     "dispatch_count": 6,
     "enqueue_sequence": [
@@ -77,6 +77,28 @@
       ],
       "target_args": [],
       "selected_enqueue_ordinals": [1, 3]
+    },
+    {
+      "name": "mangled-vector",
+      "profiler_args": [
+        "--mangled-kernels",
+        "--kernel-include-regex",
+        "dispatch_vector"
+      ],
+      "target_args": [],
+      "selected_enqueue_ordinals": [1, 3, 5],
+      "name_mode": "mangled"
+    },
+    {
+      "name": "truncated-vector",
+      "profiler_args": [
+        "--truncate-kernels",
+        "--kernel-include-regex",
+        "^dispatch_vector$"
+      ],
+      "target_args": [],
+      "selected_enqueue_ordinals": [1, 3, 5],
+      "name_mode": "truncated"
     },
     {
       "name": "composed-stats",

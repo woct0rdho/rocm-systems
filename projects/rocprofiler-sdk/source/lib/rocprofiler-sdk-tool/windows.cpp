@@ -10,6 +10,7 @@
 #include "lib/common/windows_result.hpp"
 #include "lib/output/counter_output_columns.hpp"
 #include "lib/output/csv.hpp"
+#include "lib/output/statistics.hpp"
 #include "lib/output/stream_info.hpp"
 
 #include <amd_comgr/amd_comgr.h>
@@ -717,6 +718,87 @@ unique_dispatch_count(const tool_state& state)
     return dispatches.size();
 }
 
+uint64_t
+find_invalid_kernel_timing_dispatch(const tool_state& state)
+{
+    for(const auto& record : state.records)
+    {
+        const auto& dispatch = record.dispatch_data;
+        if(dispatch.start_timestamp == 0 ||
+           dispatch.end_timestamp <= dispatch.start_timestamp)
+            return dispatch.dispatch_info.dispatch_id;
+    }
+    return 0;
+}
+
+uint64_t
+find_missing_kernel_metadata_dispatch(const tool_state& state)
+{
+    for(const auto& record : state.records)
+    {
+        const auto& info = record.dispatch_data.dispatch_info;
+        if(state.kernel_info.count(info.kernel_id) == 0) return info.dispatch_id;
+    }
+    return 0;
+}
+
+rocprofiler::tool::stats_entry_t
+generate_kernel_statistics(const tool_state&                    state,
+                           const std::vector<counter_record>& records)
+{
+    auto kernel_stats = rocprofiler::tool::stats_map_t{};
+    for(const auto& record : records)
+    {
+        const auto& dispatch = record.dispatch_data;
+        const auto  metadata = state.kernel_info.find(dispatch.dispatch_info.kernel_id);
+        if(metadata == state.kernel_info.end()) continue;
+        kernel_stats[metadata->second.formatted_kernel_name] +=
+            dispatch.end_timestamp - dispatch.start_timestamp;
+    }
+
+    auto output = rocprofiler::tool::stats_entry_t{};
+    for(const auto& [name, value] : kernel_stats)
+    {
+        output.entries.emplace_back(name, value);
+        output.total += value;
+    }
+    return output.sort();
+}
+
+std::string
+generate_kernel_stats_csv(const rocprofiler::tool::stats_entry_t& stats)
+{
+    constexpr auto columns = std::array<std::string_view, 8>{"Name",
+                                                              "Calls",
+                                                              "TotalDurationNs",
+                                                              "AverageNs",
+                                                              "Percentage",
+                                                              "MinNs",
+                                                              "MaxNs",
+                                                              "StdDev"};
+    auto output = std::ostringstream{};
+    for(size_t index = 0; index < std::size(columns); ++index)
+    {
+        if(index > 0) output << ',';
+        output << rocprofiler::tool::csv::quote(columns[index]);
+    }
+    output << '\n';
+
+    for(const auto& [name, value] : stats.entries)
+        rocprofiler::tool::csv::stats_csv_encoder::write_row<
+            rocprofiler::tool::stats_formatter>(output,
+                                                name,
+                                                value.get_count(),
+                                                value.get_sum(),
+                                                value.get_mean(),
+                                                rocprofiler::tool::percentage{
+                                                    value.get_percent(stats.total)},
+                                                value.get_min(),
+                                                value.get_max(),
+                                                value.get_stddev());
+    return output.str();
+}
+
 std::string
 generate_agent_csv(const tool_state& state)
 {
@@ -904,8 +986,70 @@ generate_kernel_csv(tool_state& state)
     return output.str();
 }
 
+template <typename ArchiveT>
+void
+serialize_statistics(ArchiveT& archive, const rocprofiler::tool::stats_data_t& stats)
+{
+    const auto count    = stats.get_count();
+    const auto sum      = stats.get_sum();
+    const auto sqr      = stats.get_sqr();
+    const auto min      = stats.get_min();
+    const auto max      = stats.get_max();
+    const auto mean     = stats.get_mean();
+    const auto stddev   = stats.get_stddev();
+    const auto variance = stats.get_variance();
+    archive(cereal::make_nvp("count", count),
+            cereal::make_nvp("sum", sum),
+            cereal::make_nvp("sqr", sqr),
+            cereal::make_nvp("min", min),
+            cereal::make_nvp("max", max),
+            cereal::make_nvp("mean", mean),
+            cereal::make_nvp("stddev", stddev),
+            cereal::make_nvp("variance", variance));
+}
+
+template <typename ArchiveT>
+void
+serialize_statistics_entry(ArchiveT& archive,
+                           const rocprofiler::tool::stats_entry_t& stats)
+{
+    const auto class_version = uint32_t{0};
+    archive(cereal::make_nvp("cereal_class_version", class_version));
+    serialize_statistics(archive, stats.total);
+
+    auto operations = std::vector<const rocprofiler::tool::stats_pair_t*>{};
+    operations.reserve(stats.entries.size());
+    for(const auto& entry : stats.entries)
+        operations.emplace_back(&entry);
+    std::sort(operations.begin(), operations.end(), [](const auto* lhs, const auto* rhs) {
+        return lhs->first < rhs->first;
+    });
+
+    archive.setNextName("operations");
+    archive.startNode();
+    archive.makeArray();
+    auto first = true;
+    for(const auto* entry : operations)
+    {
+        archive.startNode();
+        const auto key = std::string{entry->first};
+        archive(cereal::make_nvp("key", key));
+        archive.setNextName("value");
+        archive.startNode();
+        if(first)
+        {
+            archive(cereal::make_nvp("cereal_class_version", class_version));
+            first = false;
+        }
+        serialize_statistics(archive, entry->second);
+        archive.finishNode();
+        archive.finishNode();
+    }
+    archive.finishNode();
+}
+
 std::string
-generate_json(tool_state& state)
+generate_json(tool_state& state, const rocprofiler::tool::stats_entry_t& kernel_stats)
 {
     const auto records        = sorted_counter_records(state);
     const auto kernel_records = state.config.kernel_trace
@@ -950,6 +1094,17 @@ generate_json(tool_state& state)
 
         archive.setNextName("summary");
         archive.startNode();
+        archive.makeArray();
+        if(state.config.stats && kernel_stats)
+        {
+            archive.startNode();
+            archive(cereal::make_nvp("domain", std::string{"KERNEL_DISPATCH"}));
+            archive.setNextName("stats");
+            archive.startNode();
+            serialize_statistics_entry(archive, kernel_stats);
+            archive.finishNode();
+            archive.finishNode();
+        }
         archive.finishNode();
         archive.setNextName("callback_records");
         archive.startNode();
@@ -1060,13 +1215,29 @@ tool_finalize(void* data)
             detail = "selected dispatches=" + std::to_string(state.selected_dispatches) +
                      ", completed counter records=" + std::to_string(state.records.size());
         }
-        else if(state.config.kernel_trace &&
+        else if((state.config.kernel_trace || state.config.stats) &&
                 unique_dispatch_count(state) != state.records.size())
         {
             status = "kernel_record_mismatch";
             detail = "completed counter records=" + std::to_string(state.records.size()) +
                      ", unique kernel dispatches=" +
                      std::to_string(unique_dispatch_count(state));
+        }
+        else if(state.config.stats &&
+                find_invalid_kernel_timing_dispatch(state) != 0)
+        {
+            const auto dispatch_id = find_invalid_kernel_timing_dispatch(state);
+            status = "kernel_timing_invalid";
+            detail = "kernel statistics require a positive ordered interval for dispatch " +
+                     std::to_string(dispatch_id);
+        }
+        else if(state.config.stats &&
+                find_missing_kernel_metadata_dispatch(state) != 0)
+        {
+            const auto dispatch_id = find_missing_kernel_metadata_dispatch(state);
+            status = "kernel_metadata_missing";
+            detail = "kernel statistics require formatted metadata for dispatch " +
+                     std::to_string(dispatch_id);
         }
         else if(const auto dispatch_id = find_invalid_sq_waves_dispatch(state);
                 dispatch_id != 0)
@@ -1079,30 +1250,50 @@ tool_finalize(void* data)
         }
         else if(!state.records.empty())
         {
+            const auto records = sorted_counter_records(state);
+            const auto kernel_stats = state.config.stats
+                                          ? generate_kernel_statistics(state, records)
+                                          : rocprofiler::tool::stats_entry_t{};
             auto publish = [&](const fs::path& path, std::string content) {
                 if(!write_exclusive(path, content)) return false;
                 published.emplace_back(path);
                 return true;
             };
 
-            auto success = true;
-            if(state.config.has_format("csv"))
+            auto success            = true;
+            auto publication_detail = std::string{};
+            try
             {
-                success = publish(output_path(state, "agent_info", ".csv"),
-                                  generate_agent_csv(state)) &&
-                          success;
-                success = publish(output_path(state, "counter_collection", ".csv"),
-                                  generate_counter_csv(state)) &&
-                          success;
-                if(state.config.kernel_trace)
-                    success = publish(output_path(state, "kernel_trace", ".csv"),
-                                      generate_kernel_csv(state)) &&
+                if(state.config.has_format("csv"))
+                {
+                    success = publish(output_path(state, "agent_info", ".csv"),
+                                      generate_agent_csv(state)) &&
                               success;
+                    success = publish(output_path(state, "counter_collection", ".csv"),
+                                      generate_counter_csv(state)) &&
+                              success;
+                    if(state.config.kernel_trace)
+                        success = publish(output_path(state, "kernel_trace", ".csv"),
+                                          generate_kernel_csv(state)) &&
+                                  success;
+                    if(state.config.stats)
+                        success = publish(output_path(state, "kernel_stats", ".csv"),
+                                          generate_kernel_stats_csv(kernel_stats)) &&
+                                  success;
+                }
+                if(state.config.has_format("json"))
+                    success = publish(output_path(state, "results", ".json"),
+                                      generate_json(state, kernel_stats)) &&
+                              success;
+            } catch(const std::exception& error)
+            {
+                success            = false;
+                publication_detail = error.what();
+            } catch(...)
+            {
+                success            = false;
+                publication_detail = "unknown output-generation exception";
             }
-            if(state.config.has_format("json"))
-                success = publish(output_path(state, "results", ".json"),
-                                  generate_json(state)) &&
-                          success;
 
             if(success)
             {
@@ -1112,14 +1303,18 @@ tool_finalize(void* data)
                          ", completed counter records=" +
                          std::to_string(state.records.size()) +
                          ", emitted kernel records=" +
-                         std::to_string(state.config.kernel_trace ? state.records.size() : 0);
+                         std::to_string(state.config.kernel_trace ? state.records.size() : 0) +
+                         ", emitted kernel statistics=" +
+                         std::to_string(state.config.stats ? kernel_stats.entries.size() : 0);
             }
             else
             {
                 for(const auto& path : published)
                     ::DeleteFileW(path.c_str());
                 status = "output_publication_failed";
-                detail = "one or more reserved profiler outputs could not be published";
+                detail = publication_detail.empty()
+                             ? "one or more reserved profiler outputs could not be published"
+                             : "output generation failed: " + publication_detail;
                 state.failed.store(true, std::memory_order_release);
             }
         }

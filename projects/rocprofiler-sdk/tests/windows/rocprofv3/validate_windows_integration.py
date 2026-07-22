@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
@@ -124,12 +125,14 @@ def test_windows_integration_case():
         observations = {
             item["name"]: item for item in PMC_CONTRACT["profile_observations"]
         }
-        assert observations["retained-three-counter-group"]["diagnostic"] in data[
-            "pmc_check"
-        ]["stdout"]
-        assert observations["representative-multi-block-group"]["diagnostic"] in data[
-            "pmc_check_representative"
-        ]["stdout"]
+        assert (
+            observations["retained-three-counter-group"]["diagnostic"]
+            in data["pmc_check"]["stdout"]
+        )
+        assert (
+            observations["representative-multi-block-group"]["diagnostic"]
+            in data["pmc_check_representative"]["stdout"]
+        )
         assert (
             "Following input counters can be collected together on GPU:0\tGDSInsts"
             in data["pmc_check_derived"]["stdout"]
@@ -139,12 +142,14 @@ def test_windows_integration_case():
             "GRBM_GL2C_BUSY\tGCEA_RDRAM_SIZE_REQ\tGCEA_WDRAM_SIZE_REQ"
             in data["pmc_check_catalog_boundaries"]["stdout"]
         )
-        assert observations["grbm-capacity-exceeded"]["diagnostic"] in data[
-            "pmc_check_rejected"
-        ]["stdout"]
-        assert observations["unknown-counter"]["diagnostic"] in data[
-            "pmc_check_unknown"
-        ]["stdout"]
+        assert (
+            observations["grbm-capacity-exceeded"]["diagnostic"]
+            in data["pmc_check_rejected"]["stdout"]
+        )
+        assert (
+            observations["unknown-counter"]["diagnostic"]
+            in data["pmc_check_unknown"]["stdout"]
+        )
     elif case == "baseline":
         assert data["returncode"] == 0
         require_workload(data["stdout"])
@@ -215,6 +220,7 @@ def test_windows_integration_case():
             "vector-iteration-range",
             "mangled-vector",
             "truncated-vector",
+            "composed-stats",
             "reversed-completion",
         }
         selection_cases = data["selection_cases"]
@@ -223,9 +229,117 @@ def test_windows_integration_case():
 
         def base_kernel_names(rows):
             return [
-                next(name for name in set(enqueue_sequence) if name in row["Kernel_Name"])
+                next(
+                    name for name in set(enqueue_sequence) if name in row["Kernel_Name"]
+                )
                 for row in rows
             ]
+
+        def recompute_stats(trace_rows):
+            samples = {}
+            for row in trace_rows:
+                duration = int(row["End_Timestamp"]) - int(row["Start_Timestamp"])
+                assert duration > 0
+                samples.setdefault(row["Kernel_Name"], []).append(duration)
+            total = sum(sum(values) for values in samples.values())
+            output = {}
+            for name, values in samples.items():
+                count = len(values)
+                duration_sum = sum(values)
+                square_sum = sum(value * value for value in values)
+                variance = 0.0
+                if count > 1:
+                    variance = (square_sum - (duration_sum * duration_sum) / count) / (
+                        count - 1
+                    )
+                output[name] = {
+                    "count": count,
+                    "sum": duration_sum,
+                    "sqr": square_sum,
+                    "min": min(values),
+                    "max": max(values),
+                    "mean": duration_sum / count,
+                    "variance": variance,
+                    "stddev": math.sqrt(abs(variance)),
+                    "percentage": (duration_sum / total) * 100.0,
+                }
+            return output
+
+        def validate_stats_csv(trace_rows, stats_rows):
+            expected = recompute_stats(trace_rows)
+            assert {row["Name"] for row in stats_rows} == set(expected)
+            assert [row["Name"] for row in stats_rows] == sorted(
+                expected, key=lambda name: (-expected[name]["sum"], name)
+            )
+            for row in stats_rows:
+                values = expected[row["Name"]]
+                assert int(row["Calls"]) == values["count"]
+                assert int(row["TotalDurationNs"]) == values["sum"]
+                assert int(row["MinNs"]) == values["min"]
+                assert int(row["MaxNs"]) == values["max"]
+                assert math.isclose(
+                    float(row["AverageNs"]), values["mean"], rel_tol=1.0e-6
+                )
+                assert math.isclose(
+                    float(row["StdDev"]),
+                    values["stddev"],
+                    rel_tol=1.0e-6,
+                    abs_tol=1.0e-6,
+                )
+                assert math.isclose(
+                    float(row["Percentage"]),
+                    values["percentage"],
+                    rel_tol=1.0e-3,
+                    abs_tol=1.0e-2,
+                )
+            assert math.isclose(
+                sum(float(row["Percentage"]) for row in stats_rows),
+                100.0,
+                abs_tol=2.0e-2,
+            )
+
+        def validate_json_summary(trace_rows, summary):
+            expected = recompute_stats(trace_rows)
+            assert len(summary) == 1
+            assert summary[0]["domain"] == "KERNEL_DISPATCH"
+            stats = summary[0]["stats"]
+            assert stats["cereal_class_version"] == 0
+            total_count = sum(value["count"] for value in expected.values())
+            total_sum = sum(value["sum"] for value in expected.values())
+            total_sqr = sum(value["sqr"] for value in expected.values())
+            total_variance = (total_sqr - (total_sum * total_sum) / total_count) / (
+                total_count - 1
+            )
+            assert stats["count"] == total_count
+            assert stats["sum"] == total_sum
+            assert stats["sqr"] == total_sqr
+            assert stats["min"] == min(value["min"] for value in expected.values())
+            assert stats["max"] == max(value["max"] for value in expected.values())
+            assert math.isclose(stats["mean"], total_sum / total_count, rel_tol=1.0e-12)
+            assert math.isclose(stats["variance"], total_variance, rel_tol=1.0e-12)
+            assert math.isclose(
+                stats["stddev"], math.sqrt(abs(total_variance)), rel_tol=1.0e-12
+            )
+            operation_entries = stats["operations"]
+            assert [entry["key"] for entry in operation_entries] == sorted(expected)
+            assert operation_entries[0]["value"]["cereal_class_version"] == 0
+            assert all(
+                "cereal_class_version" not in entry["value"]
+                for entry in operation_entries[1:]
+            )
+            for entry in operation_entries:
+                name = entry["key"]
+                operation = entry["value"]
+                values = expected[name]
+                for field in ("count", "sum", "sqr", "min", "max"):
+                    assert operation[field] == values[field]
+                for field in ("mean", "variance", "stddev"):
+                    assert math.isclose(
+                        operation[field],
+                        values[field],
+                        rel_tol=1.0e-12,
+                        abs_tol=1.0e-12,
+                    )
 
         for entry in selection_cases:
             expected_ids = entry["selected_enqueue_ordinals"]
@@ -240,7 +354,9 @@ def test_windows_integration_case():
 
             standalone_case_rows = standalone_case["trace_rows"]
             assert standalone_case["trace_exists"]
-            assert [int(row["Dispatch_Id"]) for row in standalone_case_rows] == expected_ids
+            assert [
+                int(row["Dispatch_Id"]) for row in standalone_case_rows
+            ] == expected_ids
             assert base_kernel_names(standalone_case_rows) == expected_names
 
             composed_case_rows = composed_case["trace_rows"]
@@ -251,7 +367,9 @@ def test_windows_integration_case():
             else:
                 assert not composed_case["trace_exists"]
                 assert not composed_case["json_exists"]
-            assert [int(row["Dispatch_Id"]) for row in composed_case_rows] == expected_ids
+            assert [
+                int(row["Dispatch_Id"]) for row in composed_case_rows
+            ] == expected_ids
             assert base_kernel_names(composed_case_rows) == expected_names
             assert len(composed_counter_rows) == 3 * len(expected_ids)
             assert {int(row["Dispatch_Id"]) for row in composed_counter_rows} == set(
@@ -261,6 +379,18 @@ def test_windows_integration_case():
                 record["dispatch_info"]["dispatch_id"]
                 for record in composed_case["json_kernel_records"]
             ] == expected_ids
+
+            expect_stats = entry["stats_requested"] and bool(expected_ids)
+            assert standalone_case["stats_exists"] == expect_stats
+            assert composed_case["stats_exists"] == expect_stats
+            if expect_stats:
+                validate_stats_csv(standalone_case_rows, standalone_case["stats_rows"])
+                validate_stats_csv(composed_case_rows, composed_case["stats_rows"])
+                validate_json_summary(composed_case_rows, composed_case["json_summary"])
+            else:
+                assert standalone_case["stats_rows"] == []
+                assert composed_case["stats_rows"] == []
+                assert composed_case["json_summary"] == []
 
             if entry["name_mode"] == "mangled":
                 assert all(
@@ -321,15 +451,13 @@ def test_windows_integration_case():
 
         json_records = composed["json_kernel_records"]
         assert len(json_records) == 6
-        assert [record["dispatch_info"]["dispatch_id"] for record in json_records] == list(
-            range(1, 7)
-        )
+        assert [
+            record["dispatch_info"]["dispatch_id"] for record in json_records
+        ] == list(range(1, 7))
         for record in json_records:
             trace = trace_by_dispatch[record["dispatch_info"]["dispatch_id"]]
             assert record["thread_id"] == int(trace["Thread_Id"])
-            assert record["correlation_id"]["internal"] == int(
-                trace["Correlation_Id"]
-            )
+            assert record["correlation_id"]["internal"] == int(trace["Correlation_Id"])
             assert record["start_timestamp"] == int(trace["Start_Timestamp"])
             assert record["end_timestamp"] == int(trace["End_Timestamp"])
             assert record["dispatch_info"]["queue_id"]["handle"] == int(
@@ -357,8 +485,7 @@ def test_windows_integration_case():
         assert all(int(row["Thread_Id"]) > 0 for row in rows)
         assert all(int(row["Status"]) == 0 for row in rows)
         assert all(
-            int(row["End_Timestamp"]) >= int(row["Start_Timestamp"])
-            for row in rows
+            int(row["End_Timestamp"]) >= int(row["Start_Timestamp"]) for row in rows
         )
     elif case == "hip-graph":
         assert data["returncode"] == 0

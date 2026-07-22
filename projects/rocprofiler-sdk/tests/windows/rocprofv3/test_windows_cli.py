@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import ctypes
+import datetime
 import importlib.util
 import json
 import os
@@ -22,13 +23,18 @@ RESOURCE_METADATA = {
 }
 
 
-def load_rocprofv3():
+def load_frontend():
     script = Path(os.environ["ROCPROFV3_TEST_SCRIPT"]).resolve()
     spec = importlib.util.spec_from_file_location("rocprofv3_windows_unit", script)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"could not import rocprofv3 from {script}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+def load_rocprofv3():
+    module = load_frontend()
     return getattr(module, "_windows_backend", module)
 
 
@@ -50,6 +56,11 @@ def load_availability():
 
 
 @pytest.fixture(scope="module")
+def frontend():
+    return load_frontend()
+
+
+@pytest.fixture(scope="module")
 def rocprofv3():
     return load_rocprofv3()
 
@@ -59,6 +70,119 @@ def require_fatal(capsys, callback, pattern: str):
         callback()
     assert error.value.code == 1
     assert pattern in capsys.readouterr().err
+
+
+def test_output_path_contract_resolves_all_static_keys(frontend):
+    environment = {
+        "CUSTOM_RANK": "3",
+        "CUSTOM_SIZE": "8",
+        "SLURM_JOB_ID": "42",
+        "ROCPROF_TIME_FORMAT": "%F_%H.%M.%S",
+        "ROCPROF_DATE_FORMAT": "%Y%m%d",
+    }
+    launched = datetime.datetime(2026, 7, 22, 13, 14, 15)
+    command = [r"C:\Program Files\target.exe", " ./arg/one ", "two"]
+    expected = {
+        "argv": "C__Program Files_target.exe_arg_one_two",
+        "argt": "target.exearg_one_two",
+        "args": "arg_one_two",
+        "tag": "target.exe",
+        "arg0": "C__Program Files_target.exe",
+        "arg1": "arg_one",
+        "arg2": "two",
+        "hostname": frontend.socket.gethostname(),
+        "pid": "%pid%",
+        "ppid": str(os.getpid()),
+        "pgid": "%pid%",
+        "psid": "%pid%",
+        "psize": "1",
+        "job": "42",
+        "rank": "3",
+        "size": "8",
+        "nid": "3",
+        "cwd": os.getcwd(),
+        "launch_date": "20260722",
+        "launch_time": "2026-07-22_13.14.15",
+    }
+    for key, value in expected.items():
+        args = SimpleNamespace(
+            output_file=f"%{key}%|{{{key}}}",
+            output_directory=None,
+            mpi_world_rank_variable="CUSTOM_RANK",
+            mpi_world_size_variable="CUSTOM_SIZE",
+        )
+        frontend.normalize_output_path_keys(
+            command, args, environment=environment, launch_time=launched
+        )
+        assert args.output_file == f"{value}|{value}"
+
+    args = SimpleNamespace(
+        output_file="%h|%p|%j|%r|%s",
+        output_directory=None,
+        mpi_world_rank_variable="CUSTOM_RANK",
+        mpi_world_size_variable="CUSTOM_SIZE",
+    )
+    frontend.normalize_output_path_keys(
+        command, args, environment=environment, launch_time=launched
+    )
+    assert args.output_file == (
+        f"{frontend.socket.gethostname()}|%pid%|42|3|8"
+    )
+
+
+def test_output_path_contract_resolves_environment_and_missing_arguments(frontend):
+    environment = {
+        "NESTED": "%tag% nested/path",
+        "CUSTOM_RANK": "0",
+        "CUSTOM_SIZE": "1",
+    }
+    args = SimpleNamespace(
+        output_file=(
+            "%env{NESTED}%|$ENV{NESTED}|%q{NESTED}|"
+            "before_%arg9%-after|before_{arg10}/after"
+        ),
+        output_directory="directory with spaces/%pid%",
+        mpi_world_rank_variable="CUSTOM_RANK",
+        mpi_world_size_variable="CUSTOM_SIZE",
+    )
+    frontend.normalize_output_path_keys(
+        [r"C:\tools\target.exe"],
+        args,
+        environment=environment,
+        launch_time=datetime.datetime(2026, 7, 22),
+    )
+    assert args.output_file == (
+        "target.exe_nested_path|target.exe_nested_path|target.exe_nested_path|"
+        "before_after|before_after"
+    )
+    assert args.output_directory == "directory with spaces/%pid%"
+
+
+def test_output_path_nid_uses_process_without_mpi(frontend):
+    args = SimpleNamespace(
+        output_file="%nid%|{nid}",
+        output_directory=None,
+        mpi_world_rank_variable=None,
+        mpi_world_size_variable=None,
+    )
+    frontend.normalize_output_path_keys(
+        [r"C:\tools\target.exe"],
+        args,
+        environment={},
+        launch_time=datetime.datetime(2026, 7, 22),
+    )
+    assert args.output_file == "%pid%|%pid%"
+
+    args.output_file = "%nid%|{nid}"
+    args.mpi_world_rank_variable = "CUSTOM_RANK"
+    args.mpi_world_size_variable = "CUSTOM_SIZE"
+    frontend.normalize_output_path_keys(
+        [r"C:\tools\target.exe"],
+        args,
+        environment={"CUSTOM_RANK": "0", "CUSTOM_SIZE": "1"},
+        launch_time=datetime.datetime(2026, 7, 22),
+    )
+    assert args.output_file == "0|0"
 
 
 def test_kernel_trace_conversion_normalizes_agent_identity(rocprofv3, tmp_path, capsys):
@@ -578,6 +702,44 @@ def test_sdk_counter_environment_uses_common_contract(rocprofv3, tmp_path, monke
         "profile-4242_results.json",
         "profile-4242_results.db",
     ]
+    nested_args = SimpleNamespace(
+        output_directory=str(tmp_path / "directory with spaces" / "%pid%"),
+        output_file="nested prefix/%pid%",
+        sub_directory=None,
+    )
+    expected_base = (
+        tmp_path / "directory with spaces" / "4242" / "nested prefix" / "4242"
+    )
+    assert rocprofv3.windows_kernel_output_path(nested_args, 4242) == (
+        expected_base.with_name("4242_kernel_trace.csv")
+    )
+    assert rocprofv3.windows_kernel_stats_output_path(nested_args, 4242) == (
+        expected_base.with_name("4242_kernel_stats.csv")
+    )
+    api_paths = rocprofv3.windows_api_trace_output_paths(
+        nested_args, 4242, ("hip_api", "marker")
+    )
+    assert api_paths == {
+        "hip_api": expected_base.with_name("4242_hip_api_trace.csv"),
+        "marker": expected_base.with_name("4242_marker_trace.csv"),
+    }
+    nested_outputs = rocprofv3.windows_sdk_output_paths(
+        nested_args.output_directory,
+        nested_args.output_file,
+        ["csv", "json"],
+        4242,
+        kernel_trace=True,
+        stats=True,
+    )
+    assert all(path.parent == expected_base.parent for path in nested_outputs)
+    assert [path.name for path in nested_outputs] == [
+        "4242_agent_info.csv",
+        "4242_counter_collection.csv",
+        "4242_kernel_trace.csv",
+        "4242_kernel_stats.csv",
+        "4242_results.json",
+    ]
+
     assert rocprofv3.windows_rocpd_sdk_formats(["rocpd"]) == ["json"]
     assert rocprofv3.windows_rocpd_sdk_formats(["csv", "rocpd"]) == [
         "csv",

@@ -26,6 +26,8 @@ import os
 import sys
 import re
 import argparse
+import datetime
+import socket
 import textwrap
 import subprocess
 from pathlib import Path
@@ -1536,6 +1538,230 @@ def int_auto(num_str):
         )
 
 
+OUTPUT_PATH_ENV_PATTERN = re.compile(
+    r"%(?:env|ENV)\{([A-Z0-9_]+)\}%"
+    r"|\$(?:env|ENV)\{([A-Z0-9_]+)\}"
+    r"|%q\{([A-Z0-9_]+)\}"
+)
+OUTPUT_PATH_MISSING_ARG_PATTERN = re.compile(
+    r"(?:%arg[0-9]+%|\{arg[0-9]+\})[-/_]*"
+)
+OUTPUT_PATH_MPI_SIZE_VARIABLES = (
+    "MPI_SIZE",
+    "MPI_LOCALNRANKS",
+    "MPI_NRANKS",
+    "OMPI_COMM_WORLD_SIZE",
+    "MV2_COMM_WORLD_SIZE",
+    "PMI_SIZE",
+    "SLURM_NTASKS",
+    "PBS_O_TASKNUM",
+)
+OUTPUT_PATH_MPI_RANK_VARIABLES = (
+    "MPI_RANK",
+    "MPI_LOCALRANKID",
+    "MPI_RANKID",
+    "OMPI_COMM_WORLD_RANK",
+    "MV2_COMM_WORLD_RANK",
+    "PMI_RANK",
+    "SLURM_PROCID",
+    "PBS_NODENUM",
+)
+
+
+def _output_path_integer(environment, variable, default):
+    value = environment.get(variable)
+    if value in (None, ""):
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        fatal_error(
+            "Output path environment variable {} must be an integer (got: {})",
+            variable,
+            value,
+        )
+
+
+def _output_path_mpi_value(environment, custom_variable, variables, default):
+    if custom_variable:
+        if custom_variable not in environment:
+            fatal_error(
+                "Environment variable is configured as '{}' but is not set",
+                custom_variable,
+            )
+        return _output_path_integer(environment, custom_variable, default)
+    result = default
+    for variable in variables:
+        result = _output_path_integer(environment, variable, result)
+    return result
+
+
+def _output_path_argument(value, windows):
+    value = str(value).strip().replace("/", "_")
+    if windows:
+        for character in ('\\', ':', '*', '?', '"', '<', '>', '|'):
+            value = value.replace(character, "_")
+    while value.startswith("."):
+        value = value[1:]
+    while value.startswith("_"):
+        value = value[1:]
+    return value
+
+
+def _output_path_environment_value(value, windows):
+    characters = "\t /"
+    if windows:
+        characters += "\\"
+    value = str(value)
+    for character in characters:
+        while value.startswith(character):
+            value = value[1:]
+        value = value.replace(character, "_")
+    if windows:
+        for character in (':', '*', '?', '"', '<', '>', '|'):
+            value = value.replace(character, "_")
+    return value
+
+
+def _output_path_strftime(value, format_value):
+    # MSVC's strftime does not implement the POSIX %F shorthand.
+    return value.strftime(format_value.replace("%F", "%Y-%m-%d"))
+
+
+def _replace_output_path_keys(value, values, environment, windows):
+    result = str(value)
+    seen = set()
+    for _ in range(64):
+        if result in seen:
+            fatal_error("Recursive output path expansion contains a cycle: {}", result)
+        seen.add(result)
+        previous = result
+
+        for key, replacement in values.items():
+            result = result.replace(f"%{key}%", replacement)
+            result = result.replace(f"{{{key}}}", replacement)
+        for key, replacement in (
+            ("%h", values["hostname"]),
+            ("%p", values["pid"]),
+            ("%j", values["job"]),
+            ("%r", values["rank"]),
+            ("%s", values["size"]),
+        ):
+            result = re.sub(
+                re.escape(key) + r"(?![A-Za-z0-9_])", replacement, result
+            )
+
+        def replace_environment(match):
+            variable = next(group for group in match.groups() if group is not None)
+            return _output_path_environment_value(
+                environment.get(variable, ""), windows
+            )
+
+        result = OUTPUT_PATH_ENV_PATTERN.sub(replace_environment, result)
+        result = OUTPUT_PATH_MISSING_ARG_PATTERN.sub("", result)
+        if result == previous:
+            return result
+    fatal_error("Output path expansion exceeded the recursion limit: {}", value)
+
+
+def normalize_output_path_keys(app_args, args, environment=None, launch_time=None):
+    environment = dict(os.environ if environment is None else environment)
+    windows = os.name == "nt"
+    command = [_output_path_argument(value, windows) for value in app_args]
+    tag = Path(str(app_args[0])).name if app_args else ""
+    if windows:
+        tag = _output_path_argument(tag, windows)
+    argv = "_".join(command)
+    arguments = "_".join(command[1:])
+    argument_tag = tag
+    if len(command) > 1:
+        argument_tag += command[1]
+        if len(command) > 2:
+            argument_tag += "_" + "_".join(command[2:])
+
+    custom_size = getattr(args, "mpi_world_size_variable", None)
+    custom_rank = getattr(args, "mpi_world_rank_variable", None)
+    if bool(custom_size) != bool(custom_rank):
+        fatal_error(
+            "When using custom MPI environment variables, both "
+            "--mpi-world-rank-variable and --mpi-world-size-variable must be specified"
+        )
+    mpi_size = _output_path_mpi_value(
+        environment, custom_size, OUTPUT_PATH_MPI_SIZE_VARIABLES, 0
+    )
+    mpi_rank = _output_path_mpi_value(
+        environment, custom_rank, OUTPUT_PATH_MPI_RANK_VARIABLES, -1
+    )
+    size = str(mpi_size if mpi_size > 0 else 1)
+    rank = str(mpi_rank if mpi_rank > 0 else 0)
+    slurm_rank = str(environment.get("SLURM_PROCID", rank))
+    job = str(environment.get("SLURM_JOB_ID", "0"))
+    try:
+        has_slurm_rank = int(environment.get("SLURM_PROCID", "-1")) >= 0
+    except ValueError:
+        fatal_error(
+            "Output path environment variable SLURM_PROCID must be an integer (got: {})",
+            environment.get("SLURM_PROCID"),
+        )
+    if has_slurm_rank:
+        nid = slurm_rank
+    elif mpi_size > 0 or mpi_rank >= 0:
+        nid = rank
+    else:
+        nid = "%pid%"
+
+    launched = launch_time or datetime.datetime.now()
+    time_format = environment.get("ROCPROF_TIME_FORMAT", "%F_%H.%M")
+    date_format = environment.get("ROCPROF_DATE_FORMAT", "%F")
+    values = {
+        "argv": argv,
+        "argt": argument_tag,
+        "args": arguments,
+        "tag": tag,
+        "hostname": socket.gethostname(),
+        "job": job,
+        "rank": slurm_rank,
+        "size": size,
+        "nid": nid,
+        "cwd": os.getcwd(),
+        "launch_date": _output_path_strftime(launched, date_format),
+        "launch_time": _output_path_strftime(launched, time_format),
+    }
+    values.update({f"arg{index}": value for index, value in enumerate(command)})
+
+    if windows:
+        # Windows has no POSIX process group/session identifiers for this launch.
+        # Use the target PID as the stable process-local provider for all three.
+        values.update(
+            {
+                "pid": "%pid%",
+                "ppid": str(os.getpid()),
+                "pgid": "%pid%",
+                "psid": "%pid%",
+                "psize": "1",
+            }
+        )
+    else:
+        values.update(
+            {
+                "pid": "%pid%",
+                "ppid": "%ppid%",
+                "pgid": "%pgid%",
+                "psid": "%psid%",
+                "psize": "%psize%",
+            }
+        )
+
+    for name in ("output_file", "output_directory"):
+        current = getattr(args, name, None)
+        if current is not None:
+            setattr(
+                args,
+                name,
+                _replace_output_path_keys(current, values, environment, windows),
+            )
+
+
 EFFECTIVE_TRACE_OPTIONS = (
     "runtime_trace",
     "sys_trace",
@@ -1655,6 +1881,7 @@ if os.name == "nt":
 
 
 def run(app_args, args, **kwargs):
+    normalize_output_path_keys(app_args, args)
     trace_request = resolve_effective_trace_request(args)
     if os.name == "nt":
         return _windows_backend.run_windows(

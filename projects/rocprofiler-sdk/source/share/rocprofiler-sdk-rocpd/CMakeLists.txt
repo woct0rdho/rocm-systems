@@ -7,6 +7,10 @@ set(rocpd_schemas data_views.sql rocpd_indexes.sql rocpd_metadata.sql rocpd_tabl
 
 function(rocpd_configure_schema_files)
     cmake_parse_arguments(_SCHEMA "" "VERSION" "FILES" ${ARGN})
+    set(_SCHEMA_COMPONENT rocpd)
+    if(WIN32 AND ROCPROFILER_BUILD_WINDOWS_MINIMAL)
+        set(_SCHEMA_COMPONENT tools)
+    endif()
     cmake_path(GET CMAKE_CURRENT_SOURCE_DIR FILENAME _SCHEMA_DIRNAME)
     if(_SCHEMA_VERSION)
         if(NOT _SCHEMA_DIRNAME STREQUAL _SCHEMA_VERSION)
@@ -36,7 +40,7 @@ function(rocpd_configure_schema_files)
         install(
             FILES ${_BINARY_DEST}/${_FILE}
             DESTINATION ${_INSTALL_DEST}
-            COMPONENT rocpd)
+            COMPONENT ${_SCHEMA_COMPONENT})
     endforeach()
 endfunction()
 

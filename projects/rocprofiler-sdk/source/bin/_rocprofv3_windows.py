@@ -34,6 +34,7 @@ import sys
 import time
 import uuid
 
+from _rocprofv3_rocpd import RocpdConversionError, convert_json_to_rocpd
 from _rocprofv3_windows_job import SuspendedWindowsJob, WindowsJobError
 
 
@@ -1146,7 +1147,23 @@ def windows_sdk_output_paths(
             paths.append(base.with_name(f"{base.name}_kernel_stats.csv"))
     if "json" in formats:
         paths.append(base.with_name(f"{base.name}_results.json"))
+    if "rocpd" in formats:
+        paths.append(base.with_name(f"{base.name}_results.db"))
     return paths
+
+
+def windows_rocpd_sdk_formats(formats):
+    sdk_formats = [value for value in formats if value != "rocpd"]
+    if "rocpd" in formats and "json" not in sdk_formats:
+        sdk_formats.append("json")
+    return list(dict.fromkeys(sdk_formats))
+
+
+def windows_generate_rocpd(json_path, database_path, command):
+    try:
+        return convert_json_to_rocpd(json_path, database_path, command)
+    except RocpdConversionError as error:
+        fatal_error("rocpd_conversion_failed: {}", error)
 
 
 def windows_sdk_counter_values(args, composed=False):
@@ -1234,13 +1251,14 @@ def windows_configure_sdk_counter_environment(
 def run_windows_sdk_pmc(app_args, args, pass_id=None):
     if not app_args:
         fatal_error("--pmc requires a target application on Windows")
-    formats = list(getattr(args, "output_format", None) or ["csv"])
-    unsupported = [value for value in formats if value not in ("csv", "json")]
+    formats = list(dict.fromkeys(getattr(args, "output_format", None) or ["csv"]))
+    unsupported = [value for value in formats if value not in ("csv", "json", "rocpd")]
     if unsupported:
         fatal_error(
-            "Windows counter collection supports CSV and JSON output only (requested: {})",
+            "Windows counter collection supports CSV, JSON, and ROCpd output (requested: {})",
             ", ".join(unsupported),
         )
+    sdk_formats = windows_rocpd_sdk_formats(formats)
 
     counters = windows_sdk_counter_values(args)
 
@@ -1265,7 +1283,7 @@ def run_windows_sdk_pmc(app_args, args, pass_id=None):
         environment,
         args,
         counters,
-        formats,
+        sdk_formats,
         output_directory,
         getattr(args, "output_file", None),
         sdk_path,
@@ -1275,11 +1293,24 @@ def run_windows_sdk_pmc(app_args, args, pass_id=None):
     result_path = windows_sdk_result_path(output_directory)
     environment["ROCPROFILER_WINDOWS_RESULT_FILE"] = str(result_path)
     expected_outputs = []
+    requested_outputs = []
     reservations = []
+    rocpd_json_path = None
+    rocpd_database_path = None
+    remove_internal_json = "rocpd" in formats and "json" not in formats
 
     def prepare(process_id):
-        nonlocal expected_outputs, reservations
+        nonlocal expected_outputs, requested_outputs, reservations
+        nonlocal rocpd_json_path, rocpd_database_path
         expected_outputs = windows_sdk_output_paths(
+            output_directory,
+            output_file,
+            sdk_formats,
+            process_id,
+            kernel_trace=bool(getattr(args, "kernel_trace", False)),
+            stats=bool(getattr(args, "stats", False)),
+        )
+        requested_outputs = windows_sdk_output_paths(
             output_directory,
             output_file,
             formats,
@@ -1287,14 +1318,38 @@ def run_windows_sdk_pmc(app_args, args, pass_id=None):
             kernel_trace=bool(getattr(args, "kernel_trace", False)),
             stats=bool(getattr(args, "stats", False)),
         )
-        reservations = windows_reserve_output_paths(expected_outputs)
+        if "rocpd" in formats:
+            rocpd_json_path = windows_sdk_output_paths(
+                output_directory, output_file, ["json"], process_id
+            )[0]
+            rocpd_database_path = windows_sdk_output_paths(
+                output_directory, output_file, ["rocpd"], process_id
+            )[0]
+        reservations = windows_reserve_output_paths(
+            list(dict.fromkeys([*expected_outputs, *requested_outputs]))
+        )
 
     try:
         target_status = windows_launch_in_job(
             command, environment, os.getcwd(), prepare
         )["exit_code"]
-        return windows_sdk_result_status(result_path, target_status, expected_outputs)
+        return_status = windows_sdk_result_status(
+            result_path, target_status, expected_outputs
+        )
+        if rocpd_json_path is not None and rocpd_json_path.is_file():
+            counts = windows_generate_rocpd(
+                rocpd_json_path, rocpd_database_path, command
+            )
+            print(
+                "[rocprofv3] Windows ROCpd: "
+                f"dispatches={counts['dispatches']} counters={counts['counters']} "
+                f"kernel_symbols={counts['kernel_symbols']} database={rocpd_database_path}",
+                flush=True,
+            )
+        return return_status
     finally:
+        if remove_internal_json and rocpd_json_path is not None:
+            rocpd_json_path.unlink(missing_ok=True)
         result_path.unlink(missing_ok=True)
         windows_release_output_reservations(reservations)
 

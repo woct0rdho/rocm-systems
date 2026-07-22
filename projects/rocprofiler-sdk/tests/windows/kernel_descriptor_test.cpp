@@ -2,19 +2,18 @@
 //
 // Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
-#include "lib/rocprofiler-sdk/code_object/kernel_descriptor.hpp"
+#include "lib/rocprofiler-sdk/code_object/kernel_descriptor_cases.hpp"
 
-#include <cstdint>
 #include <iostream>
-#include <limits>
+#include <string_view>
 
 namespace
 {
 bool
-expect(bool condition, const char* message)
+expect(bool condition, std::string_view test_case, std::string_view field)
 {
     if(condition) return true;
-    std::cerr << message << '\n';
+    std::cerr << test_case << ": " << field << " mismatch\n";
     return false;
 }
 }  // namespace
@@ -24,38 +23,33 @@ main()
 {
     using namespace rocprofiler::code_object;
 
-    auto gfx1151                                = kernel_descriptor_t{};
-    gfx1151.kernel_code_entry_byte_offset       = 256;
-    gfx1151.compute_pgm_rsrc1                    = 4;
-    gfx1151.kernel_code_properties               = uint16_t{1} << 10;
-    const auto gfx1151_data                      = decode_kernel_descriptor("gfx1151", gfx1151);
-
-    auto gfx90a                   = kernel_descriptor_t{};
-    gfx90a.compute_pgm_rsrc3      = 7;
-    gfx90a.compute_pgm_rsrc1      = 5 | (6 << 6);
-    const auto gfx90a_data        = decode_kernel_descriptor("gfx90a", gfx90a);
-
     auto valid = true;
-    valid &= expect(gfx1151_data.has_value(), "gfx1151 descriptor did not decode");
-    valid &= expect(gfx1151_data && gfx1151_data->arch_vgpr_count == 40,
-                    "gfx1151 architecture VGPR count mismatch");
-    valid &= expect(gfx1151_data && gfx1151_data->accum_vgpr_count == 0,
-                    "gfx1151 accumulated VGPR count mismatch");
-    valid &= expect(gfx1151_data && gfx1151_data->sgpr_count == 128,
-                    "gfx1151 SGPR count mismatch");
-    valid &= expect(gfx90a_data.has_value(), "gfx90a descriptor did not decode");
-    valid &= expect(gfx90a_data && gfx90a_data->arch_vgpr_count == 32,
-                    "gfx90a architecture VGPR count mismatch");
-    valid &= expect(gfx90a_data && gfx90a_data->accum_vgpr_count == 16,
-                    "gfx90a accumulated VGPR count mismatch");
-    valid &= expect(gfx90a_data && gfx90a_data->sgpr_count == 64,
-                    "gfx90a SGPR count mismatch");
-    valid &= expect(!decode_kernel_descriptor("invalid", gfx1151),
-                    "invalid architecture unexpectedly decoded");
-    valid &= expect(kernel_address(0x1000, -0x80) == 0x0f80,
-                    "negative kernel entry offset mismatch");
-    valid &= expect(!kernel_address(std::numeric_limits<uint64_t>::max() - 4, 8),
-                    "overflowing kernel address unexpectedly succeeded");
+    for(const auto& test_case : kernel_descriptor_cases())
+    {
+        const auto decoded = decode_kernel_descriptor(test_case.architecture, test_case.descriptor);
+        valid &= expect(decoded.has_value() == test_case.valid, test_case.name, "decode result");
+        if(!decoded) continue;
+
+        valid &= expect(decoded->arch_vgpr_count == test_case.expected.arch_vgpr_count,
+                        test_case.name,
+                        "architecture VGPR count");
+        valid &= expect(decoded->accum_vgpr_count == test_case.expected.accum_vgpr_count,
+                        test_case.name,
+                        "accumulated VGPR count");
+        valid &= expect(decoded->sgpr_count == test_case.expected.sgpr_count,
+                        test_case.name,
+                        "SGPR count");
+        valid &= expect(decoded->kernel_code_entry_byte_offset ==
+                            test_case.expected.kernel_code_entry_byte_offset,
+                        test_case.name,
+                        "kernel entry offset");
+    }
+
+    for(const auto& test_case : kernel_address_cases())
+    {
+        const auto address = kernel_address(test_case.kernel_object, test_case.entry_offset);
+        valid &= expect(address == test_case.expected, test_case.name, "kernel address");
+    }
 
     return valid ? 0 : 1;
 }

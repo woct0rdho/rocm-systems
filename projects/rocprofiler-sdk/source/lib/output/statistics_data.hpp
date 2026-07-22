@@ -233,10 +233,28 @@ using stats_map_t       = std::map<std::string_view, stats_data_t>;
 using stats_pair_t      = std::pair<std::string_view, stats_data_t>;
 using stats_entry_vec_t = std::vector<stats_pair_t>;
 
+namespace detail
+{
+template <typename ArchiveT, typename = void>
+struct has_structured_archive_nodes : std::false_type
+{};
+
+template <typename ArchiveT>
+struct has_structured_archive_nodes<
+    ArchiveT,
+    std::void_t<decltype(std::declval<ArchiveT&>().setNextName("operations")),
+                decltype(std::declval<ArchiveT&>().startNode()),
+                decltype(std::declval<ArchiveT&>().makeArray()),
+                decltype(std::declval<ArchiveT&>().finishNode())>> : std::true_type
+{};
+}  // namespace detail
+
 inline bool
 default_stats_sorter(const stats_pair_t& lhs, const stats_pair_t& rhs)
 {
-    return (lhs.second.get_sum() > rhs.second.get_sum());
+    if(lhs.second.get_sum() != rhs.second.get_sum())
+        return (lhs.second.get_sum() > rhs.second.get_sum());
+    return (lhs.first < rhs.first);
 }
 
 struct stats_entry_t
@@ -266,10 +284,36 @@ struct stats_entry_t
     void serialize(ArchiveT& ar, const unsigned int) const
     {
         total.serialize(ar, 0);
-        auto entries_map = std::map<std::string, stats_data_t>{};
-        for(const auto& itr : entries)
-            entries_map.emplace(std::string{itr.first}, itr.second);
-        ar(cereal::make_nvp("operations", entries_map));
+        if constexpr(detail::has_structured_archive_nodes<ArchiveT>::value)
+        {
+            ar.setNextName("operations");
+            ar.startNode();
+            ar.makeArray();
+            auto first = true;
+            for(const auto& [name, value] : entries)
+            {
+                ar.startNode();
+                ar(cereal::make_nvp("key", std::string{name}));
+                ar.setNextName("value");
+                ar.startNode();
+                if(first)
+                {
+                    ar(cereal::make_nvp("cereal_class_version", uint32_t{0}));
+                    first = false;
+                }
+                value.serialize(ar, 0);
+                ar.finishNode();
+                ar.finishNode();
+            }
+            ar.finishNode();
+        }
+        else
+        {
+            auto entries_map = std::map<std::string, stats_data_t>{};
+            for(const auto& [name, value] : entries)
+                entries_map.emplace(std::string{name}, value);
+            ar(cereal::make_nvp("operations", entries_map));
+        }
     }
 };
 }  // namespace tool

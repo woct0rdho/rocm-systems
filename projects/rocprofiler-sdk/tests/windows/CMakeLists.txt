@@ -17,6 +17,21 @@ set_tests_properties(
         ENVIRONMENT
             "ROCPROFV3_TEST_SCRIPT=${PROJECT_SOURCE_DIR}/source/bin/rocprofv3.py;ROCPD_SCHEMA_PATH=${PROJECT_BINARY_DIR}/share/rocprofiler-sdk-rocpd;PYTHONDONTWRITEBYTECODE=1")
 
+add_test(
+    NAME rocprofiler-sdk.windows.output-readers
+    COMMAND
+        Python3::Interpreter ${_windows_pytest_runner}
+        --owner-root ${PROJECT_BINARY_DIR}
+        --basetemp ${PROJECT_BINARY_DIR}/pytest-output-readers
+        -- ${CMAKE_CURRENT_LIST_DIR}/common/test_output_readers.py)
+set_tests_properties(
+    rocprofiler-sdk.windows.output-readers
+    PROPERTIES
+        LABELS "windows;unit;cpu-only;output"
+        TIMEOUT 30
+        ENVIRONMENT
+            "PYTHONPATH=${CMAKE_CURRENT_LIST_DIR}/common;PYTHONDONTWRITEBYTECODE=1")
+
 set(_dispatch_analysis_test_directory ${CMAKE_CURRENT_LIST_DIR}/../dispatch-analysis)
 add_test(
     NAME rocprofiler-sdk.windows.dispatch-analysis-contract

@@ -52,6 +52,18 @@ struct Capability {
   uint32_t max_pm4_dwords = 0;
 };
 
+struct DispatchTimestampTargets {
+  uint64_t* start = nullptr;
+  uint64_t* end = nullptr;
+};
+
+constexpr DispatchTimestampTargets SelectDispatchTimestampTargets(
+    bool profiling_enabled, uint64_t* start, uint64_t* end) {
+  return profiling_enabled && start != nullptr && end != nullptr
+             ? DispatchTimestampTargets{start, end}
+             : DispatchTimestampTargets{};
+}
+
 constexpr Capability DetectCapability(uint32_t major, uint32_t minor, uint32_t stepping,
                                       uint32_t frame_bytes, bool compute_submission_supported) {
   // Native WDDM profiling is qualified only for gfx1151. Additional targets must

@@ -29,6 +29,8 @@ rocprofiler_client_id_t*      client_id       = nullptr;
 std::atomic<uint64_t>         record_count{0};
 std::atomic<uint64_t>         value_record_count{0};
 std::atomic<uint64_t>         sq_waves_value{0};
+std::atomic<uint64_t>         timed_record_count{0};
+std::atomic<bool>             invalid_timing{false};
 std::mutex                    profile_mutex = {};
 std::unordered_map<uint64_t, rocprofiler_counter_config_id_t> profile_cache = {};
 std::vector<rocprofiler_counter_config_id_t> group_profiles = {};
@@ -103,6 +105,15 @@ check(rocprofiler_status_t status, const char* operation)
                  operation,
                  rocprofiler_get_status_string(status));
     return false;
+}
+
+void
+observe_timing(rocprofiler_timestamp_t start, rocprofiler_timestamp_t end)
+{
+    if(start == 0 || end <= start)
+        invalid_timing.store(true);
+    else
+        timed_record_count.fetch_add(1);
 }
 
 int
@@ -335,6 +346,7 @@ record_callback(rocprofiler_dispatch_counting_service_data_t data,
                 rocprofiler_user_data_t user_data,
                 void*)
 {
+    observe_timing(data.start_timestamp, data.end_timestamp);
     for(size_t index = 0; index < count; ++index)
         sq_waves_value.fetch_add(static_cast<uint64_t>(records[index].counter_value));
     if(use_grouped_service() && user_data.value >= 1 && user_data.value <= 2)
@@ -411,6 +423,7 @@ buffer_callback(rocprofiler_context_id_t,
             const auto* record = static_cast<rocprofiler_dispatch_counting_service_record_t*>(
                 header->payload);
             if(!record) continue;
+            observe_timing(record->start_timestamp, record->end_timestamp);
             record_count.fetch_add(1);
             std::printf("buffered_dispatch=%llu records=%llu\n",
                         static_cast<unsigned long long>(record->dispatch_info.dispatch_id),
@@ -675,6 +688,8 @@ main()
                 queue_ids.emplace(dispatch.data.dispatch_info.queue_id.handle);
                 enqueue_by_dispatch.emplace(dispatch_id, dispatch);
                 identity_passed &= dispatch_id != 0;
+                identity_passed &= dispatch.data.start_timestamp == 0;
+                identity_passed &= dispatch.data.end_timestamp == 0;
                 identity_passed &= dispatch.data.dispatch_info.kernel_id != 0;
                 identity_passed &= dispatch.data.correlation_id.internal != 0;
                 identity_passed &= dispatch.data.correlation_id.external.value ==
@@ -697,6 +712,8 @@ main()
                 identity_passed &= pos != enqueue_by_dispatch.end();
                 if(pos == enqueue_by_dispatch.end()) continue;
                 identity_passed &= dispatch.user_data.value == dispatch_id;
+                identity_passed &= dispatch.data.start_timestamp > 0;
+                identity_passed &= dispatch.data.end_timestamp > dispatch.data.start_timestamp;
                 identity_passed &= dispatch.data.dispatch_info.queue_id.handle ==
                                    pos->second.data.dispatch_info.queue_id.handle;
                 identity_passed &= dispatch.data.dispatch_info.kernel_id ==
@@ -720,16 +737,21 @@ main()
     const auto value         = sq_waves_value.load();
     const auto expected_value_records = use_grouped_service() ? uint64_t{368}
                                                                : expected_records * 20;
+    const auto timing_records = timed_record_count.load();
     const auto passed = records == expected_records && value_records == expected_value_records &&
-                        value > 0 && identity_passed && reversed_completion && groups_passed;
+                        value > 0 && timing_records == expected_records &&
+                        !invalid_timing.load() && identity_passed && reversed_completion &&
+                        groups_passed;
     std::printf("windows_dispatch_counting_service=%s records=%llu SQ_WAVES_total=%llu "
-                "value_records=%llu mode=%s identities=%s reversed=%s queues=%zu groups=%zu "
+                "value_records=%llu timed_records=%llu mode=%s identities=%s reversed=%s "
+                "queues=%zu groups=%zu "
                 "group_records=%llu,%llu group_values=%llu,%llu group_counters=%zu/%zu,%zu/%zu "
                 "replays=%u\n",
                 passed ? "passed" : "failed",
                 static_cast<unsigned long long>(records),
                 static_cast<unsigned long long>(value),
                 static_cast<unsigned long long>(value_records),
+                static_cast<unsigned long long>(timing_records),
                 test_mode().c_str(),
                 identity_passed ? "passed" : "failed",
                 reversed_completion ? "passed" : "failed",

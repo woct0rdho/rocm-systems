@@ -93,3 +93,27 @@ def test_existing_output_is_rejected_before_launch(tmp_path, selector, output_na
     assert "output already exists" in result.stdout
     assert output.read_text(encoding="utf-8") == "retained"
     assert not marker.exists()
+
+
+def test_existing_kernel_stats_output_is_rejected_before_launch(tmp_path):
+    output = tmp_path / "retained_kernel_stats.csv"
+    output.write_text("retained", encoding="utf-8")
+    marker = tmp_path / "target-launched.txt"
+    target = Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe"
+    result = run_cli(
+        "--kernel-trace",
+        "--stats",
+        "--output-directory",
+        str(tmp_path),
+        "--output-file",
+        "retained",
+        "--",
+        str(target),
+        "/c",
+        f"echo launched>{marker}",
+    )
+    assert result.returncode == 1
+    assert "output already exists" in result.stdout
+    assert output.read_text(encoding="utf-8") == "retained"
+    assert not (tmp_path / "retained_kernel_trace.csv").exists()
+    assert not marker.exists()

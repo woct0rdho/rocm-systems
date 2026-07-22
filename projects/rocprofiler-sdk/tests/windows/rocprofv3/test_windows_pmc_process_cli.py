@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -50,6 +51,45 @@ def read_csv(path: Path):
 
 def workload():
     return Path(os.environ["ROCPROFV3_TEST_WORKLOAD"]).resolve()
+
+
+def assert_kernel_stats(kernel_rows, stats_rows):
+    samples = {}
+    for row in kernel_rows:
+        duration = int(row["End_Timestamp"]) - int(row["Start_Timestamp"])
+        assert duration > 0
+        samples.setdefault(row["Kernel_Name"], []).append(duration)
+    total = sum(sum(values) for values in samples.values())
+    assert {row["Name"] for row in stats_rows} == set(samples)
+    for row in stats_rows:
+        values = samples[row["Name"]]
+        duration_sum = sum(values)
+        count = len(values)
+        variance = 0.0
+        if count > 1:
+            variance = (
+                sum(value * value for value in values)
+                - (duration_sum * duration_sum) / count
+            ) / (count - 1)
+        assert int(row["Calls"]) == count
+        assert int(row["TotalDurationNs"]) == duration_sum
+        assert math.isclose(
+            float(row["AverageNs"]), duration_sum / count, rel_tol=1.0e-6
+        )
+        assert int(row["MinNs"]) == min(values)
+        assert int(row["MaxNs"]) == max(values)
+        assert math.isclose(
+            float(row["Percentage"]),
+            (duration_sum / total) * 100.0,
+            rel_tol=1.0e-3,
+            abs_tol=1.0e-2,
+        )
+        assert math.isclose(
+            float(row["StdDev"]),
+            math.sqrt(abs(variance)),
+            rel_tol=1.0e-6,
+            abs_tol=1.0e-6,
+        )
 
 
 def assert_kernel_counter_join(counter_rows, kernel_rows):
@@ -109,9 +149,7 @@ def test_ordinary_csv_json_and_filtering(tmp_path):
     assert {row["Counter_Name"] for row in rows} == {"SQ_WAVES"}
     assert all(float(row["Counter_Value"]) > 0 for row in rows)
     assert all(int(row["Start_Timestamp"]) > 0 for row in rows)
-    assert all(
-        int(row["End_Timestamp"]) > int(row["Start_Timestamp"]) for row in rows
-    )
+    assert all(int(row["End_Timestamp"]) > int(row["Start_Timestamp"]) for row in rows)
     assert all(row["Kernel_Name"].startswith("vector_add(") for row in rows)
 
     document = json.loads((tmp_path / "filtered_results.json").read_text("utf-8"))
@@ -124,6 +162,7 @@ def test_ordinary_csv_json_and_filtering(tmp_path):
 def test_counter_and_kernel_trace_use_one_dispatch_record(tmp_path):
     result = run_cli(
         "--kernel-trace",
+        "--stats",
         "--pmc",
         "SQ_WAVES",
         "--kernel-include-regex",
@@ -144,8 +183,10 @@ def test_counter_and_kernel_trace_use_one_dispatch_record(tmp_path):
 
     counter_rows = read_csv(tmp_path / "composed-kernel_counter_collection.csv")
     kernel_rows = read_csv(tmp_path / "composed-kernel_kernel_trace.csv")
+    stats_rows = read_csv(tmp_path / "composed-kernel_kernel_stats.csv")
     assert len(counter_rows) == len(kernel_rows) == 2
     assert_kernel_counter_join(counter_rows, kernel_rows)
+    assert_kernel_stats(kernel_rows, stats_rows)
     assert all(row["Kind"] == "KERNEL_DISPATCH" for row in kernel_rows)
 
     document = json.loads(
@@ -153,7 +194,14 @@ def test_counter_and_kernel_trace_use_one_dispatch_record(tmp_path):
     )["rocprofiler-sdk-tool"][0]
     json_kernel = document["buffer_records"]["kernel_dispatch"]
     json_counter = document["callback_records"]["counter_collection"]
+    json_summary = document["summary"]
     assert len(json_kernel) == len(json_counter) == 2
+    assert len(json_summary) == 1
+    assert json_summary[0]["domain"] == "KERNEL_DISPATCH"
+    assert json_summary[0]["stats"]["count"] == 2
+    assert [entry["key"] for entry in json_summary[0]["stats"]["operations"]] == [
+        kernel_rows[0]["Kernel_Name"]
+    ]
     assert [record["dispatch_info"]["dispatch_id"] for record in json_kernel] == [
         record["dispatch_data"]["dispatch_info"]["dispatch_id"]
         for record in json_counter
@@ -170,6 +218,7 @@ def test_counter_and_kernel_trace_use_one_dispatch_record(tmp_path):
 def test_multiple_pmc_groups_publish_separate_passes(tmp_path):
     result = run_cli(
         "--kernel-trace",
+        "--stats",
         "--pmc",
         "SQ_WAVES",
         "--pmc",
@@ -187,6 +236,8 @@ def test_multiple_pmc_groups_publish_separate_passes(tmp_path):
     second = read_csv(tmp_path / "pass_2" / "multi_counter_collection.csv")
     first_kernel = read_csv(tmp_path / "pass_1" / "multi_kernel_trace.csv")
     second_kernel = read_csv(tmp_path / "pass_2" / "multi_kernel_trace.csv")
+    first_stats = read_csv(tmp_path / "pass_1" / "multi_kernel_stats.csv")
+    second_stats = read_csv(tmp_path / "pass_2" / "multi_kernel_stats.csv")
     assert len(first) == len(second) == 8
     assert len(first_kernel) == len(second_kernel) == 8
     assert {row["Counter_Name"] for row in first} == {"SQ_WAVES"}
@@ -195,6 +246,8 @@ def test_multiple_pmc_groups_publish_separate_passes(tmp_path):
     assert sum(float(row["Counter_Value"]) for row in second) > 0
     assert_kernel_counter_join(first, first_kernel)
     assert_kernel_counter_join(second, second_kernel)
+    assert_kernel_stats(first_kernel, first_stats)
+    assert_kernel_stats(second_kernel, second_stats)
 
 
 def test_selected_regions_and_reference_counting(tmp_path):
@@ -267,11 +320,14 @@ def test_counter_and_hip_trace_compose_in_one_process(tmp_path):
     assert result.returncode == 0, result.stdout
     assert len(read_csv(tmp_path / "composed_counter_collection.csv")) == 2
     document = json.loads((tmp_path / "composed_results.json").read_text("utf-8"))
-    assert len(
-        document["rocprofiler-sdk-tool"][0]["callback_records"][
-            "counter_collection"
-        ]
-    ) == 2
+    assert (
+        len(
+            document["rocprofiler-sdk-tool"][0]["callback_records"][
+                "counter_collection"
+            ]
+        )
+        == 2
+    )
     hip_rows = read_csv(tmp_path / "composed_hip_api_trace.csv")
     assert hip_rows
     assert {row["Domain"] for row in hip_rows} == {"HIP_RUNTIME_API"}
@@ -298,6 +354,7 @@ def test_no_dispatch_and_target_failure_preserve_status(tmp_path):
     result = run_cli(
         "--pmc",
         "SQ_WAVES",
+        "--stats",
         "-d",
         str(no_dispatch),
         "-o",
@@ -354,8 +411,7 @@ def test_repeated_fresh_processes_drain_counter_callbacks(tmp_path):
         assert all(float(row["Counter_Value"]) > 0 for row in rows)
         assert all(int(row["Start_Timestamp"]) > 0 for row in rows)
         assert all(
-            int(row["End_Timestamp"]) > int(row["Start_Timestamp"])
-            for row in rows
+            int(row["End_Timestamp"]) > int(row["Start_Timestamp"]) for row in rows
         )
 
 
@@ -403,6 +459,32 @@ def test_kernel_trace_publication_failure_preserves_target_file(tmp_path):
     assert conflict.read_text(encoding="utf-8") == "target-created\n"
     assert not (tmp_path / "trace-conflict_agent_info.csv").exists()
     assert not (tmp_path / "trace-conflict_counter_collection.csv").exists()
+
+
+def test_kernel_stats_publication_failure_preserves_target_file(tmp_path):
+    conflict = tmp_path / "stats-conflict_kernel_stats.csv"
+    result = run_cli(
+        "--kernel-trace",
+        "--stats",
+        "--pmc",
+        "SQ_WAVES",
+        "-d",
+        str(tmp_path),
+        "-o",
+        "stats-conflict",
+        "--",
+        str(workload()),
+        "--dispatches",
+        "2",
+        "--create-file",
+        str(conflict),
+    )
+    assert result.returncode == 1
+    assert "output_publication_failed" in result.stdout
+    assert conflict.read_text(encoding="utf-8") == "target-created\n"
+    assert not (tmp_path / "stats-conflict_agent_info.csv").exists()
+    assert not (tmp_path / "stats-conflict_counter_collection.csv").exists()
+    assert not (tmp_path / "stats-conflict_kernel_trace.csv").exists()
 
 
 def test_existing_counter_output_prevents_launch(tmp_path):

@@ -52,7 +52,7 @@
     },
     {
       "name": "nonmatching",
-      "profiler_args": ["--kernel-include-regex", "does_not_match"],
+      "profiler_args": ["--stats", "--kernel-include-regex", "does_not_match"],
       "target_args": [],
       "selected_enqueue_ordinals": []
     },

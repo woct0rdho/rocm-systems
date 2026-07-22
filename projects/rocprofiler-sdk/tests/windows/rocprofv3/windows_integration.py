@@ -86,7 +86,10 @@ def base_environment(args) -> dict[str, str]:
         / "rocprofiler-sdk"
     )
     env["ROCPROFILER_WINDOWS_DLL_DIRS"] = os.pathsep.join(
-        [str(args.sdk_build.resolve() / "bin"), str(args.runtime_root.resolve() / "bin")]
+        [
+            str(args.sdk_build.resolve() / "bin"),
+            str(args.runtime_root.resolve() / "bin"),
+        ]
     )
     env["ROCPROFILER_WINDOWS_CORE_BIN"] = str(args.runtime_root.resolve() / "bin")
     return env
@@ -192,7 +195,9 @@ def run_availability(args, env, output):
 
 
 def run_workload(args, env, output):
-    prepared = prepare_runtime_run(args.runtime_root.resolve(), args.workload.resolve(), output)
+    prepared = prepare_runtime_run(
+        args.runtime_root.resolve(), args.workload.resolve(), output
+    )
     run_env = dict(env)
     run_env["GPU_ENABLE_PAL"] = "0"
     command = [str(prepared)]
@@ -266,14 +271,16 @@ def run_hip_trace(args, env, output, graph: bool = False, marker: bool = False):
     ]
     if marker:
         command.append("--marker-trace")
-    command.extend([
-        "--output-directory",
-        str(trace_directory),
-        "--output-file",
-        "windows-hip",
-        "--",
-        str(args.workload.resolve()),
-    ])
+    command.extend(
+        [
+            "--output-directory",
+            str(trace_directory),
+            "--output-file",
+            "windows-hip",
+            "--",
+            str(args.workload.resolve()),
+        ]
+    )
     if graph:
         command.extend(("--graph", "--dispatches", "2"))
     if marker:
@@ -390,9 +397,7 @@ def read_csv_if_present(path: Path):
 
 
 def run_dispatch_analysis_contract(args, env, output):
-    contract = json.loads(
-        args.dispatch_analysis_contract.read_text(encoding="utf-8")
-    )
+    contract = json.loads(args.dispatch_analysis_contract.read_text(encoding="utf-8"))
     workload = str(args.dispatch_analysis_workload.resolve())
     selection_names = {
         "no-filter",
@@ -404,6 +409,7 @@ def run_dispatch_analysis_contract(args, env, output):
         "vector-iteration-range",
         "mangled-vector",
         "truncated-vector",
+        "composed-stats",
         "reversed-completion",
     }
     selection_cases = [
@@ -418,11 +424,15 @@ def run_dispatch_analysis_contract(args, env, output):
         standalone_directory.mkdir(parents=True)
         composed_directory.mkdir()
 
+        profiler_args = [
+            value for value in case["profiler_args"] if value != "--kernel-trace"
+        ]
+        stats_requested = "--stats" in profiler_args
         standalone_command = [
             str(args.python),
             str(args.rocprofv3),
             "--kernel-trace",
-            *case["profiler_args"],
+            *profiler_args,
             "-f",
             "csv",
             "-d",
@@ -440,6 +450,7 @@ def run_dispatch_analysis_contract(args, env, output):
             timeout=120,
         )
         standalone_trace = standalone_directory / "contract_kernel_trace.csv"
+        standalone_stats = standalone_directory / "contract_kernel_stats.csv"
 
         composed_command = [
             str(args.python),
@@ -447,7 +458,7 @@ def run_dispatch_analysis_contract(args, env, output):
             "--kernel-trace",
             "--pmc",
             *contract["counter_group"],
-            *case["profiler_args"],
+            *profiler_args,
             "-f",
             "csv",
             "json",
@@ -467,21 +478,23 @@ def run_dispatch_analysis_contract(args, env, output):
         )
         composed_counter = composed_directory / "contract_counter_collection.csv"
         composed_trace = composed_directory / "contract_kernel_trace.csv"
+        composed_stats = composed_directory / "contract_kernel_stats.csv"
         composed_json = composed_directory / "contract_results.json"
         composed_json_kernels = []
+        composed_json_summary = []
         if composed_json.is_file():
             document = json.loads(composed_json.read_text(encoding="utf-8"))
             tool_document = document["rocprofiler-sdk-tool"]
             if isinstance(tool_document, list):
                 tool_document = tool_document[0]
-            composed_json_kernels = tool_document["buffer_records"][
-                "kernel_dispatch"
-            ]
+            composed_json_kernels = tool_document["buffer_records"]["kernel_dispatch"]
+            composed_json_summary = tool_document["summary"]
 
         selection_runs.append(
             {
                 "name": case["name"],
                 "name_mode": case.get("name_mode", "demangled"),
+                "stats_requested": stats_requested,
                 "selected_enqueue_ordinals": case["selected_enqueue_ordinals"],
                 "standalone": {
                     "command": standalone_command,
@@ -489,6 +502,8 @@ def run_dispatch_analysis_contract(args, env, output):
                     "stdout": standalone_stdout,
                     "trace_rows": read_csv_if_present(standalone_trace),
                     "trace_exists": standalone_trace.is_file(),
+                    "stats_rows": read_csv_if_present(standalone_stats),
+                    "stats_exists": standalone_stats.is_file(),
                 },
                 "composed": {
                     "command": composed_command,
@@ -497,8 +512,11 @@ def run_dispatch_analysis_contract(args, env, output):
                     "counter_rows": read_csv_if_present(composed_counter),
                     "trace_rows": read_csv_if_present(composed_trace),
                     "trace_exists": composed_trace.is_file(),
+                    "stats_rows": read_csv_if_present(composed_stats),
+                    "stats_exists": composed_stats.is_file(),
                     "json_exists": composed_json.is_file(),
                     "json_kernel_records": composed_json_kernels,
+                    "json_summary": composed_json_summary,
                 },
             }
         )

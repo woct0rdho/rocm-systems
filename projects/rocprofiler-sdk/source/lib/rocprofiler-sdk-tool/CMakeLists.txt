@@ -5,7 +5,9 @@
 rocprofiler_activate_clang_tidy()
 
 if(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
-    add_library(rocprofiler-sdk-tool SHARED windows.cpp)
+    add_library(
+        rocprofiler-sdk-tool SHARED windows.cpp
+                                    ${PROJECT_SOURCE_DIR}/source/lib/output/statistics.cpp)
     target_link_libraries(
         rocprofiler-sdk-tool
         PRIVATE rocprofiler-sdk::rocprofiler-sdk-shared-library

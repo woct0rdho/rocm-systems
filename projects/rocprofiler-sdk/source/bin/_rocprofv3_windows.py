@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -235,7 +236,9 @@ def write_windows_kernel_csv(profile_path, output_path, process_id, args=None):
     try:
         profile = json.loads(profile_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        fatal_error("Could not read Windows HIP activity trace {}: {}", profile_path, error)
+        fatal_error(
+            "Could not read Windows HIP activity trace {}: {}", profile_path, error
+        )
 
     events = []
     for event in profile.get("traceEvents", []):
@@ -313,7 +316,9 @@ def write_windows_kernel_csv(profile_path, output_path, process_id, args=None):
         demangled_name = str(event.get("name", ""))
         mangled_name = str(event_args.get("mangled_kernel_name", ""))
         if not demangle and not mangled_name:
-            fatal_error("Windows HIP kernel activity is missing the mangled kernel name")
+            fatal_error(
+                "Windows HIP kernel activity is missing the mangled kernel name"
+            )
         kernel_name = demangled_name if demangle else mangled_name
         if truncate:
             kernel_name = windows_truncate_kernel_name(demangled_name)
@@ -330,9 +335,7 @@ def write_windows_kernel_csv(profile_path, output_path, process_id, args=None):
             continue
 
         begin_ns = round(float(event.get("ts", 0)) * 1000)
-        end_ns = round(
-            (float(event.get("ts", 0)) + float(event.get("dur", 0))) * 1000
-        )
+        end_ns = round((float(event.get("ts", 0)) + float(event.get("dur", 0))) * 1000)
         if end_ns <= begin_ns:
             fatal_error(
                 "Invalid Windows HIP kernel timestamps for dispatch {}: {} >= {}",
@@ -373,6 +376,85 @@ def write_windows_kernel_csv(profile_path, output_path, process_id, args=None):
     return len(rows)
 
 
+WINDOWS_KERNEL_STATS_COLUMNS = (
+    "Name",
+    "Calls",
+    "TotalDurationNs",
+    "AverageNs",
+    "Percentage",
+    "MinNs",
+    "MaxNs",
+    "StdDev",
+)
+
+
+def windows_stats_float(value):
+    return f"{value:.6f}" if value > 1.0e-2 else f"{value:.8e}"
+
+
+def windows_stats_percentage(value):
+    if value >= 1.0:
+        return f"{value:.2f}"
+    if value > 1.0e-2:
+        return f"{value:.4f}"
+    return f"{value:.3e}"
+
+
+def windows_kernel_stats_rows(kernel_rows):
+    accumulators = {}
+    total_duration = 0
+    for row in kernel_rows:
+        try:
+            start = int(row["Start_Timestamp"])
+            end = int(row["End_Timestamp"])
+            name = str(row["Kernel_Name"])
+        except (KeyError, TypeError, ValueError) as error:
+            fatal_error("Invalid Windows kernel row for statistics: {}", error)
+        if start <= 0 or end <= start:
+            fatal_error(
+                "Invalid Windows kernel timestamps for statistics: {} >= {}",
+                start,
+                end,
+            )
+        duration = end - start
+        total_duration += duration
+        entry = accumulators.setdefault(
+            name,
+            {"count": 0, "sum": 0, "sqr": 0, "min": duration, "max": duration},
+        )
+        entry["count"] += 1
+        entry["sum"] += duration
+        entry["sqr"] += duration * duration
+        entry["min"] = min(entry["min"], duration)
+        entry["max"] = max(entry["max"], duration)
+
+    rows = []
+    for name, entry in sorted(
+        accumulators.items(), key=lambda item: (-item[1]["sum"], item[0])
+    ):
+        count = entry["count"]
+        variance = 0.0
+        if count > 1:
+            variance = (entry["sqr"] - (entry["sum"] * entry["sum"]) / count) / (
+                count - 1
+            )
+        rows.append(
+            {
+                "Name": name,
+                "Calls": count,
+                "TotalDurationNs": entry["sum"],
+                "AverageNs": windows_stats_float(entry["sum"] / count),
+                "Percentage": windows_stats_percentage(
+                    (entry["sum"] / total_duration) * 100.0
+                ),
+                "MinNs": entry["min"],
+                "MaxNs": entry["max"],
+                "StdDev": windows_stats_float(math.sqrt(abs(variance))),
+            }
+        )
+    return rows
+
+
 def windows_kernel_output_path(args, process_id):
     output_directory = Path(args.output_directory or os.getcwd()).resolve()
     output_name = args.output_file or str(process_id)
@@ -380,6 +462,16 @@ def windows_kernel_output_path(args, process_id):
     if not output_name.lower().endswith(".csv"):
         output_name = f"{output_name}_kernel_trace.csv"
     return output_directory / output_name
+
+
+def windows_kernel_stats_output_path(args, process_id):
+    output_directory = Path(args.output_directory or os.getcwd()).resolve()
+    output_name = Path(args.output_file or str(process_id)).name
+    if output_name.lower().endswith(".csv"):
+        output_name = output_name[:-4]
+        if output_name.lower().endswith("_kernel_trace"):
+            output_name = output_name[: -len("_kernel_trace")]
+    return output_directory / f"{output_name}_kernel_stats.csv"
 
 
 def run_windows_kernel_trace(app_args, args):
@@ -443,12 +535,19 @@ def run_windows_kernel_trace(app_args, args):
 
     profile_path = None
     output_path = None
+    stats_path = None
     reservations = []
+    published = []
     try:
+
         def prepare(process_id):
-            nonlocal output_path, reservations
+            nonlocal output_path, stats_path, reservations
             output_path = windows_kernel_output_path(args, process_id)
-            reservations = windows_reserve_output_paths([output_path])
+            output_paths = [output_path]
+            if getattr(args, "stats", False):
+                stats_path = windows_kernel_stats_output_path(args, process_id)
+                output_paths.append(stats_path)
+            reservations = windows_reserve_output_paths(output_paths)
 
         result = windows_launch_in_job(
             [str(target), *app_args[1:]], child_env, os.getcwd(), prepare
@@ -469,11 +568,27 @@ def run_windows_kernel_trace(app_args, args):
         record_count = write_windows_kernel_csv(
             profile_path, output_path, process_id, args
         )
+        published.append(output_path)
+        if stats_path is not None and record_count > 0:
+            with output_path.open(encoding="utf-8", newline="") as stream:
+                kernel_rows = list(csv.DictReader(stream))
+            stats_rows = windows_kernel_stats_rows(kernel_rows)
+            windows_write_csv(stats_path, stats_rows, WINDOWS_KERNEL_STATS_COLUMNS)
+            published.append(stats_path)
         print(
-            f"[rocprofv3] Windows kernel trace: records={record_count} output={output_path}",
+            f"[rocprofv3] Windows kernel trace: records={record_count} output={output_path}"
+            + (
+                f" stats={stats_path}"
+                if stats_path is not None and record_count > 0
+                else ""
+            ),
             flush=True,
         )
         return return_code
+    except BaseException:
+        for path in published:
+            path.unlink(missing_ok=True)
+        raise
     finally:
         if profile_path:
             profile_path.unlink(missing_ok=True)
@@ -511,9 +626,7 @@ def windows_api_trace_sdk_path():
 def windows_api_trace_lifecycle_phases(trace_path):
     phases = []
     for line in trace_path.read_text(encoding="utf-8").splitlines():
-        fields = dict(
-            field.split("=", 1) for field in line.split() if "=" in field
-        )
+        fields = dict(field.split("=", 1) for field in line.split() if "=" in field)
         if fields.get("event") == "sdk_lifecycle" and fields.get("phase"):
             phases.append(fields["phase"])
     return phases
@@ -564,8 +677,12 @@ def windows_api_trace_rows(trace_path):
                             else "MARKER_CORE_API"
                         ),
                         "Function": fields.get("operation", entry.get("operation", "")),
-                        "Process_Id": fields.get("process_id", entry.get("process_id", "0")),
-                        "Thread_Id": fields.get("thread_id", entry.get("thread_id", "0")),
+                        "Process_Id": fields.get(
+                            "process_id", entry.get("process_id", "0")
+                        ),
+                        "Thread_Id": fields.get(
+                            "thread_id", entry.get("thread_id", "0")
+                        ),
                         "Correlation_Id": correlation_id,
                         "Start_Timestamp": entry.get("timestamp_ns", "0"),
                         "End_Timestamp": fields.get("timestamp_ns", "0"),
@@ -627,9 +744,7 @@ def windows_api_trace_rows(trace_path):
                     }
                 )
     unmatched_api = [
-        correlation_id
-        for entries in api_entries.values()
-        for correlation_id in entries
+        correlation_id for entries in api_entries.values() for correlation_id in entries
     ]
     if unmatched_api:
         fatal_error(
@@ -666,7 +781,9 @@ def windows_write_csv(path, rows, fields):
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         with temporary.open("x", encoding="utf-8", newline="") as output:
-            writer = csv.DictWriter(output, fieldnames=fields, quoting=csv.QUOTE_MINIMAL)
+            writer = csv.DictWriter(
+                output, fieldnames=fields, quoting=csv.QUOTE_MINIMAL
+            )
             writer.writeheader()
             writer.writerows(rows)
         try:
@@ -776,11 +893,10 @@ def run_windows_api_trace(app_args, args, pass_id=None):
     counter_paths = []
     reservations = []
     try:
+
         def prepare(process_id):
             nonlocal paths, counter_paths, reservations
-            paths = windows_api_trace_output_paths(
-                args, process_id, output_directory
-            )
+            paths = windows_api_trace_output_paths(args, process_id, output_directory)
             output_paths = list(paths.values())
             if counter_requested:
                 counter_paths = windows_sdk_output_paths(
@@ -788,6 +904,8 @@ def run_windows_api_trace(app_args, args, pass_id=None):
                     counter_output_file,
                     counter_formats,
                     process_id,
+                    kernel_trace=bool(getattr(args, "kernel_trace", False)),
+                    stats=bool(getattr(args, "stats", False)),
                 )
                 output_paths.extend(counter_paths)
             reservations = windows_reserve_output_paths(output_paths)
@@ -807,14 +925,19 @@ def run_windows_api_trace(app_args, args, pass_id=None):
                 "The target produced no Windows SDK registration trace. Verify the matching rocprofiler-register.dll and rocprofiler-sdk.dll are discoverable"
             )
         lifecycle_phases = windows_api_trace_lifecycle_phases(trace_path)
-        if lifecycle_phases.count("initialize") != 1 or lifecycle_phases.count("finalize") != 1:
+        if (
+            lifecycle_phases.count("initialize") != 1
+            or lifecycle_phases.count("finalize") != 1
+        ):
             fatal_error(
                 "The target did not complete the Windows SDK lifecycle: {}",
                 ", ".join(lifecycle_phases) or "no lifecycle records",
             )
         api_rows, graph_rows, marker_rows = windows_api_trace_rows(trace_path)
         hip_api_rows = [row for row in api_rows if row["Domain"] == "HIP_RUNTIME_API"]
-        marker_api_rows = [row for row in api_rows if row["Domain"] == "MARKER_CORE_API"]
+        marker_api_rows = [
+            row for row in api_rows if row["Domain"] == "MARKER_CORE_API"
+        ]
         if hip_requested and not hip_api_rows:
             fatal_error("The target produced no Windows HIP API records")
         if getattr(args, "hip_graph_trace", False) and not graph_rows:
@@ -896,7 +1019,6 @@ def run_windows_api_trace(app_args, args, pass_id=None):
         windows_release_output_reservations(reservations)
 
 
-
 def windows_sdk_library_path(name, environment_name):
     configured = os.environ.get(environment_name)
     candidates = [
@@ -940,7 +1062,9 @@ def windows_sdk_result_status(result_path, target_status, expected_outputs=()):
                 name, value = line.split("=", 1)
                 values[name] = value
     except (OSError, UnicodeError) as error:
-        fatal_error("Could not read the Windows profiler result {}: {}", result_path, error)
+        fatal_error(
+            "Could not read the Windows profiler result {}: {}", result_path, error
+        )
 
     status = values.get("status", "invalid_result")
     if status == "success_records":
@@ -961,7 +1085,12 @@ def windows_sdk_result_status(result_path, target_status, expected_outputs=()):
 
 
 def windows_sdk_output_paths(
-    output_directory, output_file, formats, process_id, kernel_trace=False
+    output_directory,
+    output_file,
+    formats,
+    process_id,
+    kernel_trace=False,
+    stats=False,
 ):
     prefix = str(output_file)
     replacements = {
@@ -983,6 +1112,8 @@ def windows_sdk_output_paths(
         )
         if kernel_trace:
             paths.append(base.with_name(f"{base.name}_kernel_trace.csv"))
+        if stats:
+            paths.append(base.with_name(f"{base.name}_kernel_stats.csv"))
     if "json" in formats:
         paths.append(base.with_name(f"{base.name}_results.json"))
     return paths
@@ -1124,6 +1255,7 @@ def run_windows_sdk_pmc(app_args, args, pass_id=None):
             formats,
             process_id,
             kernel_trace=bool(getattr(args, "kernel_trace", False)),
+            stats=bool(getattr(args, "stats", False)),
         )
         reservations = windows_reserve_output_paths(expected_outputs)
 
@@ -1131,9 +1263,7 @@ def run_windows_sdk_pmc(app_args, args, pass_id=None):
         target_status = windows_launch_in_job(
             command, environment, os.getcwd(), prepare
         )["exit_code"]
-        return windows_sdk_result_status(
-            result_path, target_status, expected_outputs
-        )
+        return windows_sdk_result_status(result_path, target_status, expected_outputs)
     finally:
         result_path.unlink(missing_ok=True)
         windows_release_output_reservations(reservations)
@@ -1145,7 +1275,12 @@ def run_windows(app_args, args, **kwargs):
     if getattr(args, "pmc", None) is not None:
         tracing_requested = any(
             getattr(args, name, False)
-            for name in ("hip_trace", "hip_runtime_trace", "hip_graph_trace", "marker_trace")
+            for name in (
+                "hip_trace",
+                "hip_runtime_trace",
+                "hip_graph_trace",
+                "marker_trace",
+            )
         )
         if tracing_requested:
             return run_windows_api_trace(app_args, args, kwargs.get("pass_id"))

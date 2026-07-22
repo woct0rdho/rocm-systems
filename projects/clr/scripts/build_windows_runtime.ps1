@@ -195,7 +195,19 @@ x = torch.arange(4, device="cuda")
 y = (x + 1).cpu().tolist()
 torch.cuda.synchronize()
 assert y == [1, 2, 3, 4], y
-print(f"windows_hip_kpack=passed device={torch.cuda.get_device_name(0)!r}")
+start = torch.cuda.Event(enable_timing=True)
+stop = torch.cuda.Event(enable_timing=True)
+start.record()
+for _ in range(100):
+    x = x + 1
+stop.record()
+stop.synchronize()
+event_ms = start.elapsed_time(stop)
+assert 0.0 < event_ms < 60_000.0, event_ms
+print(
+    f"windows_hip_kpack=passed device={torch.cuda.get_device_name(0)!r} "
+    f"event_elapsed_ms={event_ms}"
+)
 "@
     Invoke-NativeCommand -FilePath $layout.Python -ArgumentList @("-c", $kpackProbe)
     Set-Content -Path $kpackValidation -Value @(

@@ -5,6 +5,7 @@ import json
 import math
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 
@@ -215,6 +216,75 @@ def test_counter_and_kernel_trace_use_one_dispatch_record(tmp_path):
         assert kernel["end_timestamp"] == dispatch["end_timestamp"]
 
 
+def test_rocpd_database_uses_authoritative_dispatch_and_counter_records(tmp_path):
+    result = run_cli(
+        "--stats",
+        "--pmc",
+        "SQ_WAVES",
+        "-f",
+        "rocpd",
+        "-d",
+        str(tmp_path),
+        "-o",
+        "dispatch-database",
+        "--",
+        str(workload()),
+    )
+    assert result.returncode == 0, result.stdout
+    assert "Windows ROCpd: dispatches=8" in result.stdout
+    assert "kernel_symbols=1" in result.stdout
+
+    database = tmp_path / "dispatch-database_results.db"
+    assert database.is_file()
+    assert not (tmp_path / "dispatch-database_results.json").exists()
+    assert not (tmp_path / "dispatch-database_counter_collection.csv").exists()
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute(
+            "SELECT value FROM rocpd_metadata WHERE tag = 'schema_version'"
+        ).fetchone() == ("3.0.3",)
+        kernels = connection.execute(
+            "SELECT dispatch_id, name, start, end, duration, lds_size, scratch_size, "
+            "vgpr_count, accum_vgpr_count, sgpr_count FROM kernels ORDER BY dispatch_id"
+        ).fetchall()
+        assert len(kernels) == 8
+        assert [row[0] for row in kernels] == list(range(1, 9))
+        assert all("vector_add" in row[1] for row in kernels)
+        assert all(
+            row[2] > 0 and row[3] > row[2] and row[4] == row[3] - row[2]
+            for row in kernels
+        )
+        assert all(
+            row[5] >= 0
+            and row[6] >= 0
+            and row[7] > 0
+            and row[8] >= 0
+            and row[9] > 0
+            for row in kernels
+        )
+        pmc_events = connection.execute(
+            "SELECT dispatch_id, counter_name, counter_value FROM pmc_events "
+            "ORDER BY dispatch_id"
+        ).fetchall()
+        assert len(pmc_events) >= 8
+        assert {row[0] for row in pmc_events} == set(range(1, 9))
+        assert {row[1] for row in pmc_events} == {"SQ_WAVES"}
+        values_by_dispatch = {}
+        for dispatch_id, _, value in pmc_events:
+            values_by_dispatch.setdefault(dispatch_id, []).append(value)
+        assert len({len(values) for values in values_by_dispatch.values()}) == 1
+        assert all(sum(values) > 0 for values in values_by_dispatch.values())
+        top_kernel = connection.execute(
+            "SELECT name, total_calls, total_duration, average, percentage "
+            "FROM top_kernels"
+        ).fetchone()
+        assert "vector_add" in top_kernel[0]
+        assert top_kernel[1] == 8
+        assert top_kernel[2] > 0 and top_kernel[3] > 0
+        assert math.isclose(top_kernel[4], 100.0)
+
+
 def test_multiple_pmc_groups_publish_separate_passes(tmp_path):
     result = run_cli(
         "--kernel-trace",
@@ -248,6 +318,50 @@ def test_multiple_pmc_groups_publish_separate_passes(tmp_path):
     assert_kernel_counter_join(second, second_kernel)
     assert_kernel_stats(first_kernel, first_stats)
     assert_kernel_stats(second_kernel, second_stats)
+
+
+def test_multiple_pmc_groups_publish_process_local_rocpd_databases(tmp_path):
+    result = run_cli(
+        "--kernel-trace",
+        "--pmc",
+        "SQ_WAVES",
+        "--pmc",
+        "GRBM_COUNT",
+        "-f",
+        "rocpd",
+        "-d",
+        str(tmp_path),
+        "-o",
+        "multi-database",
+        "--",
+        str(workload()),
+        "--dispatches",
+        "2",
+    )
+    assert result.returncode == 0, result.stdout
+    assert result.stdout.count("Windows ROCpd: dispatches=2") == 2
+
+    for pass_id, counter_name in ((1, "SQ_WAVES"), (2, "GRBM_COUNT")):
+        output = tmp_path / f"pass_{pass_id}"
+        database = output / "multi-database_results.db"
+        assert database.is_file()
+        assert not (output / "multi-database_results.json").exists()
+        with sqlite3.connect(database) as connection:
+            assert [
+                row[0]
+                for row in connection.execute(
+                    "SELECT dispatch_id FROM kernels ORDER BY dispatch_id"
+                )
+            ] == [1, 2]
+            assert {
+                row[0]
+                for row in connection.execute(
+                    "SELECT DISTINCT counter_name FROM pmc_events"
+                )
+            } == {counter_name}
+            assert connection.execute(
+                "SELECT value FROM rocpd_metadata WHERE tag = 'dispatch_count'"
+            ).fetchone() == ("2",)
 
 
 def test_selected_regions_and_reference_counting(tmp_path):
@@ -485,6 +599,56 @@ def test_kernel_stats_publication_failure_preserves_target_file(tmp_path):
     assert not (tmp_path / "stats-conflict_agent_info.csv").exists()
     assert not (tmp_path / "stats-conflict_counter_collection.csv").exists()
     assert not (tmp_path / "stats-conflict_kernel_trace.csv").exists()
+
+
+def test_rocpd_target_conflict_is_preserved_and_internal_json_is_removed(tmp_path):
+    conflict = tmp_path / "database-conflict_results.db"
+    result = run_cli(
+        "--kernel-trace",
+        "--pmc",
+        "SQ_WAVES",
+        "-f",
+        "rocpd",
+        "-d",
+        str(tmp_path),
+        "-o",
+        "database-conflict",
+        "--",
+        str(workload()),
+        "--dispatches",
+        "2",
+        "--create-file",
+        str(conflict),
+    )
+    assert result.returncode == 1
+    assert "rocpd_conversion_failed: output already exists" in result.stdout
+    assert conflict.read_text(encoding="utf-8") == "target-created\n"
+    assert not (tmp_path / "database-conflict_results.json").exists()
+
+
+def test_existing_rocpd_output_prevents_launch(tmp_path):
+    output = tmp_path / "retained-results_results.db"
+    output.write_text("retained\n", encoding="utf-8")
+    marker = tmp_path / "launched.txt"
+    result = run_cli(
+        "--pmc",
+        "SQ_WAVES",
+        "-f",
+        "rocpd",
+        "-d",
+        str(tmp_path),
+        "-o",
+        "retained-results",
+        "--",
+        str(cmd_exe()),
+        "/d",
+        "/c",
+        f"echo launched>{marker}",
+    )
+    assert result.returncode == 1
+    assert "output already exists" in result.stdout
+    assert output.read_text(encoding="utf-8") == "retained\n"
+    assert not marker.exists()
 
 
 def test_existing_counter_output_prevents_launch(tmp_path):

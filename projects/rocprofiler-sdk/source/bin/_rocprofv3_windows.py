@@ -95,30 +95,75 @@ def windows_output_reservation_path(output_path):
     return output_path.with_name(f".{output_path.name}.rocprofv3-reserve")
 
 
-def windows_reserve_output_paths(output_paths):
-    reservations = []
-    token = f"pid={os.getpid()} token={uuid.uuid4().hex}\n"
-    try:
-        for output_path in dict.fromkeys(Path(path).resolve() for path in output_paths):
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            if output_path.exists():
-                fatal_error("Windows trace output already exists: {}", output_path)
-            reservation = windows_output_reservation_path(output_path)
-            try:
-                with reservation.open("x", encoding="utf-8", newline="") as output:
-                    output.write(token)
-            except FileExistsError:
-                fatal_error("Windows trace output is already reserved: {}", output_path)
-            reservations.append(reservation)
-        return reservations
-    except BaseException:
-        windows_release_output_reservations(reservations)
-        raise
+class WindowsOutputTransaction:
+    def __init__(self):
+        self._reservations = []
+        self._owned = []
+        self._owned_set = set()
+        self._committed = False
 
+    def reserve(self, output_paths):
+        if self._reservations:
+            fatal_error("Internal error: Windows outputs were reserved more than once")
+        token = f"pid={os.getpid()} token={uuid.uuid4().hex}\n"
+        try:
+            for output_path in dict.fromkeys(
+                Path(path).resolve() for path in output_paths
+            ):
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                if output_path.exists():
+                    fatal_error("Windows trace output already exists: {}", output_path)
+                reservation = windows_output_reservation_path(output_path)
+                try:
+                    with reservation.open(
+                        "x", encoding="utf-8", newline=""
+                    ) as output:
+                        output.write(token)
+                except FileExistsError:
+                    fatal_error(
+                        "Windows trace output is already reserved: {}", output_path
+                    )
+                self._reservations.append(reservation)
+        except BaseException:
+            self.close()
+            raise
 
-def windows_release_output_reservations(reservations):
-    for reservation in reservations:
-        reservation.unlink(missing_ok=True)
+    def own(self, output_path):
+        output_path = Path(output_path).resolve()
+        if output_path not in self._owned_set:
+            self._owned.append(output_path)
+            self._owned_set.add(output_path)
+
+    def adopt(self, output_paths):
+        for output_path in output_paths:
+            output_path = Path(output_path).resolve()
+            if not output_path.is_file():
+                fatal_error(
+                    "Windows profiler output disappeared before publication completed: {}",
+                    output_path,
+                )
+            self.own(output_path)
+
+    def publish_csv(self, output_path, rows, fields):
+        windows_write_csv(output_path, rows, fields)
+        self.own(output_path)
+
+    def commit(self):
+        self._committed = True
+
+    def close(self):
+        if not self._committed:
+            for output_path in reversed(self._owned):
+                output_path.unlink(missing_ok=True)
+        for reservation in self._reservations:
+            reservation.unlink(missing_ok=True)
+        self._reservations.clear()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _error_type, _error, _traceback):
+        self.close()
 
 
 def windows_core_bin():
@@ -567,64 +612,61 @@ def run_windows_kernel_trace(app_args, args):
     profile_path = None
     output_path = None
     stats_path = None
-    reservations = []
-    published = []
+    transaction = WindowsOutputTransaction()
     try:
+        with transaction:
 
-        def prepare(process_id):
-            nonlocal output_path, stats_path, reservations
-            output_path = windows_kernel_output_path(args, process_id)
-            output_paths = [output_path]
-            if getattr(args, "stats", False):
-                stats_path = windows_kernel_stats_output_path(args, process_id)
-                output_paths.append(stats_path)
-            reservations = windows_reserve_output_paths(output_paths)
+            def prepare(process_id):
+                nonlocal output_path, stats_path
+                output_path = windows_kernel_output_path(args, process_id)
+                output_paths = [output_path]
+                if getattr(args, "stats", False):
+                    stats_path = windows_kernel_stats_output_path(args, process_id)
+                    output_paths.append(stats_path)
+                transaction.reserve(output_paths)
 
-        result = windows_launch_in_job(
-            [str(target), *app_args[1:]], child_env, os.getcwd(), prepare
-        )
-        process_id = result["pid"]
-        return_code = result["exit_code"]
-        profile_path = windows_pid_path(profile_request, process_id)
-        for _ in range(20):
-            if profile_path.is_file():
-                break
-            time.sleep(0.1)
-        if not profile_path.is_file():
-            if return_code != 0:
-                return return_code
-            fatal_error(
-                "The target did not produce a Windows HIP activity trace. The installed amdhip64_7.dll must export the HIP profiler extension"
+            result = windows_launch_in_job(
+                [str(target), *app_args[1:]], child_env, os.getcwd(), prepare
             )
-        record_count = write_windows_kernel_csv(
-            profile_path, output_path, process_id, args
-        )
-        published.append(output_path)
-        if stats_path is not None and record_count > 0:
-            with output_path.open(encoding="utf-8", newline="") as stream:
-                kernel_rows = list(csv.DictReader(stream))
-            stats_rows = windows_kernel_stats_rows(kernel_rows)
-            windows_write_csv(stats_path, stats_rows, WINDOWS_KERNEL_STATS_COLUMNS)
-            published.append(stats_path)
-        print(
-            f"[rocprofv3] Windows kernel trace: records={record_count} output={output_path}"
-            + (
-                f" stats={stats_path}"
-                if stats_path is not None and record_count > 0
-                else ""
-            ),
-            flush=True,
-        )
-        return return_code
-    except BaseException:
-        for path in published:
-            path.unlink(missing_ok=True)
-        raise
+            process_id = result["pid"]
+            return_code = result["exit_code"]
+            profile_path = windows_pid_path(profile_request, process_id)
+            for _ in range(20):
+                if profile_path.is_file():
+                    break
+                time.sleep(0.1)
+            if not profile_path.is_file():
+                if return_code != 0:
+                    return return_code
+                fatal_error(
+                    "The target did not produce a Windows HIP activity trace. The installed amdhip64_7.dll must export the HIP profiler extension"
+                )
+            record_count = write_windows_kernel_csv(
+                profile_path, output_path, process_id, args
+            )
+            transaction.own(output_path)
+            if stats_path is not None and record_count > 0:
+                with output_path.open(encoding="utf-8", newline="") as stream:
+                    kernel_rows = list(csv.DictReader(stream))
+                stats_rows = windows_kernel_stats_rows(kernel_rows)
+                transaction.publish_csv(
+                    stats_path, stats_rows, WINDOWS_KERNEL_STATS_COLUMNS
+                )
+            print(
+                f"[rocprofv3] Windows kernel trace: records={record_count} output={output_path}"
+                + (
+                    f" stats={stats_path}"
+                    if stats_path is not None and record_count > 0
+                    else ""
+                ),
+                flush=True,
+            )
+            transaction.commit()
+            return return_code
     finally:
         if profile_path:
             profile_path.unlink(missing_ok=True)
         profile_request.unlink(missing_ok=True)
-        windows_release_output_reservations(reservations)
 
 
 def windows_api_trace_sdk_path():
@@ -790,18 +832,24 @@ def windows_api_trace_rows(trace_path):
     return api_rows, graph_rows, marker_rows
 
 
-def windows_api_trace_output_paths(args, process_id, output_directory=None):
+def windows_api_trace_output_paths(
+    args, process_id, requested_domains, output_directory=None
+):
     output_directory = Path(
         output_directory or args.output_directory or os.getcwd()
     ).resolve()
     output_name = Path(args.output_file or str(process_id)).name
     if output_name.lower().endswith(".csv"):
         output_name = output_name[:-4]
+    suffixes = {
+        "hip_api": "hip_api_trace.csv",
+        "hip_graph": "hip_graph_trace.csv",
+        "marker_api": "marker_api_trace.csv",
+        "marker": "marker_trace.csv",
+    }
     return {
-        "hip_api": output_directory / f"{output_name}_hip_api_trace.csv",
-        "hip_graph": output_directory / f"{output_name}_hip_graph_trace.csv",
-        "marker_api": output_directory / f"{output_name}_marker_api_trace.csv",
-        "marker": output_directory / f"{output_name}_marker_trace.csv",
+        domain: output_directory / f"{output_name}_{suffixes[domain]}"
+        for domain in requested_domains
     }
 
 
@@ -825,7 +873,7 @@ def windows_write_csv(path, rows, fields):
         temporary.unlink(missing_ok=True)
 
 
-def run_windows_api_trace(app_args, args, pass_id=None):
+def run_windows_api_trace(app_args, args, pass_id=None, trace_request=None):
     if not app_args:
         fatal_error("Windows HIP/ROCTX tracing requires a target application")
     requested_formats = list(getattr(args, "output_format", None) or ["csv"])
@@ -839,11 +887,35 @@ def run_windows_api_trace(app_args, args, pass_id=None):
     if getattr(args, "input", None):
         fatal_error("Windows HIP/ROCTX tracing does not yet support --input")
 
-    hip_requested = any(
-        getattr(args, name, False)
-        for name in ("hip_trace", "hip_runtime_trace", "hip_graph_trace")
+    if trace_request is None:
+        enabled_traces = frozenset(
+            name
+            for name in (
+                "hip_trace",
+                "hip_runtime_trace",
+                "hip_compiler_trace",
+                "hip_graph_trace",
+                "marker_trace",
+            )
+            if bool(getattr(args, name, False))
+        )
+        explicit_traces = enabled_traces
+    else:
+        enabled_traces = trace_request["enabled"]
+        explicit_traces = trace_request["explicit"]
+
+    hip_api_requested = bool(
+        enabled_traces.intersection(("hip_trace", "hip_runtime_trace"))
     )
-    marker_requested = bool(getattr(args, "marker_trace", False))
+    graph_requested = "hip_graph_trace" in enabled_traces
+    marker_requested = "marker_trace" in enabled_traces
+    requested_domains = []
+    if hip_api_requested:
+        requested_domains.append("hip_api")
+    if graph_requested:
+        requested_domains.append("hip_graph")
+    if marker_requested:
+        requested_domains.extend(("marker_api", "marker"))
 
     unsupported = (
         "runtime_trace",
@@ -865,7 +937,17 @@ def run_windows_api_trace(app_args, args, pass_id=None):
         "spm",
         "advanced_thread_trace",
     )
-    selected = [name for name in unsupported if getattr(args, name, None)]
+    selected = []
+    for name in unsupported:
+        is_enabled = name in enabled_traces or bool(getattr(args, name, False))
+        if (
+            name == "hip_compiler_trace"
+            and name not in explicit_traces
+            and "hip_trace" in enabled_traces
+        ):
+            is_enabled = False
+        if is_enabled:
+            selected.append(name)
     if selected:
         fatal_error(
             "Windows HIP/ROCTX tracing cannot be combined with: {}",
@@ -891,7 +973,6 @@ def run_windows_api_trace(app_args, args, pass_id=None):
     child_env["ROCPROFILER_REGISTER_SECURE"] = "1"
     child_env["ROCPROFILER_WINDOWS_TRACE_LOG"] = str(trace_path)
     counter_requested = getattr(args, "pmc", None) is not None
-    counter_formats = requested_formats
     counter_output_file = None
     counter_result_path = None
     if counter_requested:
@@ -903,7 +984,7 @@ def run_windows_api_trace(app_args, args, pass_id=None):
             child_env,
             args,
             counters,
-            counter_formats,
+            requested_formats,
             output_directory,
             getattr(args, "output_file", None),
             sdk_path,
@@ -922,132 +1003,129 @@ def run_windows_api_trace(app_args, args, pass_id=None):
 
     paths = None
     counter_paths = []
-    reservations = []
+    transaction = WindowsOutputTransaction()
     try:
+        with transaction:
 
-        def prepare(process_id):
-            nonlocal paths, counter_paths, reservations
-            paths = windows_api_trace_output_paths(args, process_id, output_directory)
-            output_paths = list(paths.values())
-            if counter_requested:
-                counter_paths = windows_sdk_output_paths(
-                    output_directory,
-                    counter_output_file,
-                    counter_formats,
-                    process_id,
-                    kernel_trace=bool(getattr(args, "kernel_trace", False)),
-                    stats=bool(getattr(args, "stats", False)),
+            def prepare(process_id):
+                nonlocal paths, counter_paths
+                paths = windows_api_trace_output_paths(
+                    args, process_id, requested_domains, output_directory
                 )
-                output_paths.extend(counter_paths)
-            reservations = windows_reserve_output_paths(output_paths)
+                output_paths = list(paths.values())
+                if counter_requested:
+                    counter_paths = windows_sdk_output_paths(
+                        output_directory,
+                        counter_output_file,
+                        requested_formats,
+                        process_id,
+                    )
+                    output_paths.extend(counter_paths)
+                transaction.reserve(output_paths)
 
-        result = windows_launch_in_job(
-            [str(target), *app_args[1:]], child_env, os.getcwd(), prepare
-        )
-        return_code = result["exit_code"]
-        if counter_result_path is not None:
-            return_code = windows_sdk_result_status(
-                counter_result_path, return_code, counter_paths
+            result = windows_launch_in_job(
+                [str(target), *app_args[1:]], child_env, os.getcwd(), prepare
             )
-        if not trace_path.is_file():
-            if return_code != 0:
-                return return_code
-            fatal_error(
-                "The target produced no Windows SDK registration trace. Verify the matching rocprofiler-register.dll and rocprofiler-sdk.dll are discoverable"
-            )
-        lifecycle_phases = windows_api_trace_lifecycle_phases(trace_path)
-        if (
-            lifecycle_phases.count("initialize") != 1
-            or lifecycle_phases.count("finalize") != 1
-        ):
-            fatal_error(
-                "The target did not complete the Windows SDK lifecycle: {}",
-                ", ".join(lifecycle_phases) or "no lifecycle records",
-            )
-        api_rows, graph_rows, marker_rows = windows_api_trace_rows(trace_path)
-        hip_api_rows = [row for row in api_rows if row["Domain"] == "HIP_RUNTIME_API"]
-        marker_api_rows = [
-            row for row in api_rows if row["Domain"] == "MARKER_CORE_API"
-        ]
-        if hip_requested and not hip_api_rows:
-            fatal_error("The target produced no Windows HIP API records")
-        if getattr(args, "hip_graph_trace", False) and not graph_rows:
-            fatal_error("The target produced no Windows HIP graph launch records")
-        if marker_requested and (not marker_api_rows or not marker_rows):
-            fatal_error("The target produced no Windows ROCTX marker records")
+            return_code = result["exit_code"]
+            if counter_result_path is not None:
+                profiler_status, return_code = windows_sdk_result(
+                    counter_result_path, return_code, counter_paths
+                )
+                if profiler_status == "success_records":
+                    transaction.adopt(counter_paths)
+            if not trace_path.is_file():
+                if return_code != 0:
+                    return return_code
+                fatal_error(
+                    "The target produced no Windows SDK registration trace. Verify the matching rocprofiler-register.dll and rocprofiler-sdk.dll are discoverable"
+                )
+            lifecycle_phases = windows_api_trace_lifecycle_phases(trace_path)
+            if (
+                lifecycle_phases.count("initialize") != 1
+                or lifecycle_phases.count("finalize") != 1
+            ):
+                fatal_error(
+                    "The target did not complete the Windows SDK lifecycle: {}",
+                    ", ".join(lifecycle_phases) or "no lifecycle records",
+                )
+            api_rows, graph_rows, marker_rows = windows_api_trace_rows(trace_path)
+            hip_api_rows = [
+                row for row in api_rows if row["Domain"] == "HIP_RUNTIME_API"
+            ]
+            marker_api_rows = [
+                row for row in api_rows if row["Domain"] == "MARKER_CORE_API"
+            ]
+            if hip_api_requested and not hip_api_rows:
+                fatal_error("The target produced no Windows HIP API records")
+            if (
+                graph_requested
+                and "hip_graph_trace" in explicit_traces
+                and not graph_rows
+            ):
+                fatal_error("The target produced no Windows HIP graph launch records")
+            if marker_requested and (not marker_api_rows or not marker_rows):
+                fatal_error("The target produced no Windows ROCTX marker records")
 
-        requested_paths = []
-        if hip_requested:
-            requested_paths.append(paths["hip_api"])
-        if getattr(args, "hip_graph_trace", False) or graph_rows:
-            requested_paths.append(paths["hip_graph"])
-        if marker_requested:
-            requested_paths.extend((paths["marker_api"], paths["marker"]))
-        existing_paths = [path for path in requested_paths if path.exists()]
-        if existing_paths:
-            fatal_error(
-                "Windows trace output already exists: {}",
-                ", ".join(str(path) for path in existing_paths),
+            api_fields = (
+                "Domain",
+                "Function",
+                "Process_Id",
+                "Thread_Id",
+                "Correlation_Id",
+                "Start_Timestamp",
+                "End_Timestamp",
+                "Status",
             )
-
-        api_fields = (
-            "Domain",
-            "Function",
-            "Process_Id",
-            "Thread_Id",
-            "Correlation_Id",
-            "Start_Timestamp",
-            "End_Timestamp",
-            "Status",
-        )
-        if hip_requested:
-            windows_write_csv(paths["hip_api"], hip_api_rows, api_fields)
-        if getattr(args, "hip_graph_trace", False) or graph_rows:
-            windows_write_csv(
-                paths["hip_graph"],
-                graph_rows,
-                (
-                    "Kind",
-                    "Graph_Exec_Id",
-                    "Kernel_Dispatch_Count",
-                    "Process_Id",
-                    "Thread_Id",
-                    "Correlation_Id",
-                    "Timestamp",
-                    "Status",
-                ),
+            if hip_api_requested:
+                transaction.publish_csv(paths["hip_api"], hip_api_rows, api_fields)
+            if graph_requested:
+                transaction.publish_csv(
+                    paths["hip_graph"],
+                    graph_rows,
+                    (
+                        "Kind",
+                        "Graph_Exec_Id",
+                        "Kernel_Dispatch_Count",
+                        "Process_Id",
+                        "Thread_Id",
+                        "Correlation_Id",
+                        "Timestamp",
+                        "Status",
+                    ),
+                )
+            if marker_requested:
+                transaction.publish_csv(
+                    paths["marker_api"], marker_api_rows, api_fields
+                )
+                transaction.publish_csv(
+                    paths["marker"],
+                    marker_rows,
+                    (
+                        "Kind",
+                        "Operation",
+                        "Message",
+                        "Process_Id",
+                        "Thread_Id",
+                        "Correlation_Id",
+                        "Range_Id",
+                        "Start_Timestamp",
+                        "End_Timestamp",
+                        "Status",
+                    ),
+                )
+            print(
+                "[rocprofv3] Windows trace: "
+                f"hip_records={len(hip_api_rows)} graph_records={len(graph_rows)} "
+                f"marker_api_records={len(marker_api_rows)} "
+                f"marker_records={len(marker_rows)} lifecycle=initialize,finalize",
+                flush=True,
             )
-        if marker_requested:
-            windows_write_csv(paths["marker_api"], marker_api_rows, api_fields)
-            windows_write_csv(
-                paths["marker"],
-                marker_rows,
-                (
-                    "Kind",
-                    "Operation",
-                    "Message",
-                    "Process_Id",
-                    "Thread_Id",
-                    "Correlation_Id",
-                    "Range_Id",
-                    "Start_Timestamp",
-                    "End_Timestamp",
-                    "Status",
-                ),
-            )
-        print(
-            "[rocprofv3] Windows trace: "
-            f"hip_records={len(hip_api_rows)} graph_records={len(graph_rows)} "
-            f"marker_api_records={len(marker_api_rows)} marker_records={len(marker_rows)} "
-            "lifecycle=initialize,finalize",
-            flush=True,
-        )
-        return return_code
+            transaction.commit()
+            return return_code
     finally:
         trace_path.unlink(missing_ok=True)
         if counter_result_path is not None:
             counter_result_path.unlink(missing_ok=True)
-        windows_release_output_reservations(reservations)
 
 
 def windows_sdk_library_path(name, environment_name):
@@ -1070,7 +1148,7 @@ def windows_sdk_result_path(output_directory):
     return Path(output_directory) / f".rocprofv3-windows-result-{uuid.uuid4().hex}.txt"
 
 
-def windows_sdk_result_status(result_path, target_status, expected_outputs=()):
+def windows_sdk_result(result_path, target_status, expected_outputs=()):
     if not result_path.is_file():
         try:
             with result_path.open("x", encoding="utf-8", newline="") as stream:
@@ -1105,9 +1183,9 @@ def windows_sdk_result_status(result_path, target_status, expected_outputs=()):
                 "Windows profiler reported records but did not publish: {}",
                 ", ".join(missing),
             )
-        return target_status
+        return status, target_status
     if status in ("success_no_dispatch", "success_unknown_counter"):
-        return target_status
+        return status, target_status
     fatal_error(
         "Windows profiler failed ({}): {}",
         status,
@@ -1293,15 +1371,13 @@ def run_windows_sdk_pmc(app_args, args, pass_id=None):
     result_path = windows_sdk_result_path(output_directory)
     environment["ROCPROFILER_WINDOWS_RESULT_FILE"] = str(result_path)
     expected_outputs = []
-    requested_outputs = []
-    reservations = []
     rocpd_json_path = None
     rocpd_database_path = None
     remove_internal_json = "rocpd" in formats and "json" not in formats
+    transaction = WindowsOutputTransaction()
 
     def prepare(process_id):
-        nonlocal expected_outputs, requested_outputs, reservations
-        nonlocal rocpd_json_path, rocpd_database_path
+        nonlocal expected_outputs, rocpd_json_path, rocpd_database_path
         expected_outputs = windows_sdk_output_paths(
             output_directory,
             output_file,
@@ -1325,70 +1401,83 @@ def run_windows_sdk_pmc(app_args, args, pass_id=None):
             rocpd_database_path = windows_sdk_output_paths(
                 output_directory, output_file, ["rocpd"], process_id
             )[0]
-        reservations = windows_reserve_output_paths(
-            list(dict.fromkeys([*expected_outputs, *requested_outputs]))
-        )
+        transaction.reserve([*expected_outputs, *requested_outputs])
 
     try:
-        target_status = windows_launch_in_job(
-            command, environment, os.getcwd(), prepare
-        )["exit_code"]
-        return_status = windows_sdk_result_status(
-            result_path, target_status, expected_outputs
-        )
-        if rocpd_json_path is not None and rocpd_json_path.is_file():
-            counts = windows_generate_rocpd(
-                rocpd_json_path, rocpd_database_path, command
+        with transaction:
+            target_status = windows_launch_in_job(
+                command, environment, os.getcwd(), prepare
+            )["exit_code"]
+            profiler_status, return_status = windows_sdk_result(
+                result_path, target_status, expected_outputs
             )
-            print(
-                "[rocprofv3] Windows ROCpd: "
-                f"dispatches={counts['dispatches']} counters={counts['counters']} "
-                f"kernel_symbols={counts['kernel_symbols']} database={rocpd_database_path}",
-                flush=True,
-            )
-        return return_status
+            if profiler_status == "success_records":
+                transaction.adopt(expected_outputs)
+            if rocpd_json_path is not None and rocpd_json_path.is_file():
+                counts = windows_generate_rocpd(
+                    rocpd_json_path, rocpd_database_path, command
+                )
+                transaction.own(rocpd_database_path)
+                print(
+                    "[rocprofv3] Windows ROCpd: "
+                    f"dispatches={counts['dispatches']} counters={counts['counters']} "
+                    f"kernel_symbols={counts['kernel_symbols']} "
+                    f"database={rocpd_database_path}",
+                    flush=True,
+                )
+            if remove_internal_json and rocpd_json_path is not None:
+                rocpd_json_path.unlink(missing_ok=True)
+            transaction.commit()
+            return return_status
     finally:
         if remove_internal_json and rocpd_json_path is not None:
             rocpd_json_path.unlink(missing_ok=True)
         result_path.unlink(missing_ok=True)
-        windows_release_output_reservations(reservations)
 
 
 def run_windows(app_args, args, **kwargs):
     if getattr(args, "list_avail", False):
         return run_windows_availability(app_args)
-    if getattr(args, "pmc", None) is not None:
-        tracing_requested = any(
-            getattr(args, name, False)
+    trace_request = kwargs.get("trace_request")
+    enabled_traces = (
+        trace_request["enabled"]
+        if trace_request is not None
+        else frozenset(
+            name
             for name in (
                 "hip_trace",
                 "hip_runtime_trace",
+                "hip_compiler_trace",
                 "hip_graph_trace",
                 "marker_trace",
             )
+            if bool(getattr(args, name, False))
         )
-        if tracing_requested:
-            return run_windows_api_trace(app_args, args, kwargs.get("pass_id"))
-        return run_windows_sdk_pmc(app_args, args, kwargs.get("pass_id"))
-    if any(
-        getattr(args, name, False)
-        for name in (
+    )
+    api_traces = enabled_traces.intersection(
+        (
             "hip_trace",
             "hip_runtime_trace",
+            "hip_compiler_trace",
             "hip_graph_trace",
             "marker_trace",
         )
-    ):
-        return run_windows_api_trace(app_args, args)
+    )
+    if getattr(args, "pmc", None) is not None:
+        if api_traces:
+            return run_windows_api_trace(
+                app_args,
+                args,
+                kwargs.get("pass_id"),
+                trace_request=trace_request,
+            )
+        return run_windows_sdk_pmc(app_args, args, kwargs.get("pass_id"))
+    if api_traces:
+        return run_windows_api_trace(
+            app_args, args, trace_request=trace_request
+        )
     if not getattr(args, "kernel_trace", False):
         fatal_error(
             "Target application profiling requires --kernel-trace, --hip-trace, --hip-runtime-trace, --hip-graph-trace, or --marker-trace on Windows"
         )
     return run_windows_kernel_trace(app_args, args)
-
-
-__all__ = tuple(
-    name
-    for name in globals()
-    if name.startswith(("WINDOWS_", "windows_", "run_windows", "write_windows"))
-)

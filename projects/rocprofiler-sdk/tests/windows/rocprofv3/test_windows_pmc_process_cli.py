@@ -447,6 +447,82 @@ def test_counter_and_hip_trace_compose_in_one_process(tmp_path):
     assert {row["Domain"] for row in hip_rows} == {"HIP_RUNTIME_API"}
 
 
+def test_explicit_graph_disable_ignores_unrelated_graph_output(tmp_path):
+    graph_output = tmp_path / "disabled_hip_graph_trace.csv"
+    graph_output.write_text("retained\n", encoding="utf-8")
+    result = run_cli(
+        "--hip-runtime-trace",
+        "--hip-graph-trace=false",
+        "-d",
+        str(tmp_path),
+        "-o",
+        "disabled",
+        "--",
+        str(workload()),
+        "--graph",
+        "--dispatches",
+        "2",
+    )
+    assert result.returncode == 0, result.stdout
+    assert graph_output.read_text(encoding="utf-8") == "retained\n"
+    assert read_csv(tmp_path / "disabled_hip_api_trace.csv")
+    assert not list(tmp_path.glob(".*.rocprofv3-reserve"))
+
+
+def test_api_publication_failure_rolls_back_earlier_trace(tmp_path):
+    conflict = tmp_path / "api-failure_marker_api_trace.csv"
+    result = run_cli(
+        "--hip-runtime-trace",
+        "--marker-trace",
+        "-d",
+        str(tmp_path),
+        "-o",
+        "api-failure",
+        "--",
+        str(workload()),
+        "--markers",
+        "--dispatches",
+        "2",
+        "--create-file",
+        str(conflict),
+    )
+    assert result.returncode == 1
+    assert "output already exists" in result.stdout
+    assert conflict.read_text(encoding="utf-8") == "target-created\n"
+    assert not (tmp_path / "api-failure_hip_api_trace.csv").exists()
+    assert not (tmp_path / "api-failure_marker_trace.csv").exists()
+    assert not list(tmp_path.glob(".*.rocprofv3-reserve"))
+
+
+def test_trace_failure_rolls_back_native_counter_outputs(tmp_path):
+    conflict = tmp_path / "composed-failure_hip_api_trace.csv"
+    result = run_cli(
+        "--pmc",
+        "SQ_WAVES",
+        "--hip-runtime-trace",
+        "-f",
+        "csv",
+        "json",
+        "-d",
+        str(tmp_path),
+        "-o",
+        "composed-failure",
+        "--",
+        str(workload()),
+        "--dispatches",
+        "2",
+        "--create-file",
+        str(conflict),
+    )
+    assert result.returncode == 1
+    assert "output already exists" in result.stdout
+    assert conflict.read_text(encoding="utf-8") == "target-created\n"
+    assert not (tmp_path / "composed-failure_agent_info.csv").exists()
+    assert not (tmp_path / "composed-failure_counter_collection.csv").exists()
+    assert not (tmp_path / "composed-failure_results.json").exists()
+    assert not list(tmp_path.glob(".*.rocprofv3-reserve"))
+
+
 def test_unknown_counter_warns_without_output(tmp_path):
     result = run_cli(
         "--pmc",
@@ -523,10 +599,12 @@ def test_repeated_fresh_processes_drain_counter_callbacks(tmp_path):
         assert [int(row["Dispatch_Id"]) for row in rows] == [1, 2]
         assert {row["Counter_Name"] for row in rows} == {"SQ_WAVES"}
         assert all(float(row["Counter_Value"]) > 0 for row in rows)
-        assert all(int(row["Start_Timestamp"]) > 0 for row in rows)
+        assert all(
+            int(row["Start_Timestamp"]) > 0 for row in rows
+        ), result.stdout
         assert all(
             int(row["End_Timestamp"]) > int(row["Start_Timestamp"]) for row in rows
-        )
+        ), result.stdout
 
 
 def test_output_publication_failure_is_reported_and_partial_output_is_removed(tmp_path):
@@ -608,6 +686,7 @@ def test_rocpd_target_conflict_is_preserved_and_internal_json_is_removed(tmp_pat
         "--pmc",
         "SQ_WAVES",
         "-f",
+        "csv",
         "rocpd",
         "-d",
         str(tmp_path),
@@ -623,7 +702,10 @@ def test_rocpd_target_conflict_is_preserved_and_internal_json_is_removed(tmp_pat
     assert result.returncode == 1
     assert "rocpd_conversion_failed: output already exists" in result.stdout
     assert conflict.read_text(encoding="utf-8") == "target-created\n"
+    assert not (tmp_path / "database-conflict_agent_info.csv").exists()
+    assert not (tmp_path / "database-conflict_counter_collection.csv").exists()
     assert not (tmp_path / "database-conflict_results.json").exists()
+    assert not list(tmp_path.glob(".*.rocprofv3-reserve"))
 
 
 def test_existing_rocpd_output_prevents_launch(tmp_path):

@@ -468,7 +468,7 @@ def test_pid_output_collision_stops_suspended_target(rocprofv3, tmp_path, capsys
         output = tmp_path / f"result_{process_id}_kernel_trace.csv"
         output.write_text("retained", encoding="utf-8")
         retained["output"] = output
-        rocprofv3.windows_reserve_output_paths([output])
+        rocprofv3.WindowsOutputTransaction().reserve([output])
 
     require_fatal(
         capsys,
@@ -483,6 +483,24 @@ def test_pid_output_collision_stops_suspended_target(rocprofv3, tmp_path, capsys
     assert retained["output"].read_text(encoding="utf-8") == "retained"
     assert not marker.exists()
     assert not rocprofv3.windows_output_reservation_path(retained["output"]).exists()
+
+
+def test_output_transaction_rolls_back_owned_files_only(rocprofv3, tmp_path, capsys):
+    first = tmp_path / "first.csv"
+    conflict = tmp_path / "conflict.csv"
+
+    def publish_then_fail():
+        with rocprofv3.WindowsOutputTransaction() as transaction:
+            transaction.reserve([first, conflict])
+            transaction.publish_csv(first, [{"value": 1}], ("value",))
+            conflict.write_text("target-created\n", encoding="utf-8")
+            transaction.publish_csv(conflict, [{"value": 2}], ("value",))
+
+    require_fatal(capsys, publish_then_fail, "output already exists")
+    assert not first.exists()
+    assert conflict.read_text(encoding="utf-8") == "target-created\n"
+    assert not rocprofv3.windows_output_reservation_path(first).exists()
+    assert not rocprofv3.windows_output_reservation_path(conflict).exists()
 
 
 def test_sdk_counter_environment_uses_common_contract(rocprofv3, tmp_path, monkeypatch):
@@ -754,10 +772,13 @@ def test_sdk_result_status_distinguishes_profiler_failures(rocprofv3, tmp_path, 
     result.write_text("version=1\nstatus=success_records\ndetail=\n", encoding="utf-8")
     output = tmp_path / "counter_collection.csv"
     output.write_text("records\n", encoding="utf-8")
-    assert rocprofv3.windows_sdk_result_status(result, 7, [output]) == 7
+    assert rocprofv3.windows_sdk_result(result, 7, [output]) == (
+        "success_records",
+        7,
+    )
     require_fatal(
         capsys,
-        lambda: rocprofv3.windows_sdk_result_status(
+        lambda: rocprofv3.windows_sdk_result(
             result, 0, [tmp_path / "missing.csv"]
         ),
         "did not publish",
@@ -769,12 +790,12 @@ def test_sdk_result_status_distinguishes_profiler_failures(rocprofv3, tmp_path, 
     )
     require_fatal(
         capsys,
-        lambda: rocprofv3.windows_sdk_result_status(result, 0),
+        lambda: rocprofv3.windows_sdk_result(result, 0),
         "output_publication_failed",
     )
 
     result.unlink()
-    assert rocprofv3.windows_sdk_result_status(result, 0) == 0
+    assert rocprofv3.windows_sdk_result(result, 0) == ("success_no_dispatch", 0)
     assert "status=success_no_dispatch" in result.read_text(encoding="utf-8")
 
 

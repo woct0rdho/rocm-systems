@@ -3,7 +3,7 @@
 // Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "counter_config_common.hpp"
-#include "windows_kernel_selector.hpp"
+#include "kernel_selector.hpp"
 #include "lib/rocprofiler-sdk/hsa/windows_tool.hpp"
 
 #include "lib/common/demangle.hpp"
@@ -257,7 +257,7 @@ struct tool_state
     std::vector<counter_record> records = {};
     size_t selected_dispatches = 0;
     std::vector<rocprofiler_agent_t> agents = {};
-    rocprofiler::tool::windows::kernel_selector selector;
+    rocprofiler::tool::kernel_selector selector;
     bool selected_active = false;
     int64_t selected_ref_count = 0;
     std::atomic<bool> unknown_counter{false};
@@ -425,9 +425,10 @@ dispatch_callback(rocprofiler_dispatch_counting_service_data_t data,
         auto lock = std::lock_guard<std::mutex>{state.mutex};
         state.kernel_info[kernel_id] = metadata;
 
-        if(!state.selector.select(data.dispatch_info.dispatch_id,
-                                  metadata.formatted_kernel_name))
-            return;
+        const auto selected =
+            state.selector.select(data.dispatch_info.dispatch_id, metadata.formatted_kernel_name);
+        state.selector.erase(data.dispatch_info.dispatch_id);
+        if(!selected) return;
     }
 
     *config = get_profile(state, data.dispatch_info.agent_id);

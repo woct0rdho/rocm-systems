@@ -6,7 +6,7 @@ rocprofiler_activate_clang_tidy()
 
 # Adding main rocprofv3
 configure_file(rocprofv3.py ${PROJECT_BINARY_DIR}/${CMAKE_INSTALL_BINDIR}/rocprofv3 @ONLY)
-foreach(_windows_module _rocprofv3_windows.py _rocprofv3_windows_job.py)
+foreach(_windows_module _rocprofv3_windows.py _rocprofv3_windows_job.py _rocprofv3_rocpd.py)
     configure_file(
         ${_windows_module}
         ${PROJECT_BINARY_DIR}/${CMAKE_INSTALL_BINDIR}/${_windows_module}
@@ -24,6 +24,7 @@ install(
     FILES
         ${PROJECT_BINARY_DIR}/${CMAKE_INSTALL_BINDIR}/_rocprofv3_windows.py
         ${PROJECT_BINARY_DIR}/${CMAKE_INSTALL_BINDIR}/_rocprofv3_windows_job.py
+        ${PROJECT_BINARY_DIR}/${CMAKE_INSTALL_BINDIR}/_rocprofv3_rocpd.py
     DESTINATION ${CMAKE_INSTALL_BINDIR}
     PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ
     COMPONENT tools)

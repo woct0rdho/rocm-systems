@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -546,7 +547,7 @@ def test_sdk_counter_environment_uses_common_contract(rocprofv3, tmp_path, monke
     outputs = rocprofv3.windows_sdk_output_paths(
         tmp_path / "output",
         "profile-%pid%",
-        ["csv", "json"],
+        ["csv", "json", "rocpd"],
         4242,
         kernel_trace=True,
         stats=True,
@@ -557,7 +558,173 @@ def test_sdk_counter_environment_uses_common_contract(rocprofv3, tmp_path, monke
         "profile-4242_kernel_trace.csv",
         "profile-4242_kernel_stats.csv",
         "profile-4242_results.json",
+        "profile-4242_results.db",
     ]
+    assert rocprofv3.windows_rocpd_sdk_formats(["rocpd"]) == ["json"]
+    assert rocprofv3.windows_rocpd_sdk_formats(["csv", "rocpd"]) == [
+        "csv",
+        "json",
+    ]
+
+
+def write_rocpd_source(path, *, valid_metadata=True):
+    symbol = {
+        "size": 216,
+        "kernel_id": 7,
+        "code_object_id": 0,
+        "kernel_name": "_Z15dispatch_vectorv",
+        "kernel_object": 4096,
+        "kernarg_segment_size": 32,
+        "kernarg_segment_alignment": 16,
+        "group_segment_size": 513,
+        "private_segment_size": 64,
+        "sgpr_count": 128 if valid_metadata else 0,
+        "arch_vgpr_count": 32,
+        "accum_vgpr_count": 0,
+        "kernel_code_entry_byte_offset": 256,
+        "kernel_address": {"handle": 4352},
+        "formatted_kernel_name": "dispatch_vector()",
+        "demangled_kernel_name": "dispatch_vector()",
+        "truncated_kernel_name": "dispatch_vector",
+    }
+    dispatch_info = {
+        "agent_id": {"handle": 222},
+        "queue_id": {"handle": 2},
+        "kernel_id": 7,
+        "dispatch_id": 3,
+        "private_segment_size": 64,
+        "group_segment_size": 513,
+        "workgroup_size": {"x": 256, "y": 1, "z": 1},
+        "grid_size": {"x": 4096, "y": 1, "z": 1},
+    }
+    dispatch = {
+        "thread_id": 44,
+        "correlation_id": {"internal": 9, "external": 0},
+        "start_timestamp": 1000,
+        "end_timestamp": 1800,
+        "dispatch_info": dispatch_info,
+        "stream_id": {"handle": 0},
+        "graph_exec_id": 0,
+        "graph_node_id": 0,
+    }
+    counter = {
+        "thread_id": 44,
+        "dispatch_data": {
+            "correlation_id": {"internal": 9, "external": 0},
+            "start_timestamp": 1000,
+            "end_timestamp": 1800,
+            "dispatch_info": dispatch_info,
+        },
+        "records": [{"counter_id": {"handle": 333}, "value": 12.5}],
+        "stream_id": {"handle": 0},
+    }
+    path.write_text(
+        json.dumps(
+            {
+                "rocprofiler-sdk-tool": [
+                    {
+                        "metadata": {"pid": 4242, "init_time": 900, "fini_time": 1900},
+                        "agents": [
+                            {
+                                "id": {"handle": 111},
+                                "type": 1,
+                                "node_id": 0,
+                                "logical_node_id": 0,
+                                "logical_node_type_id": 0,
+                                "name": "CPU",
+                            },
+                            {
+                                "id": {"handle": 222},
+                                "type": 2,
+                                "node_id": 1,
+                                "logical_node_id": 1,
+                                "logical_node_type_id": 0,
+                                "name": "gfx1151",
+                            },
+                        ],
+                        "counters": [
+                            {
+                                "agent_id": {"handle": 222},
+                                "id": {"handle": 333},
+                                "is_constant": 0,
+                                "is_derived": 0,
+                                "name": "SQ_WAVES",
+                                "description": "waves",
+                                "block": "SQ",
+                                "expression": "",
+                            }
+                        ],
+                        "kernel_symbols": [symbol],
+                        "callback_records": {
+                            "counter_collection": [counter],
+                            "spm_counter_collection": [],
+                        },
+                        "buffer_records": {"kernel_dispatch": [dispatch]},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_rocpd_conversion_uses_linux_schema_and_authoritative_records(
+    rocprofv3, tmp_path
+):
+    source = tmp_path / "authoritative.json"
+    database = tmp_path / "profile_results.db"
+    write_rocpd_source(source)
+    counts = rocprofv3.windows_generate_rocpd(
+        source, database, ["target.exe", "--dispatches", "1"]
+    )
+    assert counts == {"dispatches": 1, "counters": 1, "kernel_symbols": 1}
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute(
+            "SELECT value FROM rocpd_metadata WHERE tag = 'schema_version'"
+        ).fetchone() == ("3.0.3",)
+        assert connection.execute(
+            "SELECT dispatch_id, name, start, end, duration, lds_size, scratch_size, "
+            "vgpr_count, accum_vgpr_count, sgpr_count FROM kernels"
+        ).fetchone() == (
+            3,
+            "dispatch_vector()",
+            1000,
+            1800,
+            800,
+            1024,
+            64,
+            32,
+            0,
+            128,
+        )
+        assert connection.execute(
+            "SELECT dispatch_id, counter_name, counter_value FROM pmc_events"
+        ).fetchone() == (3, "SQ_WAVES", 12.5)
+        assert connection.execute(
+            "SELECT name, total_calls, total_duration, average, percentage "
+            "FROM top_kernels"
+        ).fetchone() == ("dispatch_vector()", 1, 0.8, 0.8, 100.0)
+        assert connection.execute(
+            "SELECT command FROM rocpd_info_process"
+        ).fetchone() == ('target.exe --dispatches 1',)
+
+
+def test_rocpd_conversion_failure_removes_partial_database(
+    rocprofv3, tmp_path, capsys
+):
+    source = tmp_path / "invalid.json"
+    database = tmp_path / "invalid_results.db"
+    write_rocpd_source(source, valid_metadata=False)
+    require_fatal(
+        capsys,
+        lambda: rocprofv3.windows_generate_rocpd(source, database, ["target.exe"]),
+        "rocpd_conversion_failed: kernel_metadata_missing",
+    )
+    assert not database.exists()
+    assert not list(tmp_path.glob(".*.tmp"))
 
 
 def test_availability_initialization_failure_is_reported(tmp_path, monkeypatch, capsys):

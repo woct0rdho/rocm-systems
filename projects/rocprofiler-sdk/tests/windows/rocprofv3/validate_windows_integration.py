@@ -497,6 +497,141 @@ def test_windows_integration_case():
             assert symbol["arch_vgpr_count"] == expected["VGPR_Count"]
             assert symbol["accum_vgpr_count"] == expected["Accum_VGPR_Count"]
             assert symbol["sgpr_count"] == expected["SGPR_Count"]
+
+        rocpd = data["rocpd"]
+        assert rocpd["returncode"] == 0
+        assert rocpd["exists"]
+        assert not rocpd["internal_json_exists"]
+        assert rocpd["integrity"] == "ok"
+        assert rocpd["foreign_key_errors"] == []
+        assert "Windows ROCpd: dispatches=6 counters=18 kernel_symbols=3" in rocpd[
+            "stdout"
+        ]
+        assert rocpd["metadata"]["schema_version"] == "3.0.3"
+        assert rocpd["metadata"]["producer"] == "rocprofv3-windows-post-target"
+        assert rocpd["metadata"]["source_format"] == "rocprofiler-sdk-tool-json"
+        assert rocpd["metadata"]["dispatch_count"] == "6"
+        assert rocpd["metadata"]["counter_record_count"] == "18"
+        assert {
+            "rocpd_kernel_dispatch",
+            "rocpd_info_kernel_symbol",
+            "rocpd_info_pmc",
+            "rocpd_pmc_event",
+            "kernels",
+            "kernel_symbols",
+            "pmc_events",
+            "top_kernels",
+            "top",
+        }.issubset(rocpd["schema_objects"])
+
+        database_kernels = rocpd["kernels"]
+        assert [row["dispatch_id"] for row in database_kernels] == list(range(1, 7))
+        assert [
+            next(name for name in set(enqueue_sequence) if name in row["name"])
+            for row in database_kernels
+        ] == enqueue_sequence
+        for row, name in zip(database_kernels, enqueue_sequence):
+            assert row["kernel_id"] > 0
+            assert row["tid"] > 0
+            assert row["agent_abs_index"] == 1
+            assert row["queue_id"] > 0
+            assert row["stream_id"] >= 0
+            assert row["start"] > 0
+            assert row["end"] > row["start"]
+            assert row["duration"] == row["end"] - row["start"]
+            assert (row["grid_x"], row["grid_y"], row["grid_z"]) == (
+                1_048_576,
+                1,
+                1,
+            )
+            assert (
+                row["workgroup_x"],
+                row["workgroup_y"],
+                row["workgroup_z"],
+            ) == (256, 1, 1)
+            expected = resource_metadata[name]
+            assert {
+                "LDS_Block_Size": row["lds_size"],
+                "Scratch_Size": row["scratch_size"],
+                "VGPR_Count": row["vgpr_count"],
+                "Accum_VGPR_Count": row["accum_vgpr_count"],
+                "SGPR_Count": row["sgpr_count"],
+            } == expected
+
+        database_pmc = rocpd["pmc_events"]
+        assert len(database_pmc) == 18
+        assert {row["dispatch_id"] for row in database_pmc} == set(range(1, 7))
+        assert {row["counter_name"] for row in database_pmc} == {
+            "L2CacheHit",
+            "VALUInsts",
+            "LDSBankConflict",
+        }
+        database_kernel_by_id = {
+            row["dispatch_id"]: row for row in database_kernels
+        }
+        for row in database_pmc:
+            kernel = database_kernel_by_id[row["dispatch_id"]]
+            assert row["name"] == kernel["name"]
+            assert row["start"] == kernel["start"]
+            assert row["end"] == kernel["end"]
+            assert row["duration"] == kernel["duration"]
+            assert math.isfinite(row["counter_value"])
+
+        database_symbols = rocpd["kernel_symbols"]
+        assert len(database_symbols) == len(resource_metadata)
+        for symbol in database_symbols:
+            name = next(
+                name
+                for name in resource_metadata
+                if name in symbol["formatted_kernel_name"]
+            )
+            expected = resource_metadata[name]
+            assert {
+                "LDS_Block_Size": symbol["group_segment_size"],
+                "Scratch_Size": symbol["private_segment_size"],
+                "VGPR_Count": symbol["arch_vgpr_count"],
+                "Accum_VGPR_Count": symbol["accum_vgpr_count"],
+                "SGPR_Count": symbol["sgpr_count"],
+            } == expected
+
+        top_kernels = rocpd["top_kernels"]
+        assert len(top_kernels) == len(resource_metadata)
+        expected_calls = {
+            "dispatch_vector": 3,
+            "dispatch_lds_conflict": 2,
+            "dispatch_resource": 1,
+        }
+        assert {
+            next(name for name in expected_calls if name in row["name"]): row[
+                "total_calls"
+            ]
+            for row in top_kernels
+        } == expected_calls
+        durations_by_name = {}
+        for kernel in database_kernels:
+            durations_by_name.setdefault(kernel["name"], []).append(kernel["duration"])
+        total_database_duration = sum(
+            sum(durations) for durations in durations_by_name.values()
+        )
+        for row in top_kernels:
+            durations = durations_by_name[row["name"]]
+            duration_sum = sum(durations)
+            assert math.isclose(
+                row["total_duration"], duration_sum / 1000.0, rel_tol=1.0e-12
+            )
+            assert math.isclose(
+                row["average"],
+                (duration_sum // len(durations)) / 1000.0,
+                rel_tol=1.0e-12,
+            )
+            assert math.isclose(
+                row["percentage"],
+                duration_sum * 100.0 / total_database_duration,
+                rel_tol=1.0e-12,
+            )
+        assert math.isclose(
+            sum(row["percentage"] for row in top_kernels), 100.0, abs_tol=1.0e-9
+        )
     elif case == "hip-trace":
         assert data["returncode"] == 0
         require_workload(data["stdout"])

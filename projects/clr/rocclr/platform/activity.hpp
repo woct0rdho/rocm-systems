@@ -17,6 +17,8 @@
 
 namespace amd {
 class Command;
+class Device;
+class Kernel;
 }  // namespace amd
 
 enum OpId { OP_ID_DISPATCH = 0, OP_ID_COPY = 1, OP_ID_BARRIER = 2, OP_ID_NUMBER = 3 };
@@ -66,6 +68,16 @@ constexpr OpId OperationId(cl_command_type commandType) {
   }
 }
 
+struct KernelResourceData {
+  uint32_t group_segment_size = 0;
+  uint32_t private_segment_size = 0;
+  uint32_t arch_vgpr_count = 0;
+  uint32_t accum_vgpr_count = 0;
+  uint32_t sgpr_count = 0;
+};
+
+bool GetKernelResourceData(const amd::Kernel& kernel, const amd::Device& device,
+                           KernelResourceData& output);
 bool IsEnabled(OpId operation_id);
 void ReportActivity(const amd::Command& command);
 

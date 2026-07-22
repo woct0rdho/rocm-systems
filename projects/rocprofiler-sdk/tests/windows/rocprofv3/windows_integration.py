@@ -316,6 +316,7 @@ def run_hip_trace(args, env, output, graph: bool = False, marker: bool = False):
         "stdout": stdout,
         "rows": rows,
         "api_output": str(api_output),
+        "api_output_exists": api_output.is_file(),
         "graph_output_exists": graph_output.is_file(),
         "graph_rows": graph_rows,
         "marker_api_rows": marker_api_rows,

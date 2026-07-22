@@ -1,0 +1,99 @@
+{
+  "version": 1,
+  "architecture": "gfx1151",
+  "workload_dispatches": 6,
+  "csv": {
+    "kernel_trace": {
+      "columns": [
+        "Kind",
+        "Agent_Id",
+        "Queue_Id",
+        "Stream_Id",
+        "Thread_Id",
+        "Dispatch_Id",
+        "Kernel_Id",
+        "Kernel_Name",
+        "Correlation_Id",
+        "Start_Timestamp",
+        "End_Timestamp",
+        "LDS_Block_Size",
+        "Scratch_Size",
+        "VGPR_Count",
+        "Accum_VGPR_Count",
+        "SGPR_Count",
+        "Workgroup_Size_X",
+        "Workgroup_Size_Y",
+        "Workgroup_Size_Z",
+        "Grid_Size_X",
+        "Grid_Size_Y",
+        "Grid_Size_Z"
+      ],
+      "rows": 6
+    },
+    "counter_collection": {
+      "columns": [
+        "Correlation_Id",
+        "Dispatch_Id",
+        "Agent_Id",
+        "Queue_Id",
+        "Process_Id",
+        "Thread_Id",
+        "Grid_Size",
+        "Kernel_Id",
+        "Kernel_Name",
+        "Workgroup_Size",
+        "LDS_Block_Size",
+        "Scratch_Size",
+        "VGPR_Count",
+        "Accum_VGPR_Count",
+        "SGPR_Count",
+        "Counter_Name",
+        "Counter_Value",
+        "Start_Timestamp",
+        "End_Timestamp"
+      ],
+      "rows": 18
+    },
+    "kernel_stats": {
+      "columns": [
+        "Name",
+        "Calls",
+        "TotalDurationNs",
+        "AverageNs",
+        "Percentage",
+        "MinNs",
+        "MaxNs",
+        "StdDev"
+      ],
+      "rows": 3
+    }
+  },
+  "invariants": {
+    "dispatch_ids": [1, 2, 3, 4, 5, 6],
+    "kernel_call_counts": {
+      "dispatch_vector": 3,
+      "dispatch_lds_conflict": 2,
+      "dispatch_resource": 1
+    },
+    "counter_names": ["L2CacheHit", "VALUInsts", "LDSBankConflict"],
+    "counter_rows_per_dispatch": 3,
+    "positive_counters": ["L2CacheHit", "VALUInsts"],
+    "nonzero_lds_kernel": "dispatch_lds_conflict",
+    "nonzero_vgpr_kernel": "dispatch_resource",
+    "timestamps": "positive_ordered_system_nanoseconds",
+    "database_views": ["kernels", "top_kernels"],
+    "json_nodes": [
+      "agents",
+      "buffer_records.kernel_dispatch",
+      "callback_records.counter_collection",
+      "kernel_symbols",
+      "summary"
+    ]
+  },
+  "selection_oracle": {
+    "case": "vector-iteration-two",
+    "selected_counter_dispatch_ids": [3],
+    "kernel_trace_dispatch_ids": [1, 2, 3, 4, 5, 6],
+    "note": "The current Linux tool applies this selector to counter collection but not to the independent kernel trace/statistics stream. The Windows composed contract intentionally applies one cached selection to both artifacts."
+  }
+}

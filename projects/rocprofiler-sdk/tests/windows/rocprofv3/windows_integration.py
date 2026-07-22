@@ -20,6 +20,7 @@ CASES = (
     "availability",
     "baseline",
     "kernel-trace",
+    "dispatch-analysis-contract",
     "hip-trace",
     "hip-graph",
     "hip-marker",
@@ -381,6 +382,101 @@ def run_kernel_trace(args, env, output):
     }
 
 
+def read_csv_if_present(path: Path):
+    if not path.is_file():
+        return []
+    with path.open(encoding="utf-8", newline="") as stream:
+        return list(csv.DictReader(stream))
+
+
+def run_dispatch_analysis_contract(args, env, output):
+    contract = json.loads(
+        args.dispatch_analysis_contract.read_text(encoding="utf-8")
+    )
+    workload = str(args.dispatch_analysis_workload.resolve())
+
+    standalone_directory = output / "standalone"
+    standalone_directory.mkdir()
+    standalone_command = [
+        str(args.python),
+        str(args.rocprofv3),
+        "--kernel-trace",
+        "--stats",
+        "--kernel-include-regex",
+        "dispatch_vector",
+        "--kernel-iteration-range",
+        "[2]",
+        "-f",
+        "csv",
+        "-d",
+        str(standalone_directory),
+        "-o",
+        "contract",
+        "--",
+        workload,
+        "--reverse-completion",
+    ]
+    standalone_status, _, standalone_stdout = run_command(
+        standalone_command,
+        env,
+        output / "standalone.stdout.txt",
+        timeout=120,
+    )
+    standalone_trace = standalone_directory / "contract_kernel_trace.csv"
+    standalone_stats = standalone_directory / "contract_kernel_stats.csv"
+
+    composed_directory = output / "composed"
+    composed_directory.mkdir()
+    composed_command = [
+        str(args.python),
+        str(args.rocprofv3),
+        "--kernel-trace",
+        "--stats",
+        "--pmc",
+        *contract["counter_group"],
+        "-f",
+        "csv",
+        "json",
+        "-d",
+        str(composed_directory),
+        "-o",
+        "contract",
+        "--",
+        workload,
+    ]
+    composed_status, _, composed_stdout = run_command(
+        composed_command,
+        env,
+        output / "composed.stdout.txt",
+        timeout=120,
+    )
+    composed_counter = composed_directory / "contract_counter_collection.csv"
+    composed_trace = composed_directory / "contract_kernel_trace.csv"
+    composed_stats = composed_directory / "contract_kernel_stats.csv"
+    composed_json = composed_directory / "contract_results.json"
+
+    return {
+        "contract_version": contract["version"],
+        "standalone": {
+            "command": standalone_command,
+            "returncode": standalone_status,
+            "stdout": standalone_stdout,
+            "trace_rows": read_csv_if_present(standalone_trace),
+            "trace_exists": standalone_trace.is_file(),
+            "stats_exists": standalone_stats.is_file(),
+        },
+        "composed": {
+            "command": composed_command,
+            "returncode": composed_status,
+            "stdout": composed_stdout,
+            "counter_rows": read_csv_if_present(composed_counter),
+            "trace_rows": read_csv_if_present(composed_trace),
+            "trace_exists": composed_trace.is_file(),
+            "stats_exists": composed_stats.is_file(),
+            "json_exists": composed_json.is_file(),
+        },
+    }
+
 
 def run_no_overwrite(args, env, output):
     retained_output = output / "result_counter_collection.csv"
@@ -421,6 +517,8 @@ def main() -> int:
     parser.add_argument("--rocprofv3-avail", type=Path, required=True)
     parser.add_argument("--runtime-root", type=Path, required=True)
     parser.add_argument("--workload", type=Path, required=True)
+    parser.add_argument("--dispatch-analysis-workload", type=Path, required=True)
+    parser.add_argument("--dispatch-analysis-contract", type=Path, required=True)
     parser.add_argument("--roctx-workload", type=Path, required=True)
     parser.add_argument("--hsa-barrier-probe", type=Path, required=True)
     parser.add_argument("--sdk-build", type=Path, required=True)
@@ -437,6 +535,8 @@ def main() -> int:
         args.runtime_root / "bin" / "amd_comgr.dll",
         args.runtime_root / "bin" / "hsa-amd-aqlprofile64.dll",
         args.workload,
+        args.dispatch_analysis_workload,
+        args.dispatch_analysis_contract,
         args.roctx_workload,
         args.hsa_barrier_probe,
         args.sdk_build / "bin" / "rocprofiler-sdk.dll",
@@ -457,6 +557,8 @@ def main() -> int:
         data = run_workload(args, env, output)
     elif args.case == "kernel-trace":
         data = run_kernel_trace(args, env, output)
+    elif args.case == "dispatch-analysis-contract":
+        data = run_dispatch_analysis_contract(args, env, output)
     elif args.case == "hip-trace":
         data = run_hip_trace(args, env, output)
     elif args.case == "hip-graph":

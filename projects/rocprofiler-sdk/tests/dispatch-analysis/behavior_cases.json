@@ -1,0 +1,127 @@
+{
+  "version": 1,
+  "workload": {
+    "dispatch_count": 6,
+    "enqueue_sequence": [
+      "dispatch_vector",
+      "dispatch_lds_conflict",
+      "dispatch_vector",
+      "dispatch_lds_conflict",
+      "dispatch_vector",
+      "dispatch_resource"
+    ],
+    "streams": [0, 1],
+    "join_key": ["Process_Id", "Dispatch_Id"],
+    "mandatory_identity": [
+      "Queue_Id",
+      "Kernel_Id",
+      "Correlation_Id",
+      "Dispatch_Id"
+    ]
+  },
+  "counter_group": ["L2CacheHit", "VALUInsts", "LDSBankConflict"],
+  "cases": [
+    {
+      "name": "no-filter",
+      "profiler_args": [],
+      "target_args": [],
+      "selected_enqueue_ordinals": [1, 2, 3, 4, 5, 6]
+    },
+    {
+      "name": "include-vector",
+      "profiler_args": ["--kernel-include-regex", "dispatch_vector"],
+      "target_args": [],
+      "selected_enqueue_ordinals": [1, 3, 5]
+    },
+    {
+      "name": "exclude-lds",
+      "profiler_args": ["--kernel-exclude-regex", "dispatch_lds_conflict"],
+      "target_args": [],
+      "selected_enqueue_ordinals": [1, 3, 5, 6]
+    },
+    {
+      "name": "include-and-exclude",
+      "profiler_args": [
+        "--kernel-include-regex",
+        "dispatch_(vector|lds)",
+        "--kernel-exclude-regex",
+        "dispatch_lds_conflict"
+      ],
+      "target_args": [],
+      "selected_enqueue_ordinals": [1, 3, 5]
+    },
+    {
+      "name": "nonmatching",
+      "profiler_args": ["--kernel-include-regex", "does_not_match"],
+      "target_args": [],
+      "selected_enqueue_ordinals": []
+    },
+    {
+      "name": "vector-iteration-two",
+      "profiler_args": [
+        "--kernel-include-regex",
+        "dispatch_vector",
+        "--kernel-iteration-range",
+        "[2]"
+      ],
+      "target_args": [],
+      "selected_enqueue_ordinals": [3]
+    },
+    {
+      "name": "vector-iteration-range",
+      "profiler_args": [
+        "--kernel-include-regex",
+        "dispatch_vector",
+        "--kernel-iteration-range",
+        "[1-2]"
+      ],
+      "target_args": [],
+      "selected_enqueue_ordinals": [1, 3]
+    },
+    {
+      "name": "composed-stats",
+      "profiler_args": ["--kernel-trace", "--stats"],
+      "target_args": [],
+      "selected_enqueue_ordinals": [1, 2, 3, 4, 5, 6]
+    },
+    {
+      "name": "reversed-completion",
+      "profiler_args": [
+        "--kernel-include-regex",
+        "dispatch_vector",
+        "--kernel-iteration-range",
+        "[2]"
+      ],
+      "target_args": ["--reverse-completion"],
+      "selected_enqueue_ordinals": [3]
+    },
+    {
+      "name": "no-dispatch",
+      "profiler_args": [],
+      "target_args": ["--no-dispatch"],
+      "selected_enqueue_ordinals": []
+    },
+    {
+      "name": "target-failure",
+      "profiler_args": [],
+      "target_args": ["--exit-code", "7"],
+      "selected_enqueue_ordinals": [1, 2, 3, 4, 5, 6],
+      "target_status": 7
+    },
+    {
+      "name": "unknown-counter",
+      "profiler_args": ["--pmc", "NO_SUCH_COUNTER"],
+      "target_args": [],
+      "selected_enqueue_ordinals": [],
+      "counter_output": false
+    },
+    {
+      "name": "output-conflict",
+      "profiler_args": [],
+      "target_args": [],
+      "selected_enqueue_ordinals": [],
+      "precreate_output": true,
+      "target_launched": false
+    }
+  ]
+}

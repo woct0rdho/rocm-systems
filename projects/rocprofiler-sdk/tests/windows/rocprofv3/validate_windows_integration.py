@@ -173,6 +173,52 @@ def test_windows_integration_case():
             assert int(row["Grid_Size_X"]) == 1_048_576
             assert int(row["Grid_Size_Y"]) == 1
             assert int(row["Grid_Size_Z"]) == 1
+    elif case == "dispatch-analysis-contract":
+        assert data["contract_version"] == 1
+        standalone = data["standalone"]
+        composed = data["composed"]
+        assert standalone["returncode"] == 0
+        assert composed["returncode"] == 0
+        for run in (standalone, composed):
+            assert "dispatch_analysis=passed" in run["stdout"]
+            assert "architecture=gfx1151" in run["stdout"]
+            assert "dispatches=6" in run["stdout"]
+            assert "streams=2" in run["stdout"]
+
+        # Step 0 freezes the observed gaps. Later stages replace these assertions
+        # with the completed behavior while retaining the same fixture and matrix.
+        standalone_rows = standalone["trace_rows"]
+        assert standalone["trace_exists"]
+        assert not standalone["stats_exists"]
+        assert len(standalone_rows) == 6
+        assert len(
+            [row for row in standalone_rows if "dispatch_vector" in row["Kernel_Name"]]
+        ) == 3
+        for row in standalone_rows:
+            assert all(
+                int(row[field]) == 0
+                for field in (
+                    "LDS_Block_Size",
+                    "Scratch_Size",
+                    "VGPR_Count",
+                    "Accum_VGPR_Count",
+                    "SGPR_Count",
+                )
+            )
+
+        counter_rows = composed["counter_rows"]
+        assert composed["json_exists"]
+        assert not composed["trace_exists"]
+        assert not composed["stats_exists"]
+        assert len(counter_rows) == 18
+        assert {row["Counter_Name"] for row in counter_rows} == {
+            "L2CacheHit",
+            "VALUInsts",
+            "LDSBankConflict",
+        }
+        assert {int(row["Dispatch_Id"]) for row in counter_rows} == set(range(1, 7))
+        assert all(int(row["Start_Timestamp"]) == 0 for row in counter_rows)
+        assert all(int(row["End_Timestamp"]) == 0 for row in counter_rows)
     elif case == "hip-trace":
         assert data["returncode"] == 0
         require_workload(data["stdout"])

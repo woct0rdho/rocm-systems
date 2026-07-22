@@ -45,7 +45,6 @@ get_dispatch_time(hsa_agent_t             _hsa_agent,
                   rocprofiler_kernel_id_t _kernel_id,
                   std::optional<uint64_t> _baseline)  // NOLINT(performance-unnecessary-value-param)
 {
-    auto ts                   = common::timestamp_ns();
     auto dispatch_time        = hsa_amd_profiling_dispatch_time_t{};
     auto dispatch_time_status = hsa::get_amd_ext_table()->hsa_amd_profiling_get_dispatch_time_fn(
         _hsa_agent, _signal, &dispatch_time);
@@ -55,12 +54,38 @@ get_dispatch_time(hsa_agent_t             _hsa_agent,
 
     if(_profile_time.status == HSA_STATUS_SUCCESS)
     {
+        if(_profile_time.start == 0 || _profile_time.end <= _profile_time.start)
+        {
+            ROCP_ERROR << fmt::format(
+                "hsa_amd_profiling_get_dispatch_time for kernel id={} returned invalid "
+                "timestamps start={} end={}",
+                _kernel_id,
+                _profile_time.start,
+                _profile_time.end);
+            _profile_time.status = HSA_STATUS_ERROR;
+            return _profile_time;
+        }
+
+#if !defined(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
         _profile_time = tracing::adjust_profiling_time(
             "dispatch",
             "hsa_amd_profiling_get_dispatch_time",
             _profile_time,
-            tracing::profiling_time{
-                HSA_STATUS_SUCCESS, _baseline.value_or(dispatch_time.start), ts});
+            tracing::profiling_time{HSA_STATUS_SUCCESS,
+                                    _baseline.value_or(dispatch_time.start),
+                                    common::timestamp_ns()});
+#else
+        (void) _baseline;
+#endif
+        if(_profile_time.start == 0 || _profile_time.end <= _profile_time.start)
+        {
+            ROCP_ERROR << fmt::format(
+                "adjusted dispatch timestamps for kernel id={} are invalid: start={} end={}",
+                _kernel_id,
+                _profile_time.start,
+                _profile_time.end);
+            _profile_time.status = HSA_STATUS_ERROR;
+        }
     }
     else
     {

@@ -21,6 +21,7 @@ using wsl::thunk::profiling::ClassifyVendorPacket;
 using wsl::thunk::profiling::CommandChecksum;
 using wsl::thunk::profiling::DetectCapability;
 using wsl::thunk::profiling::ResolvedMemory;
+using wsl::thunk::profiling::SelectDispatchTimestampTargets;
 using wsl::thunk::profiling::Stage;
 using wsl::thunk::profiling::SubmissionState;
 using wsl::thunk::profiling::ValidatePacket;
@@ -123,6 +124,23 @@ int main() {
          "qualified command capacity", &checks, &failures);
   Expect(DetectCapability(11, 5, 1, 0x4000, true).max_pm4_dwords == 1984,
          "bounded command capacity", &checks, &failures);
+
+  uint64_t dispatch_start = 0;
+  uint64_t dispatch_end = 0;
+  const auto enabled_timestamps =
+      SelectDispatchTimestampTargets(true, &dispatch_start, &dispatch_end);
+  Expect(enabled_timestamps.start == &dispatch_start && enabled_timestamps.end == &dispatch_end,
+         "profiling timestamp signal targets", &checks, &failures);
+  const auto disabled_timestamps =
+      SelectDispatchTimestampTargets(false, &dispatch_start, &dispatch_end);
+  Expect(disabled_timestamps.start == nullptr && disabled_timestamps.end == nullptr,
+         "disabled profiling timestamps", &checks, &failures);
+  const auto missing_start = SelectDispatchTimestampTargets(true, nullptr, &dispatch_end);
+  Expect(missing_start.start == nullptr && missing_start.end == nullptr,
+         "missing start timestamp", &checks, &failures);
+  const auto missing_end = SelectDispatchTimestampTargets(true, &dispatch_start, nullptr);
+  Expect(missing_end.start == nullptr && missing_end.end == nullptr,
+         "missing end timestamp", &checks, &failures);
 
   alignas(8) std::array<uint64_t, 4> output{};
   const uint64_t output_address = reinterpret_cast<uint64_t>(output.data());

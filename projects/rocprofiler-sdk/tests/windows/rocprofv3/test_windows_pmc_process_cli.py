@@ -80,6 +80,10 @@ def test_ordinary_csv_json_and_filtering(tmp_path):
     assert [int(row["Dispatch_Id"]) for row in rows] == [2, 3]
     assert {row["Counter_Name"] for row in rows} == {"SQ_WAVES"}
     assert all(float(row["Counter_Value"]) > 0 for row in rows)
+    assert all(int(row["Start_Timestamp"]) > 0 for row in rows)
+    assert all(
+        int(row["End_Timestamp"]) > int(row["Start_Timestamp"]) for row in rows
+    )
     assert all(row["Kernel_Name"].startswith("vector_add(") for row in rows)
 
     document = json.loads((tmp_path / "filtered_results.json").read_text("utf-8"))
@@ -267,6 +271,11 @@ def test_repeated_fresh_processes_drain_counter_callbacks(tmp_path):
         assert [int(row["Dispatch_Id"]) for row in rows] == [1, 2]
         assert {row["Counter_Name"] for row in rows} == {"SQ_WAVES"}
         assert all(float(row["Counter_Value"]) > 0 for row in rows)
+        assert all(int(row["Start_Timestamp"]) > 0 for row in rows)
+        assert all(
+            int(row["End_Timestamp"]) > int(row["Start_Timestamp"])
+            for row in rows
+        )
 
 
 def test_output_publication_failure_is_reported_and_partial_output_is_removed(tmp_path):

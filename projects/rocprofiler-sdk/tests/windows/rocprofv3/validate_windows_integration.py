@@ -217,8 +217,11 @@ def test_windows_integration_case():
             "LDSBankConflict",
         }
         assert {int(row["Dispatch_Id"]) for row in counter_rows} == set(range(1, 7))
-        assert all(int(row["Start_Timestamp"]) == 0 for row in counter_rows)
-        assert all(int(row["End_Timestamp"]) == 0 for row in counter_rows)
+        assert all(int(row["Start_Timestamp"]) > 0 for row in counter_rows)
+        assert all(
+            int(row["End_Timestamp"]) > int(row["Start_Timestamp"])
+            for row in counter_rows
+        )
     elif case == "hip-trace":
         assert data["returncode"] == 0
         require_workload(data["stdout"])

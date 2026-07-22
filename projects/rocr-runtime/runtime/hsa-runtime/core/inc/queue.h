@@ -444,8 +444,7 @@ class Queue : public Checked<0xFA3906A679F9DB49> {
                           hsa_signal_t* signal = NULL) = 0;
 
   virtual void SetProfiling(bool enabled) {
-    AMD_HSA_BITS_SET(amd_queue_.queue_properties, AMD_QUEUE_PROPERTIES_ENABLE_PROFILING,
-                     (enabled != 0));
+    amd_hsa_queue_set_profiling(&amd_queue_, enabled ? 1 : 0);
   }
 
   /// @ brief Returns queue queries about the queue

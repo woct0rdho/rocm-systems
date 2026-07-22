@@ -23,6 +23,18 @@ add_test(NAME cmdbuf_frame_ring COMMAND cmdbuf_frame_ring_test)
 # dependency, and the cache values that define the Windows service boundary.
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
+add_executable(rocr-windows-queue-profiling-test queue_profiling.cpp)
+target_compile_features(rocr-windows-queue-profiling-test PRIVATE cxx_std_20)
+target_include_directories(rocr-windows-queue-profiling-test PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/../../../runtime)
+add_test(NAME rocr.windows.queue-profiling
+  COMMAND rocr-windows-queue-profiling-test)
+set_tests_properties(rocr.windows.queue-profiling PROPERTIES
+  LABELS "windows;unit;cpu-only;profiling;wddm"
+  TIMEOUT 30
+  PASS_REGULAR_EXPRESSION
+    "queue_profiling=passed initially_disabled=1 enabled=1 disabled=1")
+
 if(TARGET hsa-runtime64)
   set(_rocr_windows_runtime_validation
       ${CMAKE_BINARY_DIR}/validation/runtime-build.txt)

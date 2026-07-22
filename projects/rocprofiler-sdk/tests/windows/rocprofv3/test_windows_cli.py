@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 from types import SimpleNamespace
 
@@ -848,6 +849,39 @@ def write_rocpd_source(path, *, valid_metadata=True):
     )
 
 
+def test_rocpd_schema_manifest_is_authoritative(rocprofv3, tmp_path):
+    schema = rocprofv3.rocpd_schema_configuration()
+    manifest_path = schema["directory"] / "latest-schema.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert schema["version"] == manifest["version"]
+    assert schema["version_parts"] == (
+        manifest["major"],
+        manifest["minor"],
+        manifest["patch"],
+    )
+    assert schema["user_version"] == manifest["user_version"]
+
+    inconsistent = tmp_path / "inconsistent-schema"
+    shutil.copytree(schema["directory"], inconsistent)
+    inconsistent_manifest_path = inconsistent / "latest-schema.json"
+    inconsistent_manifest = json.loads(
+        inconsistent_manifest_path.read_text(encoding="utf-8")
+    )
+    inconsistent_manifest["patch"] += 1
+    inconsistent_manifest_path.write_text(
+        json.dumps(inconsistent_manifest), encoding="utf-8"
+    )
+    with pytest.raises(rocprofv3.RocpdConversionError, match="inconsistent version"):
+        rocprofv3.rocpd_schema_configuration(inconsistent)
+
+    incomplete = tmp_path / "incomplete-schema"
+    shutil.copytree(schema["directory"], incomplete)
+    missing_name = next(iter(manifest["schema_files"].values()))
+    (incomplete / missing_name).unlink()
+    with pytest.raises(rocprofv3.RocpdConversionError, match="does not exist"):
+        rocprofv3.rocpd_schema_configuration(incomplete)
+
+
 def test_rocpd_conversion_uses_linux_schema_and_authoritative_records(
     rocprofv3, tmp_path
 ):
@@ -858,22 +892,27 @@ def test_rocpd_conversion_uses_linux_schema_and_authoritative_records(
         source, database, ["target.exe", "--dispatches", "1"]
     )
     assert counts == {"dispatches": 1, "counters": 1, "kernel_symbols": 1}
+    schema = rocprofv3.rocpd_schema_configuration()
 
     with sqlite3.connect(database) as connection:
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
         assert connection.execute(
             "SELECT value FROM rocpd_metadata WHERE tag = 'schema_version'"
-        ).fetchone() == ("3.0.3",)
+        ).fetchone() == (schema["version"],)
+        assert connection.execute("PRAGMA user_version").fetchone() == (
+            schema["user_version"],
+        )
         assert connection.execute(
-            "SELECT dispatch_id, name, start, end, duration, lds_size, scratch_size, "
-            "vgpr_count, accum_vgpr_count, sgpr_count FROM kernels"
+            "SELECT dispatch_id, name, start, end, duration, lds_size, static_lds_size, "
+            "scratch_size, vgpr_count, accum_vgpr_count, sgpr_count FROM kernels"
         ).fetchone() == (
             3,
             "dispatch_vector()",
             1000,
             1800,
             800,
+            1024,
             1024,
             64,
             32,

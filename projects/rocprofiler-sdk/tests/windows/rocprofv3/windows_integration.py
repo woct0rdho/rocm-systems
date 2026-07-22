@@ -553,6 +553,12 @@ def run_dispatch_analysis_contract(args, env, output):
         timeout=120,
     )
     database_path = database_directory / "contract_results.db"
+    schema_manifest = json.loads(
+        (
+            args.rocprofv3.parent.parent
+            / "share/rocprofiler-sdk-rocpd/latest-schema.json"
+        ).read_text(encoding="utf-8")
+    )
     database = {
         "command": database_command,
         "returncode": database_status,
@@ -562,6 +568,11 @@ def run_dispatch_analysis_contract(args, env, output):
             database_directory / "contract_results.json"
         ).is_file(),
         "metadata": {},
+        "expected_schema": {
+            "version": schema_manifest["version"],
+            "user_version": schema_manifest["user_version"],
+        },
+        "user_version": None,
         "schema_objects": [],
         "integrity": None,
         "foreign_key_errors": [],
@@ -576,6 +587,9 @@ def run_dispatch_analysis_contract(args, env, output):
             database["metadata"] = dict(
                 connection.execute("SELECT tag, value FROM rocpd_metadata").fetchall()
             )
+            database["user_version"] = connection.execute(
+                "PRAGMA user_version"
+            ).fetchone()[0]
             database["schema_objects"] = [
                 row[0]
                 for row in connection.execute(

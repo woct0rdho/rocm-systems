@@ -116,7 +116,7 @@ def test_iteration_cases_are_per_formatted_kernel_enqueue_order():
 
 def test_linux_oracle_freezes_schema_shape_and_shared_dispatch_selection():
     oracle = json.loads(LINUX_ORACLE_PATH.read_text(encoding="utf-8"))
-    assert oracle["version"] == 2
+    assert oracle["version"] == 3
     assert oracle["architecture"] == "gfx1151"
     assert oracle["workload_dispatches"] == 6
     assert oracle["csv"]["kernel_trace"]["rows"] == 6
@@ -128,6 +128,13 @@ def test_linux_oracle_freezes_schema_shape_and_shared_dispatch_selection():
     assert oracle["invariants"]["resource_metadata"] == load_contract()["workload"][
         "gfx1151_linux_resource_metadata"
     ]
+    lds = oracle["rocpd_lds_normalization"]
+    assert lds["source_group_segment_size"] == 513
+    assert {
+        lds["group_segment_size"],
+        lds["lds_size"],
+        lds["static_lds_size"],
+    } == {1024}
     selection = oracle["selection_oracle"]
     expected_ids = selection["selected_dispatch_ids"]
     assert expected_ids == [3]

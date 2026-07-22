@@ -174,7 +174,7 @@ def test_windows_integration_case():
             assert int(row["Grid_Size_Y"]) == 1
             assert int(row["Grid_Size_Z"]) == 1
     elif case == "dispatch-analysis-contract":
-        assert data["contract_version"] == 1
+        assert data["contract_version"] == 2
         standalone = data["standalone"]
         composed = data["composed"]
         assert standalone["returncode"] == 0
@@ -185,15 +185,14 @@ def test_windows_integration_case():
             assert "dispatches=6" in run["stdout"]
             assert "streams=2" in run["stdout"]
 
-        # The standalone CLR path retains its Step 0 gaps until Steps 3-5. The
-        # composed SDK path below advances independently from one dispatch object.
+        # Standalone CLR activity now uses its explicit enqueue ordinal for the same
+        # formatted-name and per-name range semantics. Resource metadata remains Step 5.
         standalone_rows = standalone["trace_rows"]
         assert standalone["trace_exists"]
         assert not standalone["stats_exists"]
-        assert len(standalone_rows) == 6
-        assert len(
-            [row for row in standalone_rows if "dispatch_vector" in row["Kernel_Name"]]
-        ) == 3
+        assert len(standalone_rows) == 1
+        assert int(standalone_rows[0]["Dispatch_Id"]) == 3
+        assert "dispatch_vector" in standalone_rows[0]["Kernel_Name"]
         for row in standalone_rows:
             assert all(
                 int(row[field]) == 0
@@ -205,6 +204,76 @@ def test_windows_integration_case():
                     "SGPR_Count",
                 )
             )
+
+        expected_case_names = {
+            "no-filter",
+            "include-vector",
+            "exclude-lds",
+            "include-and-exclude",
+            "nonmatching",
+            "vector-iteration-two",
+            "vector-iteration-range",
+            "mangled-vector",
+            "truncated-vector",
+            "reversed-completion",
+        }
+        selection_cases = data["selection_cases"]
+        assert {entry["name"] for entry in selection_cases} == expected_case_names
+        enqueue_sequence = data["enqueue_sequence"]
+
+        def base_kernel_names(rows):
+            return [
+                next(name for name in set(enqueue_sequence) if name in row["Kernel_Name"])
+                for row in rows
+            ]
+
+        for entry in selection_cases:
+            expected_ids = entry["selected_enqueue_ordinals"]
+            expected_names = [enqueue_sequence[index - 1] for index in expected_ids]
+            standalone_case = entry["standalone"]
+            composed_case = entry["composed"]
+            assert standalone_case["returncode"] == 0
+            assert composed_case["returncode"] == 0
+            for run in (standalone_case, composed_case):
+                assert "dispatch_analysis=passed" in run["stdout"]
+                assert "dispatches=6" in run["stdout"]
+
+            standalone_case_rows = standalone_case["trace_rows"]
+            assert standalone_case["trace_exists"]
+            assert [int(row["Dispatch_Id"]) for row in standalone_case_rows] == expected_ids
+            assert base_kernel_names(standalone_case_rows) == expected_names
+
+            composed_case_rows = composed_case["trace_rows"]
+            composed_counter_rows = composed_case["counter_rows"]
+            if expected_ids:
+                assert composed_case["trace_exists"]
+                assert composed_case["json_exists"]
+            else:
+                assert not composed_case["trace_exists"]
+                assert not composed_case["json_exists"]
+            assert [int(row["Dispatch_Id"]) for row in composed_case_rows] == expected_ids
+            assert base_kernel_names(composed_case_rows) == expected_names
+            assert len(composed_counter_rows) == 3 * len(expected_ids)
+            assert {int(row["Dispatch_Id"]) for row in composed_counter_rows} == set(
+                expected_ids
+            )
+            assert [
+                record["dispatch_info"]["dispatch_id"]
+                for record in composed_case["json_kernel_records"]
+            ] == expected_ids
+
+            if entry["name_mode"] == "mangled":
+                assert all(
+                    row["Kernel_Name"].startswith("_Z")
+                    for row in standalone_case_rows + composed_case_rows
+                )
+            elif entry["name_mode"] == "truncated":
+                assert {row["Kernel_Name"] for row in standalone_case_rows} == {
+                    "dispatch_vector"
+                }
+                assert {row["Kernel_Name"] for row in composed_case_rows} == {
+                    "dispatch_vector"
+                }
 
         counter_rows = composed["counter_rows"]
         trace_rows = composed["trace_rows"]

@@ -394,95 +394,126 @@ def run_dispatch_analysis_contract(args, env, output):
         args.dispatch_analysis_contract.read_text(encoding="utf-8")
     )
     workload = str(args.dispatch_analysis_workload.resolve())
-
-    standalone_directory = output / "standalone"
-    standalone_directory.mkdir()
-    standalone_command = [
-        str(args.python),
-        str(args.rocprofv3),
-        "--kernel-trace",
-        "--stats",
-        "--kernel-include-regex",
-        "dispatch_vector",
-        "--kernel-iteration-range",
-        "[2]",
-        "-f",
-        "csv",
-        "-d",
-        str(standalone_directory),
-        "-o",
-        "contract",
-        "--",
-        workload,
-        "--reverse-completion",
+    selection_names = {
+        "no-filter",
+        "include-vector",
+        "exclude-lds",
+        "include-and-exclude",
+        "nonmatching",
+        "vector-iteration-two",
+        "vector-iteration-range",
+        "mangled-vector",
+        "truncated-vector",
+        "reversed-completion",
+    }
+    selection_cases = [
+        case for case in contract["cases"] if case["name"] in selection_names
     ]
-    standalone_status, _, standalone_stdout = run_command(
-        standalone_command,
-        env,
-        output / "standalone.stdout.txt",
-        timeout=120,
-    )
-    standalone_trace = standalone_directory / "contract_kernel_trace.csv"
-    standalone_stats = standalone_directory / "contract_kernel_stats.csv"
+    selection_runs = []
 
-    composed_directory = output / "composed"
-    composed_directory.mkdir()
-    composed_command = [
-        str(args.python),
-        str(args.rocprofv3),
-        "--kernel-trace",
-        "--stats",
-        "--pmc",
-        *contract["counter_group"],
-        "-f",
-        "csv",
-        "json",
-        "-d",
-        str(composed_directory),
-        "-o",
-        "contract",
-        "--",
-        workload,
-    ]
-    composed_status, _, composed_stdout = run_command(
-        composed_command,
-        env,
-        output / "composed.stdout.txt",
-        timeout=120,
-    )
-    composed_counter = composed_directory / "contract_counter_collection.csv"
-    composed_trace = composed_directory / "contract_kernel_trace.csv"
-    composed_stats = composed_directory / "contract_kernel_stats.csv"
-    composed_json = composed_directory / "contract_results.json"
-    composed_json_kernels = []
-    if composed_json.is_file():
-        document = json.loads(composed_json.read_text(encoding="utf-8"))
-        tool_document = document["rocprofiler-sdk-tool"]
-        if isinstance(tool_document, list):
-            tool_document = tool_document[0]
-        composed_json_kernels = tool_document["buffer_records"]["kernel_dispatch"]
+    for case in selection_cases:
+        case_directory = output / "selection" / case["name"]
+        standalone_directory = case_directory / "standalone"
+        composed_directory = case_directory / "composed"
+        standalone_directory.mkdir(parents=True)
+        composed_directory.mkdir()
 
+        standalone_command = [
+            str(args.python),
+            str(args.rocprofv3),
+            "--kernel-trace",
+            *case["profiler_args"],
+            "-f",
+            "csv",
+            "-d",
+            str(standalone_directory),
+            "-o",
+            "contract",
+            "--",
+            workload,
+            *case["target_args"],
+        ]
+        standalone_status, _, standalone_stdout = run_command(
+            standalone_command,
+            env,
+            case_directory / "standalone.stdout.txt",
+            timeout=120,
+        )
+        standalone_trace = standalone_directory / "contract_kernel_trace.csv"
+
+        composed_command = [
+            str(args.python),
+            str(args.rocprofv3),
+            "--kernel-trace",
+            "--pmc",
+            *contract["counter_group"],
+            *case["profiler_args"],
+            "-f",
+            "csv",
+            "json",
+            "-d",
+            str(composed_directory),
+            "-o",
+            "contract",
+            "--",
+            workload,
+            *case["target_args"],
+        ]
+        composed_status, _, composed_stdout = run_command(
+            composed_command,
+            env,
+            case_directory / "composed.stdout.txt",
+            timeout=120,
+        )
+        composed_counter = composed_directory / "contract_counter_collection.csv"
+        composed_trace = composed_directory / "contract_kernel_trace.csv"
+        composed_json = composed_directory / "contract_results.json"
+        composed_json_kernels = []
+        if composed_json.is_file():
+            document = json.loads(composed_json.read_text(encoding="utf-8"))
+            tool_document = document["rocprofiler-sdk-tool"]
+            if isinstance(tool_document, list):
+                tool_document = tool_document[0]
+            composed_json_kernels = tool_document["buffer_records"][
+                "kernel_dispatch"
+            ]
+
+        selection_runs.append(
+            {
+                "name": case["name"],
+                "name_mode": case.get("name_mode", "demangled"),
+                "selected_enqueue_ordinals": case["selected_enqueue_ordinals"],
+                "standalone": {
+                    "command": standalone_command,
+                    "returncode": standalone_status,
+                    "stdout": standalone_stdout,
+                    "trace_rows": read_csv_if_present(standalone_trace),
+                    "trace_exists": standalone_trace.is_file(),
+                },
+                "composed": {
+                    "command": composed_command,
+                    "returncode": composed_status,
+                    "stdout": composed_stdout,
+                    "counter_rows": read_csv_if_present(composed_counter),
+                    "trace_rows": read_csv_if_present(composed_trace),
+                    "trace_exists": composed_trace.is_file(),
+                    "json_exists": composed_json.is_file(),
+                    "json_kernel_records": composed_json_kernels,
+                },
+            }
+        )
+
+    runs_by_name = {run["name"]: run for run in selection_runs}
+    standalone = dict(runs_by_name["reversed-completion"]["standalone"])
+    standalone["stats_exists"] = False
+    composed = dict(runs_by_name["no-filter"]["composed"])
+    composed["stats_exists"] = False
     return {
         "contract_version": contract["version"],
-        "standalone": {
-            "command": standalone_command,
-            "returncode": standalone_status,
-            "stdout": standalone_stdout,
-            "trace_rows": read_csv_if_present(standalone_trace),
-            "trace_exists": standalone_trace.is_file(),
-            "stats_exists": standalone_stats.is_file(),
-        },
-        "composed": {
-            "command": composed_command,
-            "returncode": composed_status,
-            "stdout": composed_stdout,
-            "counter_rows": read_csv_if_present(composed_counter),
-            "trace_rows": read_csv_if_present(composed_trace),
-            "trace_exists": composed_trace.is_file(),
-            "stats_exists": composed_stats.is_file(),
-            "json_exists": composed_json.is_file(),
-            "json_kernel_records": composed_json_kernels,
-        },
+        "enqueue_sequence": contract["workload"]["enqueue_sequence"],
+        "selection_cases": selection_runs,
+        "standalone": standalone,
+        "composed": composed,
     }
 
 

@@ -726,6 +726,7 @@ void WriteJsonTraceImpl(const char* filepath) {
       //   are connected via node→node graph arrows instead.
       struct GpuOpInfo { uint64_t tid; double ts; double dur; bool has_ts; };
       auto emit_gpu_op = [&](const hipGpuActivityExt& gop, hipStream_t stream,
+                             uint32_t enqueue_operation_index,
                              bool emit_host_arrow = true) -> GpuOpInfo {
         uint32_t op_idx  = gop.op < 3 ? gop.op : 3;
         int sdma = (op_idx == OP_ID_COPY) &&
@@ -768,6 +769,16 @@ void WriteJsonTraceImpl(const char* filepath) {
         auto sep = [&]() { if (!first_arg) trace << ","; first_arg = false; };
         sep();
         trace << "\"queue_id\":" << gop.queue_id;
+        if (op_idx == OP_ID_DISPATCH) {
+          sep();
+          trace << "\"enqueue_ordinal\":" << (static_cast<uint64_t>(rec.chunk_id) + 1)
+                << ",\"enqueue_operation_index\":" << enqueue_operation_index
+                << ",\"thread_id\":" << rec.thread_id;
+          if (gop.kernel_name) {
+            sep();
+            trace << "\"mangled_kernel_name\":\"" << gop.kernel_name << "\"";
+          }
+        }
         if (op_idx == OP_ID_DISPATCH && gop.grid_x) {
           sep();
           trace << "\"grid\":\"" << gop.grid_x << "x" << gop.grid_y << "x" << gop.grid_z << "\""
@@ -876,10 +887,17 @@ void WriteJsonTraceImpl(const char* filepath) {
       // All dims and kernel args are now in each hipGpuActivityExt node.
       const bool graph_launch = rec.api_name && strncmp(rec.api_name, "hipGraphLaunch", 14) == 0;
       if (rec.gpu.gpu_op_count > 0) {
-        GpuOpInfo prev = emit_gpu_op(rec.gpu, rec.stream, /*emit_host_arrow=*/true);
+        uint32_t enqueue_operation_index = 1;
+        GpuOpInfo prev = emit_gpu_op(rec.gpu,
+                                     rec.stream,
+                                     enqueue_operation_index++,
+                                     /*emit_host_arrow=*/true);
 
         for (const hipGpuActivityExt* node = rec.gpu.next; node; node = node->next) {
-          GpuOpInfo cur = emit_gpu_op(*node, rec.stream, /*emit_host_arrow=*/false);
+          GpuOpInfo cur = emit_gpu_op(*node,
+                                      rec.stream,
+                                      enqueue_operation_index++,
+                                      /*emit_host_arrow=*/false);
           // Node→node flow arrow within this graph launch.
           if (graph_launch && prev.has_ts && cur.has_ts) {
             uint64_t gfid = flow_id++;

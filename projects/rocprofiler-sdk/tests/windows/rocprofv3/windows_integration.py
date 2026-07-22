@@ -454,6 +454,13 @@ def run_dispatch_analysis_contract(args, env, output):
     composed_trace = composed_directory / "contract_kernel_trace.csv"
     composed_stats = composed_directory / "contract_kernel_stats.csv"
     composed_json = composed_directory / "contract_results.json"
+    composed_json_kernels = []
+    if composed_json.is_file():
+        document = json.loads(composed_json.read_text(encoding="utf-8"))
+        tool_document = document["rocprofiler-sdk-tool"]
+        if isinstance(tool_document, list):
+            tool_document = tool_document[0]
+        composed_json_kernels = tool_document["buffer_records"]["kernel_dispatch"]
 
     return {
         "contract_version": contract["version"],
@@ -474,6 +481,7 @@ def run_dispatch_analysis_contract(args, env, output):
             "trace_exists": composed_trace.is_file(),
             "stats_exists": composed_stats.is_file(),
             "json_exists": composed_json.is_file(),
+            "json_kernel_records": composed_json_kernels,
         },
     }
 

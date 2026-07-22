@@ -29,6 +29,7 @@
 #include "graph_stack.hpp"
 #include "helper.hpp"
 #include "kernel_iteration_filter.hpp"
+#include "kernel_selector.hpp"
 #include "stream_stack.hpp"
 
 #include "lib/att-tool/att_lib_wrapper.hpp"
@@ -337,6 +338,43 @@ add_kernel_target(uint64_t _kern_id, const std::unordered_set<size_t>& range)
             _kern_id,
             range)
         .second;
+}
+
+auto&
+get_dispatch_selector()
+{
+    static auto selector = common::Synchronized<tool::kernel_selector, true>{
+        tool::kernel_selector{tool::get_config().kernel_filter_include,
+                              tool::get_config().kernel_filter_exclude,
+                              tool::get_config().kernel_filter_range}};
+    return selector;
+}
+
+bool
+select_kernel_dispatch(rocprofiler_dispatch_id_t dispatch_id,
+                       rocprofiler_kernel_id_t   kernel_id,
+                       bool                      cache_decision = true)
+{
+    auto formatted_name = std::to_string(kernel_id);
+    if(const auto* info = CHECK_NOTNULL(tool_metadata)->get_kernel_symbol(kernel_id))
+        formatted_name = info->formatted_kernel_name;
+
+    return get_dispatch_selector().wlock(
+        [](auto& selector, uint64_t id, const std::string& name, bool cache) {
+            const auto selected = selector.select(id, name);
+            if(!cache) selector.erase(id);
+            return selected;
+        },
+        dispatch_id,
+        formatted_name,
+        cache_decision);
+}
+
+std::optional<bool>
+take_kernel_dispatch_selection(rocprofiler_dispatch_id_t dispatch_id)
+{
+    return get_dispatch_selector().wlock(
+        [](auto& selector, uint64_t id) { return selector.take(id); }, dispatch_id);
 }
 
 bool
@@ -871,6 +909,22 @@ dummy_callback_tracing_callback(rocprofiler_callback_tracing_record_t /*record*/
 {}
 
 void
+kernel_dispatch_selection_callback(rocprofiler_callback_tracing_record_t record,
+                                   rocprofiler_user_data_t*,
+                                   void*)
+{
+    if(record.kind != ROCPROFILER_CALLBACK_TRACING_KERNEL_DISPATCH ||
+       record.operation != ROCPROFILER_KERNEL_DISPATCH_ENQUEUE ||
+       record.phase != ROCPROFILER_CALLBACK_PHASE_ENTER || record.payload == nullptr)
+        return;
+
+    const auto* data =
+        static_cast<rocprofiler_callback_tracing_kernel_dispatch_data_t*>(record.payload);
+    common::consume_args(select_kernel_dispatch(data->dispatch_info.dispatch_id,
+                                                data->dispatch_info.kernel_id));
+}
+
+void
 dummy_counter_dispatch_callback(rocprofiler_dispatch_counting_service_data_t,
                                 rocprofiler_profile_config_id_t*,
                                 rocprofiler_user_data_t*,
@@ -1198,11 +1252,22 @@ buffered_tracing_callback(rocprofiler_context_id_t /*context*/,
                 auto* record = static_cast<rocprofiler_buffer_tracing_kernel_dispatch_record_t*>(
                     header->payload);
 
-                auto attr = get_ext_attribution(record);
-                tool::write_ring_buffer(
-                    tool::tool_buffer_tracing_kernel_dispatch_ext_record_t{
-                        *record, attr.stream_id, attr.graph_exec_id, attr.graph_node_id},
-                    domain_type::KERNEL_DISPATCH);
+                auto attr     = get_ext_attribution(record);
+                auto selected =
+                    take_kernel_dispatch_selection(record->dispatch_info.dispatch_id);
+                if(!selected)
+                {
+                    ROCP_CI_LOG(WARNING)
+                        << "kernel dispatch selection was not cached at enqueue";
+                    selected = select_kernel_dispatch(record->dispatch_info.dispatch_id,
+                                                       record->dispatch_info.kernel_id,
+                                                       false);
+                }
+                if(*selected)
+                    tool::write_ring_buffer(
+                        tool::tool_buffer_tracing_kernel_dispatch_ext_record_t{
+                            *record, attr.stream_id, attr.graph_exec_id, attr.graph_node_id},
+                        domain_type::KERNEL_DISPATCH);
             }
             else if(header->kind == ROCPROFILER_BUFFER_TRACING_HSA_CORE_API ||
                     header->kind == ROCPROFILER_BUFFER_TRACING_HSA_AMD_EXT_API ||
@@ -2018,12 +2083,12 @@ counter_dispatch_callback(rocprofiler_dispatch_counting_service_data_t dispatch_
                           rocprofiler_user_data_t*                     user_data,
                           void* /*callback_data_args*/)
 {
-    static auto kernel_iteration = common::Synchronized<kernel_iteration_t, true>{};
-
     auto kernel_id = dispatch_data.dispatch_info.kernel_id;
     auto agent_id  = dispatch_data.dispatch_info.agent_id;
 
-    if(!is_targeted_kernel(kernel_id, kernel_iteration))
+    if(!select_kernel_dispatch(dispatch_data.dispatch_info.dispatch_id,
+                               kernel_id,
+                               tool::get_config().kernel_trace))
     {
         return;
     }
@@ -3037,7 +3102,7 @@ tool_init(rocprofiler_client_finalize_t fini_func, void* tool_data)
 
     for(auto&& itr : {callback_service_config{tool::get_config().kernel_trace,
                                               ROCPROFILER_CALLBACK_TRACING_KERNEL_DISPATCH,
-                                              dummy_callback_tracing_callback},
+                                              kernel_dispatch_selection_callback},
                       callback_service_config{tool::get_config().memory_copy_trace,
                                               ROCPROFILER_CALLBACK_TRACING_MEMORY_COPY,
                                               dummy_callback_tracing_callback},
@@ -3086,12 +3151,18 @@ tool_init(rocprofiler_client_finalize_t fini_func, void* tool_data)
     {
         if(itr.option)
         {
-            // in sdk callback overhead benchmarking, we don't want to use the buffer services
-            if(tool::get_config().benchmark_mode != tool::config::benchmark::sdk_callback_overhead)
-                continue;
+            const auto benchmark_callback =
+                tool::get_config().benchmark_mode ==
+                tool::config::benchmark::sdk_callback_overhead;
+            const auto selection_callback =
+                itr.kind == ROCPROFILER_CALLBACK_TRACING_KERNEL_DISPATCH &&
+                !benchmark_callback;
+            if(!benchmark_callback && !selection_callback) continue;
 
+            const auto callback =
+                benchmark_callback ? dummy_callback_tracing_callback : itr.callback;
             ROCPROFILER_CALL(rocprofiler_configure_callback_tracing_service(
-                                 get_client_ctx(), itr.kind, nullptr, 0, itr.callback, nullptr),
+                                 get_client_ctx(), itr.kind, nullptr, 0, callback, nullptr),
                              "callback tracing service failed to configure");
         }
     }

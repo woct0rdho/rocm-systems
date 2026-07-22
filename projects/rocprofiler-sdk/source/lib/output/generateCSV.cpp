@@ -24,6 +24,7 @@
 #include "counter_output_columns.hpp"
 #include "csv.hpp"
 #include "csv_output_file.hpp"
+#include "csv_output_helpers.hpp"
 #include "domain_type.hpp"
 #include "generateStats.hpp"
 #include "output_config.hpp"
@@ -54,19 +55,8 @@ namespace
 tool::csv_output_file
 get_stats_output_file(const output_config& cfg, std::string_view name)
 {
-    return tool::csv_output_file{cfg,
-                                 name,
-                                 tool::csv::stats_csv_encoder{},
-                                 {
-                                     "Name",
-                                     "Calls",
-                                     "TotalDurationNs",
-                                     "AverageNs",
-                                     "Percentage",
-                                     "MinNs",
-                                     "MaxNs",
-                                     "StdDev",
-                                 }};
+    return tool::csv_output_file{
+        cfg, name, tool::csv::stats_csv_encoder{}, tool::csv::statistics_columns};
 }
 
 tool::csv_output_file
@@ -78,40 +68,7 @@ get_stats_output_file(const output_config& cfg, domain_type domain)
 void
 write_stats(tool::csv_output_file&& ofs, const stats_entry_vec_t& data_v)
 {
-    auto data      = stats_entry_vec_t{};
-    auto _duration = stats_data_t{};
-    for(const auto& [id, value] : data_v)
-    {
-        data.emplace_back(id, value);
-        _duration += value;
-    }
-
-    std::sort(data.begin(), data.end(), [](const auto& lhs, const auto& rhs) {
-        return (lhs.second.get_sum() > rhs.second.get_sum());
-    });
-
-    constexpr float_type one_hundred = 100.0;
-
-    const float_type _total_duration = _duration.get_sum();
-    for(const auto& [name, value] : data)
-    {
-        auto       duration_ns = value.get_sum();
-        auto       calls       = value.get_count();
-        float_type avg_ns      = value.get_mean();
-        float_type percent_v   = (duration_ns / _total_duration) * one_hundred;
-
-        auto _row = std::stringstream{};
-        rocprofiler::tool::csv::stats_csv_encoder::write_row<stats_formatter>(_row,
-                                                                              name,
-                                                                              calls,
-                                                                              duration_ns,
-                                                                              avg_ns,
-                                                                              percentage{percent_v},
-                                                                              value.get_min(),
-                                                                              value.get_max(),
-                                                                              value.get_stddev());
-        ofs << _row.str() << std::flush;
-    }
+    ofs << tool::csv::format_statistics_rows(tool::csv::make_statistics_entry(data_v));
 }
 }  // namespace
 
@@ -131,73 +88,8 @@ generate_csv(const output_config& cfg,
                                      tool::csv::agent_info_csv_encoder{},
                                      tool::csv::agent_info_columns};
 
-    for(auto& itr : data)
-    {
-        auto _type = std::string_view{};
-        if(itr.type == ROCPROFILER_AGENT_TYPE_CPU)
-            _type = "CPU";
-        else if(itr.type == ROCPROFILER_AGENT_TYPE_GPU)
-            _type = "GPU";
-        else
-            _type = "UNK";
-
-        auto row_ss = std::stringstream{};
-        rocprofiler::tool::csv::agent_info_csv_encoder::write_row(row_ss,
-                                                                  itr.node_id,
-                                                                  itr.logical_node_id,
-                                                                  _type,
-                                                                  itr.cpu_cores_count,
-                                                                  itr.simd_count,
-                                                                  itr.cpu_core_id_base,
-                                                                  itr.simd_id_base,
-                                                                  itr.max_waves_per_simd,
-                                                                  itr.lds_size_in_kb,
-                                                                  itr.gds_size_in_kb,
-                                                                  itr.num_gws,
-                                                                  itr.wave_front_size,
-                                                                  itr.num_xcc,
-                                                                  itr.cu_count,
-                                                                  itr.array_count,
-                                                                  itr.num_shader_banks,
-                                                                  itr.simd_arrays_per_engine,
-                                                                  itr.cu_per_simd_array,
-                                                                  itr.simd_per_cu,
-                                                                  itr.max_slots_scratch_cu,
-                                                                  itr.gfx_target_version,
-                                                                  itr.vendor_id,
-                                                                  itr.device_id,
-                                                                  itr.location_id,
-                                                                  itr.domain,
-                                                                  itr.drm_render_minor,
-                                                                  itr.num_sdma_engines,
-                                                                  itr.num_sdma_xgmi_engines,
-                                                                  itr.num_sdma_queues_per_engine,
-                                                                  itr.num_cp_queues,
-                                                                  itr.max_engine_clk_ccompute,
-                                                                  itr.max_engine_clk_fcompute,
-                                                                  itr.sdma_fw_version.Value,
-                                                                  itr.fw_version.Value,
-                                                                  itr.capability.Value,
-                                                                  itr.cu_per_engine,
-                                                                  itr.max_waves_per_cu,
-                                                                  itr.family_id,
-                                                                  itr.workgroup_max_size,
-                                                                  itr.grid_max_size,
-                                                                  itr.local_mem_size,
-                                                                  itr.hive_id,
-                                                                  itr.gpu_id,
-                                                                  itr.workgroup_max_dim.x,
-                                                                  itr.workgroup_max_dim.y,
-                                                                  itr.workgroup_max_dim.z,
-                                                                  itr.grid_max_dim.x,
-                                                                  itr.grid_max_dim.y,
-                                                                  itr.grid_max_dim.z,
-                                                                  itr.name,
-                                                                  itr.vendor_name,
-                                                                  itr.product_name,
-                                                                  itr.model_name);
-        ofs << row_ss.str();
-    }
+    for(const auto& itr : data)
+        ofs << tool::csv::format_agent_info_row(itr);
 }
 
 void
@@ -213,28 +105,7 @@ generate_csv(const output_config&                                               
     auto ofs = tool::csv_output_file{cfg,
                                      domain_type::KERNEL_DISPATCH,
                                      tool::csv::kernel_trace_with_stream_csv_encoder{},
-                                     {"Kind",
-                                      "Agent_Id",
-                                      "Queue_Id",
-                                      "Stream_Id",
-                                      "Thread_Id",
-                                      "Dispatch_Id",
-                                      "Kernel_Id",
-                                      "Kernel_Name",
-                                      "Correlation_Id",
-                                      "Start_Timestamp",
-                                      "End_Timestamp",
-                                      "LDS_Block_Size",
-                                      "Scratch_Size",
-                                      "VGPR_Count",
-                                      "Accum_VGPR_Count",
-                                      "SGPR_Count",
-                                      "Workgroup_Size_X",
-                                      "Workgroup_Size_Y",
-                                      "Workgroup_Size_Z",
-                                      "Grid_Size_X",
-                                      "Grid_Size_Y",
-                                      "Grid_Size_Z"}};
+                                     tool::csv::kernel_trace_columns};
 
     for(auto ditr : data)
     {

@@ -2,12 +2,11 @@
 //
 // Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
-#include "lib/rocprofiler-sdk/code_object/kernel_descriptor.hpp"
+#include "lib/rocprofiler-sdk/code_object/kernel_descriptor_cases.hpp"
 
 #include <gtest/gtest.h>
 
-#include <cstdint>
-#include <limits>
+#include <string>
 
 namespace rocprofiler
 {
@@ -15,61 +14,32 @@ namespace code_object
 {
 namespace
 {
-TEST(kernel_descriptor, gfx1151_wave32_registers)
+TEST(kernel_descriptor, shared_decode_cases)
 {
-    auto descriptor                              = kernel_descriptor_t{};
-    descriptor.kernel_code_entry_byte_offset     = 256;
-    descriptor.compute_pgm_rsrc1                  = 4;
-    descriptor.kernel_code_properties             = uint16_t{1} << 10;
+    for(const auto& test_case : kernel_descriptor_cases())
+    {
+        SCOPED_TRACE(std::string{test_case.name});
+        const auto decoded = decode_kernel_descriptor(test_case.architecture, test_case.descriptor);
+        ASSERT_EQ(decoded.has_value(), test_case.valid);
+        if(!decoded) continue;
 
-    const auto decoded = decode_kernel_descriptor("gfx1151", descriptor);
-    ASSERT_TRUE(decoded);
-    EXPECT_EQ(decoded->arch_vgpr_count, 40);
-    EXPECT_EQ(decoded->accum_vgpr_count, 0);
-    EXPECT_EQ(decoded->sgpr_count, 128);
-    EXPECT_EQ(decoded->kernel_code_entry_byte_offset, 256);
+        EXPECT_EQ(decoded->arch_vgpr_count, test_case.expected.arch_vgpr_count);
+        EXPECT_EQ(decoded->accum_vgpr_count, test_case.expected.accum_vgpr_count);
+        EXPECT_EQ(decoded->sgpr_count, test_case.expected.sgpr_count);
+        EXPECT_EQ(decoded->kernel_code_entry_byte_offset,
+                  test_case.expected.kernel_code_entry_byte_offset);
+    }
 }
 
-TEST(kernel_descriptor, gfx90a_accumulated_registers)
+TEST(kernel_descriptor, shared_address_cases)
 {
-    auto descriptor               = kernel_descriptor_t{};
-    descriptor.compute_pgm_rsrc3  = 7;
-    descriptor.compute_pgm_rsrc1  = 5 | (6 << 6);
-
-    const auto decoded = decode_kernel_descriptor("gfx90a", descriptor);
-    ASSERT_TRUE(decoded);
-    EXPECT_EQ(decoded->arch_vgpr_count, 32);
-    EXPECT_EQ(decoded->accum_vgpr_count, 16);
-    EXPECT_EQ(decoded->sgpr_count, 64);
-}
-
-TEST(kernel_descriptor, gfx908_accumulated_registers)
-{
-    auto descriptor              = kernel_descriptor_t{};
-    descriptor.compute_pgm_rsrc1 = 3 | (4 << 6);
-
-    const auto decoded = decode_kernel_descriptor("gfx908", descriptor);
-    ASSERT_TRUE(decoded);
-    EXPECT_EQ(decoded->arch_vgpr_count, 16);
-    EXPECT_EQ(decoded->accum_vgpr_count, 16);
-    EXPECT_EQ(decoded->sgpr_count, 48);
-}
-
-TEST(kernel_descriptor, rejects_unknown_or_inconsistent_descriptors)
-{
-    auto descriptor              = kernel_descriptor_t{};
-    descriptor.compute_pgm_rsrc3 = 7;
-
-    EXPECT_FALSE(decode_kernel_descriptor("not-an-architecture", descriptor));
-    EXPECT_FALSE(decode_kernel_descriptor("gfx90a", descriptor));
-}
-
-TEST(kernel_descriptor, computes_checked_entry_address)
-{
-    EXPECT_EQ(kernel_address(0x1000, 0x80), 0x1080);
-    EXPECT_EQ(kernel_address(0x1000, -0x80), 0x0f80);
-    EXPECT_FALSE(kernel_address(0x40, -0x80));
-    EXPECT_FALSE(kernel_address(std::numeric_limits<uint64_t>::max() - 4, 8));
+    for(const auto& test_case : kernel_address_cases())
+    {
+        SCOPED_TRACE(std::string{test_case.name});
+        const auto address = kernel_address(test_case.kernel_object, test_case.entry_offset);
+        ASSERT_EQ(address.has_value(), test_case.expected.has_value());
+        if(address) EXPECT_EQ(*address, *test_case.expected);
+    }
 }
 }  // namespace
 }  // namespace code_object

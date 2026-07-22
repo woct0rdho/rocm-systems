@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import os
 import shutil
-import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +12,7 @@ WINDOWS_TEST_ROOT = Path(__file__).resolve().parents[1]
 if str(WINDOWS_TEST_ROOT) not in sys.path:
     sys.path.insert(0, str(WINDOWS_TEST_ROOT))
 
+from common.output_readers import open_rocpd, read_csv, read_csv_if_present, read_json
 from common.windows_job import run_in_job
 
 
@@ -290,25 +289,13 @@ def run_hip_trace(args, env, output, graph: bool = False, marker: bool = False):
         command, env, output / "hip-trace.stdout.txt", timeout=60
     )
     api_output = trace_directory / "windows-hip_hip_api_trace.csv"
-    rows = []
-    if api_output.is_file():
-        with api_output.open(encoding="utf-8", newline="") as stream:
-            rows = list(csv.DictReader(stream))
+    rows = read_csv_if_present(api_output)
     graph_output = trace_directory / "windows-hip_hip_graph_trace.csv"
-    graph_rows = []
-    if graph_output.is_file():
-        with graph_output.open(encoding="utf-8", newline="") as stream:
-            graph_rows = list(csv.DictReader(stream))
+    graph_rows = read_csv_if_present(graph_output)
     marker_api_output = trace_directory / "windows-hip_marker_api_trace.csv"
     marker_output = trace_directory / "windows-hip_marker_trace.csv"
-    marker_api_rows = []
-    marker_rows = []
-    if marker_api_output.is_file():
-        with marker_api_output.open(encoding="utf-8", newline="") as stream:
-            marker_api_rows = list(csv.DictReader(stream))
-    if marker_output.is_file():
-        with marker_output.open(encoding="utf-8", newline="") as stream:
-            marker_rows = list(csv.DictReader(stream))
+    marker_api_rows = read_csv_if_present(marker_api_output)
+    marker_rows = read_csv_if_present(marker_output)
     return {
         "command": command,
         "target": str(args.workload.resolve()),
@@ -343,14 +330,8 @@ def run_roctx_trace(args, env, output):
     )
     api_output = trace_directory / "windows-roctx_marker_api_trace.csv"
     marker_output = trace_directory / "windows-roctx_marker_trace.csv"
-    api_rows = []
-    marker_rows = []
-    if api_output.is_file():
-        with api_output.open(encoding="utf-8", newline="") as stream:
-            api_rows = list(csv.DictReader(stream))
-    if marker_output.is_file():
-        with marker_output.open(encoding="utf-8", newline="") as stream:
-            marker_rows = list(csv.DictReader(stream))
+    api_rows = read_csv_if_present(api_output)
+    marker_rows = read_csv_if_present(marker_output)
     return {
         "command": command,
         "returncode": returncode,
@@ -380,8 +361,7 @@ def run_kernel_trace(args, env, output):
         command, env, output / "kernel-trace.stdout.txt", timeout=90
     )
     csv_path = trace_directory / "windows_test_kernel_trace.csv"
-    with csv_path.open(encoding="utf-8", newline="") as stream:
-        rows = list(csv.DictReader(stream))
+    rows = read_csv(csv_path)
     return {
         "command": command,
         "target": str(args.workload.resolve()),
@@ -391,15 +371,8 @@ def run_kernel_trace(args, env, output):
     }
 
 
-def read_csv_if_present(path: Path):
-    if not path.is_file():
-        return []
-    with path.open(encoding="utf-8", newline="") as stream:
-        return list(csv.DictReader(stream))
-
-
 def run_dispatch_analysis_contract(args, env, output):
-    contract = json.loads(args.dispatch_analysis_contract.read_text(encoding="utf-8"))
+    contract = read_json(args.dispatch_analysis_contract)
     workload = str(args.dispatch_analysis_workload.resolve())
     selection_names = {
         "no-filter",
@@ -486,7 +459,7 @@ def run_dispatch_analysis_contract(args, env, output):
         composed_json_symbols = []
         composed_json_summary = []
         if composed_json.is_file():
-            document = json.loads(composed_json.read_text(encoding="utf-8"))
+            document = read_json(composed_json)
             tool_document = document["rocprofiler-sdk-tool"]
             if isinstance(tool_document, list):
                 tool_document = tool_document[0]
@@ -553,11 +526,9 @@ def run_dispatch_analysis_contract(args, env, output):
         timeout=120,
     )
     database_path = database_directory / "contract_results.db"
-    schema_manifest = json.loads(
-        (
-            args.rocprofv3.parent.parent
-            / "share/rocprofiler-sdk-rocpd/latest-schema.json"
-        ).read_text(encoding="utf-8")
+    schema_manifest = read_json(
+        args.rocprofv3.parent.parent
+        / "share/rocprofiler-sdk-rocpd/latest-schema.json"
     )
     database = {
         "command": database_command,
@@ -582,8 +553,7 @@ def run_dispatch_analysis_contract(args, env, output):
         "top_kernels": [],
     }
     if database_path.is_file():
-        with sqlite3.connect(database_path) as connection:
-            connection.row_factory = sqlite3.Row
+        with open_rocpd(database_path, named_rows=True) as connection:
             database["metadata"] = dict(
                 connection.execute("SELECT tag, value FROM rocpd_metadata").fetchall()
             )

@@ -858,7 +858,9 @@ def windows_sdk_result_status(result_path, target_status, expected_outputs=()):
     )
 
 
-def windows_sdk_output_paths(output_directory, output_file, formats, process_id):
+def windows_sdk_output_paths(
+    output_directory, output_file, formats, process_id, kernel_trace=False
+):
     prefix = str(output_file)
     replacements = {
         "%pid%": str(process_id),
@@ -877,6 +879,8 @@ def windows_sdk_output_paths(output_directory, output_file, formats, process_id)
                 base.with_name(f"{base.name}_counter_collection.csv"),
             ]
         )
+        if kernel_trace:
+            paths.append(base.with_name(f"{base.name}_kernel_trace.csv"))
     if "json" in formats:
         paths.append(base.with_name(f"{base.name}_results.json"))
     return paths
@@ -951,6 +955,8 @@ def windows_configure_sdk_counter_environment(
         "ROCPROF_SELECTED_REGIONS_REF_COUNT": getattr(
             args, "selected_regions_ref_count", False
         ),
+        "ROCPROF_KERNEL_TRACE": getattr(args, "kernel_trace", False),
+        "ROCPROF_STATS": getattr(args, "stats", False),
     }
     for name, value in option_environment.items():
         if value not in (None, "", False):
@@ -1011,7 +1017,11 @@ def run_windows_sdk_pmc(app_args, args, pass_id=None):
     def prepare(process_id):
         nonlocal expected_outputs, reservations
         expected_outputs = windows_sdk_output_paths(
-            output_directory, output_file, formats, process_id
+            output_directory,
+            output_file,
+            formats,
+            process_id,
+            kernel_trace=bool(getattr(args, "kernel_trace", False)),
         )
         reservations = windows_reserve_output_paths(expected_outputs)
 

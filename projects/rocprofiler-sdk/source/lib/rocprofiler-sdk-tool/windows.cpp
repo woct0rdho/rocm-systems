@@ -9,6 +9,7 @@
 #include "lib/common/windows_result.hpp"
 #include "lib/output/counter_output_columns.hpp"
 #include "lib/output/csv.hpp"
+#include "lib/output/stream_info.hpp"
 
 #include <amd_comgr/amd_comgr.h>
 #include <rocprofiler-sdk/cxx/serialization.hpp>
@@ -30,6 +31,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iomanip>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <regex>
@@ -86,6 +88,8 @@ struct output_config
     std::string exclude_expression = get_env("ROCPROF_KERNEL_FILTER_EXCLUDE_REGEX");
     bool demangle          = get_env_bool("ROCPROF_DEMANGLE_KERNELS", true);
     bool truncate          = get_env_bool("ROCPROF_TRUNCATE_KERNELS", false);
+    bool kernel_trace      = get_env_bool("ROCPROF_KERNEL_TRACE", false);
+    bool stats             = get_env_bool("ROCPROF_STATS", false);
     bool selected_regions  = get_env_bool("ROCPROF_SELECTED_REGIONS", false);
     bool selected_regions_ref_count =
         get_env_bool("ROCPROF_SELECTED_REGIONS_REF_COUNT", false);
@@ -165,6 +169,9 @@ struct counter_record
                 cereal::make_nvp("stream_id", stream));
     }
 };
+
+using kernel_dispatch_record =
+    rocprofiler::tool::tool_buffer_tracing_kernel_dispatch_ext_record_t;
 
 struct counter_metadata
 {
@@ -670,6 +677,57 @@ agent_label(const tool_state& state, rocprofiler_agent_id_t id)
     return "Agent " + std::to_string(id.handle);
 }
 
+std::vector<counter_record>
+sorted_counter_records(const tool_state& state)
+{
+    auto records = state.records;
+    std::sort(records.begin(), records.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.dispatch_data.dispatch_info.dispatch_id <
+               rhs.dispatch_data.dispatch_info.dispatch_id;
+    });
+    return records;
+}
+
+std::vector<kernel_dispatch_record>
+make_kernel_dispatch_records(const std::vector<counter_record>& records)
+{
+    using base_record_t = rocprofiler_buffer_tracing_kernel_dispatch_record_t;
+
+    auto output = std::vector<kernel_dispatch_record>{};
+    output.reserve(records.size());
+    for(const auto& record : records)
+    {
+        const auto& dispatch = record.dispatch_data;
+        auto base            = base_record_t{};
+        base.size            = sizeof(base_record_t);
+        base.kind            = ROCPROFILER_BUFFER_TRACING_KERNEL_DISPATCH;
+        base.operation       = ROCPROFILER_KERNEL_DISPATCH_COMPLETE;
+        base.correlation_id  = dispatch.correlation_id;
+        base.thread_id       = record.thread_id;
+        base.start_timestamp = dispatch.start_timestamp;
+        base.end_timestamp   = dispatch.end_timestamp;
+        base.dispatch_info   = dispatch.dispatch_info;
+
+        auto stream = rocprofiler_stream_id_t{};
+        stream.handle = record.stream.handle;
+        output.emplace_back(base,
+                            stream,
+                            rocprofiler_graph_exec_id_t{},
+                            rocprofiler_graph_node_id_t{});
+    }
+    return output;
+}
+
+size_t
+unique_dispatch_count(const tool_state& state)
+{
+    auto dispatches = std::unordered_set<rocprofiler_dispatch_id_t>{};
+    dispatches.reserve(state.records.size());
+    for(const auto& record : state.records)
+        dispatches.emplace(record.dispatch_data.dispatch_info.dispatch_id);
+    return dispatches.size();
+}
+
 std::string
 generate_agent_csv(const tool_state& state)
 {
@@ -753,13 +811,8 @@ find_invalid_sq_waves_dispatch(const tool_state& state)
 std::string
 generate_counter_csv(tool_state& state)
 {
-    auto records = state.records;
-    std::sort(records.begin(), records.end(), [](const auto& lhs, const auto& rhs) {
-        return lhs.dispatch_data.dispatch_info.dispatch_id <
-               rhs.dispatch_data.dispatch_info.dispatch_id;
-    });
-
-    auto output = std::ostringstream{};
+    const auto records = sorted_counter_records(state);
+    auto       output  = std::ostringstream{};
     for(size_t index = 0;
         index < rocprofiler::tool::csv::counter_collection_columns.size();
         ++index)
@@ -801,13 +854,74 @@ generate_counter_csv(tool_state& state)
 }
 
 std::string
+generate_kernel_csv(tool_state& state)
+{
+    constexpr auto columns = std::array<std::string_view, 22>{"Kind",
+                                                               "Agent_Id",
+                                                               "Queue_Id",
+                                                               "Stream_Id",
+                                                               "Thread_Id",
+                                                               "Dispatch_Id",
+                                                               "Kernel_Id",
+                                                               "Kernel_Name",
+                                                               "Correlation_Id",
+                                                               "Start_Timestamp",
+                                                               "End_Timestamp",
+                                                               "LDS_Block_Size",
+                                                               "Scratch_Size",
+                                                               "VGPR_Count",
+                                                               "Accum_VGPR_Count",
+                                                               "SGPR_Count",
+                                                               "Workgroup_Size_X",
+                                                               "Workgroup_Size_Y",
+                                                               "Workgroup_Size_Z",
+                                                               "Grid_Size_X",
+                                                               "Grid_Size_Y",
+                                                               "Grid_Size_Z"};
+    const auto records = sorted_counter_records(state);
+    auto       output  = std::ostringstream{};
+    for(size_t index = 0; index < std::size(columns); ++index)
+    {
+        if(index > 0) output << ',';
+        output << rocprofiler::tool::csv::quote(columns[index]);
+    }
+    output << '\n';
+
+    for(const auto& record : records)
+    {
+        const auto& dispatch = record.dispatch_data;
+        const auto& info     = dispatch.dispatch_info;
+        auto kernel_name = rocprofiler::hsa::windows::get_kernel_name(info.kernel_id);
+        auto metadata    = kernel_metadata{};
+        if(auto itr = state.kernel_info.find(info.kernel_id); itr != state.kernel_info.end())
+        {
+            metadata    = itr->second;
+            kernel_name = metadata.formatted_kernel_name;
+        }
+
+        output << "KERNEL_DISPATCH," << rocprofiler::tool::csv::quote(
+                      agent_label(state, info.agent_id))
+               << ',' << info.queue_id.handle << ',' << record.stream.handle << ','
+               << record.thread_id << ',' << info.dispatch_id << ',' << info.kernel_id << ','
+               << rocprofiler::tool::csv::quote(kernel_name) << ','
+               << dispatch.correlation_id.internal << ',' << dispatch.start_timestamp << ','
+               << dispatch.end_timestamp << ',' << info.group_segment_size << ','
+               << info.private_segment_size << ',' << metadata.arch_vgpr_count << ','
+               << metadata.accum_vgpr_count << ',' << metadata.sgpr_count << ','
+               << info.workgroup_size.x << ',' << info.workgroup_size.y << ','
+               << info.workgroup_size.z << ',' << info.grid_size.x << ',' << info.grid_size.y
+               << ',' << info.grid_size.z << '\n';
+    }
+    return output.str();
+}
+
+std::string
 generate_json(tool_state& state)
 {
-    auto records = state.records;
-    std::sort(records.begin(), records.end(), [](const auto& lhs, const auto& rhs) {
-        return lhs.dispatch_data.dispatch_info.dispatch_id <
-               rhs.dispatch_data.dispatch_info.dispatch_id;
-    });
+    const auto records        = sorted_counter_records(state);
+    const auto kernel_records = state.config.kernel_trace
+                                    ? make_kernel_dispatch_records(records)
+                                    : std::vector<kernel_dispatch_record>{};
     auto stream = std::ostringstream{};
     {
         constexpr auto precision = 16;
@@ -855,6 +969,7 @@ generate_json(tool_state& state)
         archive.finishNode();
         archive.setNextName("buffer_records");
         archive.startNode();
+        archive(cereal::make_nvp("kernel_dispatch", kernel_records));
         archive.finishNode();
 
         archive.finishNode();
@@ -956,6 +1071,14 @@ tool_finalize(void* data)
             detail = "selected dispatches=" + std::to_string(state.selected_dispatches) +
                      ", completed counter records=" + std::to_string(state.records.size());
         }
+        else if(state.config.kernel_trace &&
+                unique_dispatch_count(state) != state.records.size())
+        {
+            status = "kernel_record_mismatch";
+            detail = "completed counter records=" + std::to_string(state.records.size()) +
+                     ", unique kernel dispatches=" +
+                     std::to_string(unique_dispatch_count(state));
+        }
         else if(const auto dispatch_id = find_invalid_sq_waves_dispatch(state);
                 dispatch_id != 0)
         {
@@ -982,6 +1105,10 @@ tool_finalize(void* data)
                 success = publish(output_path(state, "counter_collection", ".csv"),
                                   generate_counter_csv(state)) &&
                           success;
+                if(state.config.kernel_trace)
+                    success = publish(output_path(state, "kernel_trace", ".csv"),
+                                      generate_kernel_csv(state)) &&
+                              success;
             }
             if(state.config.has_format("json"))
                 success = publish(output_path(state, "results", ".json"),
@@ -991,6 +1118,12 @@ tool_finalize(void* data)
             if(success)
             {
                 status = "success_records";
+                detail = "selected dispatches=" +
+                         std::to_string(state.selected_dispatches) +
+                         ", completed counter records=" +
+                         std::to_string(state.records.size()) +
+                         ", emitted kernel records=" +
+                         std::to_string(state.config.kernel_trace ? state.records.size() : 0);
             }
             else
             {

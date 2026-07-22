@@ -14,7 +14,7 @@ def load_contract():
 
 def test_dispatch_analysis_contract_is_complete():
     contract = load_contract()
-    assert contract["version"] == 1
+    assert contract["version"] == 2
     workload = contract["workload"]
     sequence = workload["enqueue_sequence"]
     assert workload["dispatch_count"] == len(sequence) == 6
@@ -51,6 +51,8 @@ def test_dispatch_analysis_contract_is_complete():
         "nonmatching",
         "vector-iteration-two",
         "vector-iteration-range",
+        "mangled-vector",
+        "truncated-vector",
         "composed-stats",
         "reversed-completion",
         "no-dispatch",
@@ -71,6 +73,8 @@ def test_iteration_cases_are_per_formatted_kernel_enqueue_order():
     assert cases["vector-iteration-two"]["selected_enqueue_ordinals"] == [3]
     assert cases["vector-iteration-range"]["selected_enqueue_ordinals"] == [1, 3]
     assert cases["reversed-completion"]["selected_enqueue_ordinals"] == [3]
+    assert cases["mangled-vector"]["name_mode"] == "mangled"
+    assert cases["truncated-vector"]["name_mode"] == "truncated"
 
 
 def test_linux_oracle_freezes_schema_shape_and_current_filter_scope():

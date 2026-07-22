@@ -3,6 +3,7 @@
 // Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "counter_config_common.hpp"
+#include "windows_kernel_selector.hpp"
 #include "lib/rocprofiler-sdk/hsa/windows_tool.hpp"
 
 #include "lib/common/demangle.hpp"
@@ -34,7 +35,6 @@
 #include <iterator>
 #include <map>
 #include <mutex>
-#include <regex>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -94,9 +94,7 @@ struct output_config
     bool selected_regions_ref_count =
         get_env_bool("ROCPROF_SELECTED_REGIONS_REF_COUNT", false);
     std::vector<std::string> counters = parse_counters();
-    std::unordered_set<size_t> iteration_range =
-        rocprofiler::tool::common_config::parse_kernel_filter_range(
-            get_env("ROCPROF_KERNEL_FILTER_RANGE"));
+    std::string iteration_expression = get_env("ROCPROF_KERNEL_FILTER_RANGE");
 
     bool has_format(std::string_view name) const
     {
@@ -254,14 +252,11 @@ struct tool_state
     std::unordered_map<uint64_t, rocprofiler_counter_config_id_t> profiles = {};
     std::unordered_map<uint64_t, std::string> counter_names = {};
     std::vector<counter_metadata> counter_info = {};
-    std::unordered_map<uint64_t, size_t> kernel_iterations = {};
     std::unordered_map<uint64_t, kernel_metadata> kernel_info = {};
     std::vector<counter_record> records = {};
     size_t selected_dispatches = 0;
     std::vector<rocprofiler_agent_t> agents = {};
-    std::regex include_regex = {};
-    std::regex exclude_regex = {};
-    bool has_exclude = false;
+    rocprofiler::tool::windows::kernel_selector selector;
     bool selected_active = false;
     int64_t selected_ref_count = 0;
     std::atomic<bool> unknown_counter{false};
@@ -269,9 +264,9 @@ struct tool_state
     std::string failure_detail = {};
 
     tool_state()
-    : include_regex{config.include_expression}
-    , exclude_regex{config.exclude_expression.empty() ? "a^" : config.exclude_expression}
-    , has_exclude{!config.exclude_expression.empty()}
+    : selector{config.include_expression,
+               config.exclude_expression,
+               config.iteration_expression}
     {}
 };
 
@@ -401,14 +396,8 @@ dispatch_callback(rocprofiler_dispatch_counting_service_data_t data,
         auto lock = std::lock_guard<std::mutex>{state.mutex};
         state.kernel_info[kernel_id] = metadata;
 
-        if(!std::regex_search(metadata.formatted_kernel_name, state.include_regex) ||
-           (state.has_exclude &&
-            std::regex_search(metadata.formatted_kernel_name, state.exclude_regex)))
-            return;
-
-        const auto iteration = ++state.kernel_iterations[kernel_id];
-        if(!state.config.iteration_range.empty() &&
-           state.config.iteration_range.count(iteration) == 0)
+        if(!state.selector.select(data.dispatch_info.dispatch_id,
+                                  metadata.formatted_kernel_name))
             return;
     }
 
@@ -1162,11 +1151,6 @@ rocprofiler_configure(uint32_t,
     try
     {
         get_state() = new tool_state{};
-    } catch(const std::regex_error& error)
-    {
-        std::fprintf(stderr, "Invalid kernel filter regular expression: %s\n", error.what());
-        rocprofiler::windows::result::write("tool_configure_failed", error.what());
-        return nullptr;
     } catch(const std::exception& error)
     {
         std::fprintf(stderr, "Windows rocprofv3 tool configuration failed: %s\n", error.what());

@@ -22,11 +22,11 @@
 
 from __future__ import annotations
 
-import argparse
 import csv
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -171,7 +171,67 @@ def windows_agent_identity(device_id):
     return max(1, int(device_id))
 
 
-def write_windows_kernel_csv(profile_path, output_path, process_id):
+def windows_parse_kernel_filter_range(values):
+    text = " ".join(values or []).replace("[", " ").replace("]", " ")
+    text = text.replace(",", " ")
+    selected = set()
+    for token in text.split():
+        if "-" not in token:
+            if not token.isdecimal():
+                raise ValueError(f"expected an integer kernel iteration: {token}")
+            selected.add(int(token))
+            continue
+        if token.count("-") != 1:
+            raise ValueError(f"bad kernel iteration range: {token}")
+        first_text, last_text = token.split("-", 1)
+        if not first_text.isdecimal() or not last_text.isdecimal():
+            raise ValueError(f"bad kernel iteration range: {token}")
+        first = int(first_text)
+        last = int(last_text)
+        if first > last:
+            raise ValueError(f"descending kernel iteration range: {token}")
+        selected.update(range(first, last + 1))
+    return selected
+
+
+def windows_truncate_kernel_name(name):
+    end = len(name.rstrip())
+    token_end = end
+    if end:
+        close_to_open = {")": "(", ">": "<", "]": "["}
+        close_token = name[end - 1]
+        open_token = close_to_open.get(close_token)
+        if open_token:
+            depth = 1
+            index = end - 2
+            while index >= 0 and depth:
+                if name[index] == close_token:
+                    depth += 1
+                elif name[index] == open_token:
+                    depth -= 1
+                index -= 1
+            token_end = index + 1
+    token_begin = token_end
+    while token_begin > 0 and name[token_begin - 1] not in " :":
+        token_begin -= 1
+    return name[token_begin:token_end]
+
+
+def windows_kernel_filter(args):
+    include_expression = getattr(args, "kernel_include_regex", None) or ".*"
+    exclude_expression = getattr(args, "kernel_exclude_regex", None)
+    try:
+        include_regex = re.compile(include_expression)
+        exclude_regex = re.compile(exclude_expression) if exclude_expression else None
+        iteration_range = windows_parse_kernel_filter_range(
+            getattr(args, "kernel_iteration_range", None)
+        )
+    except (re.error, ValueError) as error:
+        fatal_error("Invalid Windows kernel filter: {}", error)
+    return include_regex, exclude_regex, iteration_range
+
+
+def write_windows_kernel_csv(profile_path, output_path, process_id, args=None):
     try:
         profile = json.loads(profile_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
@@ -186,7 +246,20 @@ def write_windows_kernel_csv(profile_path, output_path, process_id):
             and "grid" in event_args
             and "block" in event_args
         ):
-            events.append(event)
+            try:
+                enqueue_ordinal = int(event_args["enqueue_ordinal"])
+                operation_index = int(event_args["enqueue_operation_index"])
+            except (KeyError, TypeError, ValueError):
+                fatal_error(
+                    "Windows HIP kernel activity is missing an explicit enqueue ordinal"
+                )
+            if enqueue_ordinal <= 0 or operation_index <= 0:
+                fatal_error(
+                    "Invalid Windows HIP kernel enqueue ordinal: {}:{}",
+                    enqueue_ordinal,
+                    operation_index,
+                )
+            events.append((enqueue_ordinal, operation_index, event))
 
     if not events:
         fatal_error(
@@ -218,15 +291,44 @@ def write_windows_kernel_csv(profile_path, output_path, process_id):
         "Grid_Size_Y",
         "Grid_Size_Z",
     ]
+    events.sort(key=lambda item: (item[0], item[1]))
+    enqueue_keys = [(enqueue, operation) for enqueue, operation, _ in events]
+    if len(enqueue_keys) != len(set(enqueue_keys)):
+        fatal_error("Windows HIP kernel activity contains duplicate enqueue ordinals")
+
+    if args is None:
+        args = type("WindowsKernelArgs", (), {})()
+    include_regex, exclude_regex, iteration_range = windows_kernel_filter(args)
+    demangle = not getattr(args, "mangled_kernels", False)
+    truncate = getattr(args, "truncate_kernels", False)
+
     kernel_ids = {}
+    kernel_iterations = {}
     rows = []
-    for dispatch_id, event in enumerate(events, start=1):
+    for dispatch_id, (enqueue_ordinal, _, event) in enumerate(events, start=1):
         event_args = event["args"]
         workgroup = windows_dimensions(event_args["block"], "block dimensions")
         block_grid = windows_dimensions(event_args["grid"], "grid dimensions")
         grid = tuple(block_grid[index] * workgroup[index] for index in range(3))
-        kernel_name = str(event.get("name", ""))
-        kernel_id = kernel_ids.setdefault(kernel_name, len(kernel_ids) + 1)
+        demangled_name = str(event.get("name", ""))
+        mangled_name = str(event_args.get("mangled_kernel_name", ""))
+        if not demangle and not mangled_name:
+            fatal_error("Windows HIP kernel activity is missing the mangled kernel name")
+        kernel_name = demangled_name if demangle else mangled_name
+        if truncate:
+            kernel_name = windows_truncate_kernel_name(demangled_name)
+        kernel_identity = mangled_name or demangled_name
+        kernel_id = kernel_ids.setdefault(kernel_identity, len(kernel_ids) + 1)
+
+        if not include_regex.search(kernel_name) or (
+            exclude_regex and exclude_regex.search(kernel_name)
+        ):
+            continue
+        iteration = kernel_iterations.get(kernel_name, 0) + 1
+        kernel_iterations[kernel_name] = iteration
+        if iteration_range and iteration not in iteration_range:
+            continue
+
         begin_ns = round(float(event.get("ts", 0)) * 1000)
         end_ns = round(
             (float(event.get("ts", 0)) + float(event.get("dur", 0))) * 1000
@@ -247,11 +349,11 @@ def write_windows_kernel_csv(profile_path, output_path, process_id):
                 "Agent_Id": f"Agent {windows_agent_identity(device_id)}",
                 "Queue_Id": queue_id,
                 "Stream_Id": stream_id,
-                "Thread_Id": process_id,
+                "Thread_Id": int(event_args.get("thread_id", process_id)),
                 "Dispatch_Id": dispatch_id,
                 "Kernel_Id": kernel_id,
                 "Kernel_Name": kernel_name,
-                "Correlation_Id": dispatch_id,
+                "Correlation_Id": enqueue_ordinal,
                 "Start_Timestamp": begin_ns,
                 "End_Timestamp": end_ns,
                 "LDS_Block_Size": 0,
@@ -365,7 +467,7 @@ def run_windows_kernel_trace(app_args, args):
                 "The target did not produce a Windows HIP activity trace. The installed amdhip64_7.dll must export the HIP profiler extension"
             )
         record_count = write_windows_kernel_csv(
-            profile_path, output_path, process_id
+            profile_path, output_path, process_id, args
         )
         print(
             f"[rocprofv3] Windows kernel trace: records={record_count} output={output_path}",

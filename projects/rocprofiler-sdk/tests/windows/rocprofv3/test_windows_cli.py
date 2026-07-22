@@ -66,6 +66,10 @@ def test_kernel_trace_conversion_normalizes_agent_identity(
                             "grid": "4096x1x1",
                             "block": "256x1x1",
                             "queue_id": device_id,
+                            "enqueue_ordinal": device_id + 1,
+                            "enqueue_operation_index": 1,
+                            "mangled_kernel_name": "_Z10vector_addv",
+                            "thread_id": 100 + device_id,
                         },
                     }
                     for device_id in (0, 1)
@@ -87,6 +91,100 @@ def test_kernel_trace_conversion_normalizes_agent_identity(
         "output already exists",
     )
     assert output.read_bytes() == retained
+
+
+def test_kernel_trace_filters_explicit_enqueue_order_and_formatted_name(
+    rocprofv3, tmp_path
+):
+    sequence = [
+        (1, "dispatch_vector(float const*, float*)", "_Z15dispatch_vectorPKfPf"),
+        (2, "dispatch_lds_conflict(float*)", "_Z21dispatch_lds_conflictPf"),
+        (3, "dispatch_vector(float const*, float*)", "_Z15dispatch_vectorPKfPf"),
+        (4, "dispatch_lds_conflict(float*)", "_Z21dispatch_lds_conflictPf"),
+        (5, "dispatch_vector(float const*, float*)", "_Z15dispatch_vectorPKfPf"),
+        (6, "dispatch_resource(float*)", "_Z17dispatch_resourcePf"),
+    ]
+    by_ordinal = {
+        ordinal: {
+            "ph": "X",
+            "name": name,
+            "pid": 1,
+            "tid": ordinal % 2 + 2,
+            "ts": float(ordinal),
+            "dur": 0.25,
+            "args": {
+                "grid": "4x1x1",
+                "block": "64x1x1",
+                "queue_id": ordinal % 2 + 2,
+                "enqueue_ordinal": ordinal,
+                "enqueue_operation_index": 1,
+                "mangled_kernel_name": mangled,
+                "thread_id": 700,
+            },
+        }
+        for ordinal, name, mangled in sequence
+    }
+    activity = tmp_path / "reversed-activity.json"
+    activity.write_text(
+        json.dumps(
+            {
+                "traceEvents": [
+                    by_ordinal[ordinal] for ordinal in (5, 2, 6, 3, 1, 4)
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ranged = tmp_path / "ranged.csv"
+    ranged_args = SimpleNamespace(
+        kernel_include_regex="dispatch_vector",
+        kernel_exclude_regex=None,
+        kernel_iteration_range=["[2]"],
+        mangled_kernels=False,
+        truncate_kernels=False,
+    )
+    assert rocprofv3.write_windows_kernel_csv(
+        activity, ranged, 4242, ranged_args
+    ) == 1
+    with ranged.open(encoding="utf-8", newline="") as stream:
+        ranged_rows = list(csv.DictReader(stream))
+    assert [int(row["Dispatch_Id"]) for row in ranged_rows] == [3]
+    assert [int(row["Correlation_Id"]) for row in ranged_rows] == [3]
+    assert [row["Kernel_Name"] for row in ranged_rows] == [
+        "dispatch_vector(float const*, float*)"
+    ]
+
+    mangled = tmp_path / "mangled.csv"
+    mangled_args = SimpleNamespace(
+        kernel_include_regex="dispatch_vector",
+        kernel_exclude_regex=None,
+        kernel_iteration_range=[],
+        mangled_kernels=True,
+        truncate_kernels=False,
+    )
+    assert rocprofv3.write_windows_kernel_csv(
+        activity, mangled, 4242, mangled_args
+    ) == 3
+    with mangled.open(encoding="utf-8", newline="") as stream:
+        mangled_rows = list(csv.DictReader(stream))
+    assert all(row["Kernel_Name"].startswith("_Z15dispatch_vector") for row in mangled_rows)
+
+    truncated = tmp_path / "truncated.csv"
+    truncated_args = SimpleNamespace(
+        kernel_include_regex="^dispatch_vector$",
+        kernel_exclude_regex=None,
+        kernel_iteration_range=[],
+        mangled_kernels=False,
+        truncate_kernels=True,
+    )
+    assert rocprofv3.write_windows_kernel_csv(
+        activity, truncated, 4242, truncated_args
+    ) == 3
+    with truncated.open(encoding="utf-8", newline="") as stream:
+        truncated_rows = list(csv.DictReader(stream))
+    assert [row["Dispatch_Id"] for row in truncated_rows] == ["1", "3", "5"]
+    assert {row["Kernel_Name"] for row in truncated_rows} == {"dispatch_vector"}
 
 
 def test_hip_and_graph_trace_conversion(rocprofv3, tmp_path):

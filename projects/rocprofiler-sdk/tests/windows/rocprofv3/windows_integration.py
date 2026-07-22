@@ -5,6 +5,7 @@ import csv
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -524,6 +525,101 @@ def run_dispatch_analysis_contract(args, env, output):
             }
         )
 
+    database_directory = output / "rocpd"
+    database_directory.mkdir()
+    no_filter = next(case for case in selection_cases if case["name"] == "no-filter")
+    database_command = [
+        str(args.python),
+        str(args.rocprofv3),
+        "--kernel-trace",
+        "--stats",
+        "--pmc",
+        *contract["counter_group"],
+        "-f",
+        "rocpd",
+        "-d",
+        str(database_directory),
+        "-o",
+        "contract",
+        "--",
+        workload,
+        *no_filter["target_args"],
+    ]
+    database_status, _, database_stdout = run_command(
+        database_command,
+        env,
+        output / "rocpd.stdout.txt",
+        timeout=120,
+    )
+    database_path = database_directory / "contract_results.db"
+    database = {
+        "command": database_command,
+        "returncode": database_status,
+        "stdout": database_stdout,
+        "exists": database_path.is_file(),
+        "internal_json_exists": (
+            database_directory / "contract_results.json"
+        ).is_file(),
+        "metadata": {},
+        "schema_objects": [],
+        "integrity": None,
+        "foreign_key_errors": [],
+        "kernels": [],
+        "pmc_events": [],
+        "kernel_symbols": [],
+        "top_kernels": [],
+    }
+    if database_path.is_file():
+        with sqlite3.connect(database_path) as connection:
+            connection.row_factory = sqlite3.Row
+            database["metadata"] = dict(
+                connection.execute("SELECT tag, value FROM rocpd_metadata").fetchall()
+            )
+            database["schema_objects"] = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') "
+                    "ORDER BY name"
+                )
+            ]
+            database["integrity"] = connection.execute(
+                "PRAGMA integrity_check"
+            ).fetchone()[0]
+            database["foreign_key_errors"] = [
+                list(row) for row in connection.execute("PRAGMA foreign_key_check")
+            ]
+            database["kernels"] = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT dispatch_id, kernel_id, name, tid, agent_abs_index, queue_id, "
+                    "stream_id, start, end, duration, grid_x, grid_y, grid_z, workgroup_x, "
+                    "workgroup_y, workgroup_z, lds_size, scratch_size, vgpr_count, "
+                    "accum_vgpr_count, sgpr_count FROM kernels ORDER BY dispatch_id"
+                )
+            ]
+            database["pmc_events"] = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT dispatch_id, name, start, end, duration, counter_name, "
+                    "counter_value FROM pmc_events ORDER BY dispatch_id, counter_name"
+                )
+            ]
+            database["kernel_symbols"] = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT kernel_id, formatted_kernel_name, group_segment_size, "
+                    "private_segment_size, arch_vgpr_count, accum_vgpr_count, sgpr_count "
+                    "FROM kernel_symbols ORDER BY kernel_id"
+                )
+            ]
+            database["top_kernels"] = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT name, total_calls, total_duration, average, percentage "
+                    "FROM top_kernels ORDER BY total_duration DESC, name"
+                )
+            ]
+
     runs_by_name = {run["name"]: run for run in selection_runs}
     standalone = dict(runs_by_name["reversed-completion"]["standalone"])
     standalone["stats_exists"] = False
@@ -538,6 +634,7 @@ def run_dispatch_analysis_contract(args, env, output):
         "selection_cases": selection_runs,
         "standalone": standalone,
         "composed": composed,
+        "rocpd": database,
     }
 
 

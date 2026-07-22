@@ -202,6 +202,7 @@ foreach ($relativePath in @(
     "bin/rocprofv3-avail.cmd",
     "bin/_rocprofv3_windows.py",
     "bin/_rocprofv3_windows_job.py",
+    "bin/_rocprofv3_rocpd.py",
     "lib/rocprofiler-sdk.lib",
     "lib/rocprofiler-sdk-roctx.lib",
     "lib/rocprofiler-sdk-tool.lib",
@@ -242,6 +243,7 @@ $requiredPaths = @(
     (Join-Path $installBin "rocprofv3-avail.cmd"),
     (Join-Path $installBin "_rocprofv3_windows.py"),
     (Join-Path $installBin "_rocprofv3_windows_job.py"),
+    (Join-Path $installBin "_rocprofv3_rocpd.py"),
     (Join-Path $InstallPrefix "include/rocprofiler-sdk/rocprofiler.h"),
     (Join-Path $InstallPrefix "include/rocprofiler-sdk-roctx/roctx.h"),
     (Join-Path $InstallPrefix "lib/rocprofiler-sdk.lib"),
@@ -251,7 +253,10 @@ $requiredPaths = @(
     (Join-Path $InstallPrefix "lib/cmake/rocprofiler-sdk/rocprofiler-sdk-config.cmake"),
     (Join-Path $InstallPrefix "lib/python3/site-packages/rocprofv3/__init__.py"),
     (Join-Path $InstallPrefix "lib/python3/site-packages/rocprofv3/avail.py"),
-    (Join-Path $InstallPrefix "share/rocprofiler-sdk/config.yaml")
+    (Join-Path $InstallPrefix "share/rocprofiler-sdk/config.yaml"),
+    (Join-Path $InstallPrefix "share/rocprofiler-sdk-rocpd/rocpd_tables.sql"),
+    (Join-Path $InstallPrefix "share/rocprofiler-sdk-rocpd/data_views.sql"),
+    (Join-Path $InstallPrefix "share/rocprofiler-sdk-rocpd/summary_views.sql")
 )
 foreach ($requiredPath in $requiredPaths) {
     if (-not (Test-Path $requiredPath -PathType Leaf)) {

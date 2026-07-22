@@ -5,10 +5,12 @@ import csv
 import ctypes
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -109,6 +111,7 @@ def main() -> int:
         install_bin / "rocprofv3-avail",
         install_bin / "_rocprofv3_windows.py",
         install_bin / "_rocprofv3_windows_job.py",
+        install_bin / "_rocprofv3_rocpd.py",
         wrapper,
         install_bin / "rocprofv3-avail.cmd",
         prefix / "include" / "rocprofiler-register" / "rocprofiler-register.h",
@@ -126,6 +129,9 @@ def main() -> int:
         prefix / "lib" / "python3" / "site-packages" / "rocprofv3" / "__init__.py",
         prefix / "lib" / "python3" / "site-packages" / "rocprofv3" / "avail.py",
         prefix / "share" / "rocprofiler-sdk" / "config.yaml",
+        prefix / "share" / "rocprofiler-sdk-rocpd" / "rocpd_tables.sql",
+        prefix / "share" / "rocprofiler-sdk-rocpd" / "data_views.sql",
+        prefix / "share" / "rocprofiler-sdk-rocpd" / "summary_views.sql",
     ]
     artifacts = [artifact(path, prefix) for path in required]
 
@@ -257,6 +263,7 @@ def main() -> int:
             "rocprofv3.cmd",
             "_rocprofv3_windows.py",
             "_rocprofv3_windows_job.py",
+            "_rocprofv3_rocpd.py",
         ):
             shutil.copy2(install_bin / launcher_artifact, relocated_bin)
         relocated_result, relocated_output = run_wrapper(
@@ -518,6 +525,113 @@ def main() -> int:
                     )
                 pmc_processes.append(pmc_result)
                 pmc_totals.append(sum(pmc_values))
+
+            rocpd_directory = validation_root / "rocpd"
+            rocpd_database = rocpd_directory / "windows-installed-rocpd_results.db"
+            rocpd_result, rocpd_output = run_wrapper(
+                wrapper,
+                [
+                    "--kernel-trace",
+                    "--stats",
+                    "--pmc",
+                    "SQ_WAVES",
+                    "--output-format",
+                    "rocpd",
+                    "--output-directory",
+                    str(rocpd_directory),
+                    "--output-file",
+                    "windows-installed-rocpd",
+                    "--",
+                    str(installed_hip_target),
+                    "--dispatches",
+                    "2",
+                ],
+                prefix,
+                validation_root / "rocpd.txt",
+                target=installed_hip_target,
+                expected_outputs=(rocpd_database,),
+            )
+            if "Windows ROCpd: dispatches=2" not in rocpd_output:
+                raise RuntimeError("installed ROCpd run omitted its dispatch summary")
+            if (rocpd_directory / "windows-installed-rocpd_results.json").exists():
+                raise RuntimeError("installed ROCpd-only run retained its internal JSON")
+            with sqlite3.connect(rocpd_database) as connection:
+                integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+                foreign_key_errors = connection.execute(
+                    "PRAGMA foreign_key_check"
+                ).fetchall()
+                schema_version = connection.execute(
+                    "SELECT value FROM rocpd_metadata WHERE tag = 'schema_version'"
+                ).fetchone()[0]
+                database_kernels = connection.execute(
+                    "SELECT dispatch_id, start, end, duration, vgpr_count, sgpr_count "
+                    "FROM kernels ORDER BY dispatch_id"
+                ).fetchall()
+                database_pmc = connection.execute(
+                    "SELECT dispatch_id, counter_name, counter_value FROM pmc_events "
+                    "ORDER BY dispatch_id"
+                ).fetchall()
+                database_top = connection.execute(
+                    "SELECT name, total_calls, total_duration, average, percentage "
+                    "FROM top_kernels"
+                ).fetchall()
+            if integrity != "ok" or foreign_key_errors:
+                raise RuntimeError(
+                    f"installed ROCpd database is invalid: {integrity}, {foreign_key_errors}"
+                )
+            if schema_version != "3.0.3":
+                raise RuntimeError(
+                    f"installed ROCpd schema version does not match: {schema_version}"
+                )
+            if [row[0] for row in database_kernels] != [1, 2]:
+                raise RuntimeError(
+                    f"installed ROCpd dispatch IDs do not match: {database_kernels}"
+                )
+            if any(
+                row[1] <= 0
+                or row[2] <= row[1]
+                or row[3] != row[2] - row[1]
+                or row[4] <= 0
+                or row[5] <= 0
+                for row in database_kernels
+            ):
+                raise RuntimeError(
+                    f"installed ROCpd kernel records are invalid: {database_kernels}"
+                )
+            if {row[0] for row in database_pmc} != {1, 2} or {
+                row[1] for row in database_pmc
+            } != {"SQ_WAVES"}:
+                raise RuntimeError(
+                    f"installed ROCpd counter identity does not match: {database_pmc}"
+                )
+            pmc_sums = {
+                dispatch_id: sum(row[2] for row in database_pmc if row[0] == dispatch_id)
+                for dispatch_id in (1, 2)
+            }
+            if any(value <= 0 for value in pmc_sums.values()):
+                raise RuntimeError(
+                    f"installed ROCpd counter values are not positive: {pmc_sums}"
+                )
+            if (
+                len(database_top) != 1
+                or "vector_add" not in database_top[0][0]
+                or database_top[0][1] != 2
+                or any(value <= 0 for value in database_top[0][2:4])
+                or not math.isclose(database_top[0][4], 100.0)
+            ):
+                raise RuntimeError(
+                    f"installed ROCpd top-kernel summary does not match: {database_top}"
+                )
+            rocpd_trace = {
+                "process": rocpd_result,
+                "schema_version": schema_version,
+                "integrity": integrity,
+                "foreign_key_errors": foreign_key_errors,
+                "kernel_rows": len(database_kernels),
+                "pmc_rows": len(database_pmc),
+                "pmc_sums": pmc_sums,
+                "top_kernels": database_top,
+            }
             hip_trace = {
                 "availability_process": availability_result,
                 "process": hip_result,
@@ -532,6 +646,7 @@ def main() -> int:
                 "pmc_json_records_per_run": 2,
                 "kernel_rows_per_run": 2,
                 "kernel_json_records_per_run": 2,
+                "rocpd": rocpd_trace,
             }
         finally:
             shutil.rmtree(hip_target_directory, ignore_errors=True)

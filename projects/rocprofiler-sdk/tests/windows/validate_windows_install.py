@@ -555,6 +555,12 @@ def main() -> int:
                 raise RuntimeError("installed ROCpd run omitted its dispatch summary")
             if (rocpd_directory / "windows-installed-rocpd_results.json").exists():
                 raise RuntimeError("installed ROCpd-only run retained its internal JSON")
+            schema_manifest = json.loads(
+                (
+                    prefix
+                    / "share/rocprofiler-sdk-rocpd/latest-schema.json"
+                ).read_text(encoding="utf-8")
+            )
             with sqlite3.connect(rocpd_database) as connection:
                 integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
                 foreign_key_errors = connection.execute(
@@ -563,6 +569,7 @@ def main() -> int:
                 schema_version = connection.execute(
                     "SELECT value FROM rocpd_metadata WHERE tag = 'schema_version'"
                 ).fetchone()[0]
+                user_version = connection.execute("PRAGMA user_version").fetchone()[0]
                 database_kernels = connection.execute(
                     "SELECT dispatch_id, start, end, duration, vgpr_count, sgpr_count "
                     "FROM kernels ORDER BY dispatch_id"
@@ -579,9 +586,13 @@ def main() -> int:
                 raise RuntimeError(
                     f"installed ROCpd database is invalid: {integrity}, {foreign_key_errors}"
                 )
-            if schema_version != "3.0.3":
+            if (
+                schema_version != schema_manifest["version"]
+                or user_version != schema_manifest["user_version"]
+            ):
                 raise RuntimeError(
-                    f"installed ROCpd schema version does not match: {schema_version}"
+                    "installed ROCpd schema version does not match its manifest: "
+                    f"{schema_version}, {user_version}"
                 )
             if [row[0] for row in database_kernels] != [1, 2]:
                 raise RuntimeError(
@@ -625,6 +636,7 @@ def main() -> int:
             rocpd_trace = {
                 "process": rocpd_result,
                 "schema_version": schema_version,
+                "user_version": user_version,
                 "integrity": integrity,
                 "foreign_key_errors": foreign_key_errors,
                 "kernel_rows": len(database_kernels),

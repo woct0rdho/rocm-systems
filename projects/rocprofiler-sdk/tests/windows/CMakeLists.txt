@@ -15,7 +15,7 @@ set_tests_properties(
         LABELS "windows;unit;cpu-only;rocprofv3"
         TIMEOUT 60
         ENVIRONMENT
-            "ROCPROFV3_TEST_SCRIPT=${PROJECT_SOURCE_DIR}/source/bin/rocprofv3.py;PYTHONDONTWRITEBYTECODE=1")
+            "ROCPROFV3_TEST_SCRIPT=${PROJECT_SOURCE_DIR}/source/bin/rocprofv3.py;ROCPD_SCHEMA_PATH=${PROJECT_BINARY_DIR}/share/rocprofiler-sdk-rocpd;PYTHONDONTWRITEBYTECODE=1")
 
 set(_dispatch_analysis_test_directory ${CMAKE_CURRENT_LIST_DIR}/../dispatch-analysis)
 add_test(

@@ -507,7 +507,11 @@ def test_windows_integration_case():
         assert "Windows ROCpd: dispatches=6 counters=18 kernel_symbols=3" in rocpd[
             "stdout"
         ]
-        assert rocpd["metadata"]["schema_version"] == "3.0.3"
+        assert (
+            rocpd["metadata"]["schema_version"]
+            == rocpd["expected_schema"]["version"]
+        )
+        assert rocpd["user_version"] == rocpd["expected_schema"]["user_version"]
         assert rocpd["metadata"]["producer"] == "rocprofv3-windows-post-target"
         assert rocpd["metadata"]["source_format"] == "rocprofiler-sdk-tool-json"
         assert rocpd["metadata"]["dispatch_count"] == "6"

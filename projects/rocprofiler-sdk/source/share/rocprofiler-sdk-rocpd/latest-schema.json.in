@@ -1,0 +1,16 @@
+{
+  "format": 1,
+  "version": "@ROCPD_SCHEMA_VERSION@",
+  "major": @ROCPD_SCHEMA_VERSION_MAJOR@,
+  "minor": @ROCPD_SCHEMA_VERSION_MINOR@,
+  "patch": @ROCPD_SCHEMA_VERSION_PATCH@,
+  "user_version": @ROCPD_SCHEMA_USER_VERSION@,
+  "schema_files": {
+    "rocpd_metadata": "@ROCPD_SCHEMA_rocpd_metadata@",
+    "rocpd_tables": "@ROCPD_SCHEMA_rocpd_tables@",
+    "rocpd_views": "@ROCPD_SCHEMA_rocpd_views@",
+    "rocpd_indexes": "@ROCPD_SCHEMA_rocpd_indexes@",
+    "rocpd_data_views": "@ROCPD_SCHEMA_rocpd_data_views@",
+    "rocpd_summary_views": "@ROCPD_SCHEMA_rocpd_summary_views@"
+  }
+}

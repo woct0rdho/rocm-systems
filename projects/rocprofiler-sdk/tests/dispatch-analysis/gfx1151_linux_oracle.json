@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "architecture": "gfx1151",
   "workload_dispatches": 6,
   "csv": {
@@ -113,6 +113,12 @@
       "kernel_symbols",
       "summary"
     ]
+  },
+  "rocpd_lds_normalization": {
+    "source_group_segment_size": 513,
+    "group_segment_size": 1024,
+    "lds_size": 1024,
+    "static_lds_size": 1024
   },
   "selection_oracle": {
     "case": "vector-iteration-two",

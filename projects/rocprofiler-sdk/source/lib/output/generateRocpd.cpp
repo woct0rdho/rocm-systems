@@ -24,6 +24,7 @@
 #include "lib/common/uuid_v7.hpp"
 #include "metadata.hpp"
 #include "output_stream.hpp"
+#include "resource_info.hpp"
 #include "statistics.hpp"
 #include "stream_info.hpp"
 #include "timestamps.hpp"
@@ -1401,7 +1402,8 @@ write_rocpd(
                     insert_value("kernel_object", itr.kernel_object),
                     insert_value("kernarg_segment_size", itr.kernarg_segment_size),
                     insert_value("kernarg_segment_alignment", itr.kernarg_segment_alignment),
-                    insert_value("group_segment_size", itr.group_segment_size),
+                    insert_value("group_segment_size",
+                                 normalize_lds_allocation_size(itr.group_segment_size)),
                     insert_value("private_segment_size", itr.private_segment_size),
                     insert_value("sgpr_count", itr.sgpr_count),
                     insert_value("arch_vgpr_count", itr.arch_vgpr_count),
@@ -1536,7 +1538,8 @@ write_rocpd(
                     insert_value("start", start_timestamp),
                     insert_value("end", end_timestamp),
                     insert_value("private_segment_size", info.private_segment_size),
-                    insert_value("group_segment_size", info.group_segment_size),
+                    insert_value("group_segment_size",
+                                 normalize_lds_allocation_size(info.group_segment_size)),
                     insert_value("workgroup_size_x", workgroup.x),
                     insert_value("workgroup_size_y", workgroup.y),
                     insert_value("workgroup_size_z", workgroup.z),

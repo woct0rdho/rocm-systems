@@ -42,6 +42,11 @@ def pytest_addoption(parser):
         help="Path to JSON file.",
     )
     parser.addoption(
+        "--database-input",
+        action="store",
+        help="Path to ROCpd database file.",
+    )
+    parser.addoption(
         "--pftrace-input",
         action="store",
         help="Path to Perfetto trace file.",
@@ -118,6 +123,14 @@ def json_data(request):
     filename = request.config.getoption("--json-input")
     with open(filename, "r") as inp:
         return dotdict(collapse_dict_list(json.load(inp)))
+
+
+@pytest.fixture
+def database_path(request):
+    filename = request.config.getoption("--database-input")
+    if not filename or not os.path.exists(filename):
+        raise FileExistsError(f"{filename} does not exist")
+    return filename
 
 
 @pytest.fixture

@@ -130,6 +130,13 @@ main(int argc, char** argv)
 __global__ void
 reproducible_dispatch_count(uint32_t nspin_v)
 {
+    __shared__ volatile uint8_t lds[513];
+    lds[threadIdx.x] = static_cast<uint8_t>(nspin_v + threadIdx.x);
+    if(threadIdx.x == 0) lds[512] = static_cast<uint8_t>(nspin_v);
+    __syncthreads();
+    const auto lds_value = lds[(threadIdx.x + 1) % blockDim.x];
+    if((lds_value ^ lds[512]) == 0xFF) asm volatile("s_nop 0");
+
     for(uint32_t i = 0; i < nspin_v / 64; i++)
         asm volatile("s_sleep 1");
     if(nspin_v > 64)

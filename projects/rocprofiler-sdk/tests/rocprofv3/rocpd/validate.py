@@ -22,7 +22,9 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
+import sqlite3
 import sys
+
 import pytest
 
 
@@ -69,6 +71,53 @@ def test_csv_data(csv_data, json_data):
             "regions",
         ),
     )
+
+
+def test_database_lds_normalization(database_path, json_data):
+    tool = json_data["rocprofiler-sdk-tool"]
+    symbols = {
+        item["kernel_id"]: item
+        for item in tool["kernel_symbols"]
+        if "reproducible_dispatch_count" in item["formatted_kernel_name"]
+    }
+    assert symbols
+    assert {item["group_segment_size"] for item in symbols.values()} == {513}
+    dispatch_sizes = {
+        item["dispatch_info"]["group_segment_size"]
+        for item in tool["buffer_records"]["kernel_dispatch"]
+        if item["dispatch_info"]["kernel_id"] in symbols
+    }
+    assert dispatch_sizes == {513}
+
+    with sqlite3.connect(database_path) as connection:
+        symbol_sizes = {
+            row[0]
+            for row in connection.execute(
+                "SELECT group_segment_size FROM rocpd_info_kernel_symbol "
+                "WHERE display_name LIKE '%reproducible_dispatch_count%'"
+            )
+        }
+        database_dispatch_sizes = {
+            row[0]
+            for row in connection.execute(
+                "SELECT group_segment_size FROM rocpd_kernel_dispatch "
+                "WHERE kernel_id IN ("
+                "SELECT id FROM rocpd_info_kernel_symbol "
+                "WHERE display_name LIKE '%reproducible_dispatch_count%')"
+            )
+        }
+        view_sizes = {
+            (row[0], row[1])
+            for row in connection.execute(
+                "SELECT lds_size, static_lds_size FROM kernels "
+                "WHERE name LIKE '%reproducible_dispatch_count%'"
+            )
+        }
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert symbol_sizes == {1024}
+    assert database_dispatch_sizes == {1024}
+    assert view_sizes == {(1024, 1024)}
 
 
 def test_arg_annotations_exist(pftrace_reader):

@@ -17,7 +17,9 @@ if str(COMMON) not in sys.path:
 from process_cleanup import assert_target_stopped
 
 
-def run_cli(*arguments: str, timeout: int = 120):
+def run_cli(
+    *arguments: str, timeout: int = 120, environment_updates: dict[str, str] | None = None
+):
     python = Path(os.environ["ROCPROFV3_TEST_PYTHON"]).resolve()
     script = Path(os.environ["ROCPROFV3_TEST_BUILT_SCRIPT"]).resolve()
     environment = dict(os.environ)
@@ -31,6 +33,8 @@ def run_cli(*arguments: str, timeout: int = 120):
         "ROCPROF_OUTPUT_FILE_NAME",
     ):
         environment.pop(name, None)
+    if environment_updates:
+        environment.update(environment_updates)
     result = subprocess.run(
         [str(python), str(script), *arguments],
         env=environment,
@@ -123,6 +127,71 @@ def assert_kernel_counter_join(counter_rows, kernel_rows):
 
 def cmd_exe():
     return Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe"
+
+
+def test_output_key_contract_matches_native_producer(tmp_path):
+    output_root = tmp_path / "output root" / "%tag%" / "%pid%" / "%env{PATH_TOKEN}%"
+    result = run_cli(
+        "--pmc",
+        "SQ_WAVES",
+        "--mpi-world-rank-variable",
+        "CUSTOM_RANK",
+        "--mpi-world-size-variable",
+        "CUSTOM_SIZE",
+        "-d",
+        str(output_root),
+        "-o",
+        "prefix/%arg1%_%rank%_%p",
+        "--",
+        str(workload()),
+        "--dispatches",
+        "1",
+        environment_updates={
+            "CUSTOM_RANK": "4",
+            "CUSTOM_SIZE": "8",
+            "SLURM_JOB_ID": "77",
+            "PATH_TOKEN": "nested value",
+        },
+    )
+    assert result.returncode == 0, result.stdout
+    outputs = list((tmp_path / "output root").rglob("*_counter_collection.csv"))
+    assert len(outputs) == 1
+    rows = read_csv(outputs[0])
+    assert len(rows) == 1
+    process_id = rows[0]["Process_Id"]
+    relative = outputs[0].relative_to(tmp_path / "output root")
+    assert relative.parts[:3] == (workload().name, process_id, "nested_value")
+    assert relative.parts[3] == "prefix"
+    assert relative.name == (
+        f"--dispatches_4_{process_id}_counter_collection.csv"
+    )
+
+
+def test_inherited_output_name_supports_recursion_and_spaces(tmp_path):
+    result = run_cli(
+        "--pmc",
+        "SQ_WAVES",
+        "-d",
+        str(tmp_path / "inherited root" / "%pid%"),
+        "--",
+        str(workload()),
+        "--dispatches",
+        "1",
+        environment_updates={
+            "ROCPROF_OUTPUT_FILE_NAME": "%env{OUTPUT_PREFIX}%/{pid}",
+            "OUTPUT_PREFIX": "inherited name",
+        },
+    )
+    assert result.returncode == 0, result.stdout
+    outputs = list((tmp_path / "inherited root").rglob("*_counter_collection.csv"))
+    assert len(outputs) == 1
+    rows = read_csv(outputs[0])
+    process_id = rows[0]["Process_Id"]
+    assert outputs[0].relative_to(tmp_path / "inherited root").parts == (
+        process_id,
+        "inherited_name",
+        f"{process_id}_counter_collection.csv",
+    )
 
 
 def test_ordinary_csv_json_and_filtering(tmp_path):
@@ -294,20 +363,27 @@ def test_multiple_pmc_groups_publish_separate_passes(tmp_path):
         "--pmc",
         "GRBM_COUNT",
         "-d",
-        str(tmp_path),
+        str(tmp_path / "multipass root" / "%pid%"),
         "-o",
-        "multi",
+        "nested/multi",
         "--",
         str(workload()),
     )
     assert result.returncode == 0, result.stdout
 
-    first = read_csv(tmp_path / "pass_1" / "multi_counter_collection.csv")
-    second = read_csv(tmp_path / "pass_2" / "multi_counter_collection.csv")
-    first_kernel = read_csv(tmp_path / "pass_1" / "multi_kernel_trace.csv")
-    second_kernel = read_csv(tmp_path / "pass_2" / "multi_kernel_trace.csv")
-    first_stats = read_csv(tmp_path / "pass_1" / "multi_kernel_stats.csv")
-    second_stats = read_csv(tmp_path / "pass_2" / "multi_kernel_stats.csv")
+    root = tmp_path / "multipass root"
+    first_path = next(root.glob("*/pass_1/nested/multi_counter_collection.csv"))
+    second_path = next(root.glob("*/pass_2/nested/multi_counter_collection.csv"))
+    first_root = first_path.parents[2]
+    second_root = second_path.parents[2]
+    first = read_csv(first_path)
+    second = read_csv(second_path)
+    first_kernel = read_csv(first_root / "pass_1/nested/multi_kernel_trace.csv")
+    second_kernel = read_csv(second_root / "pass_2/nested/multi_kernel_trace.csv")
+    first_stats = read_csv(first_root / "pass_1/nested/multi_kernel_stats.csv")
+    second_stats = read_csv(second_root / "pass_2/nested/multi_kernel_stats.csv")
+    assert first_root.name == first[0]["Process_Id"]
+    assert second_root.name == second[0]["Process_Id"]
     assert len(first) == len(second) == 8
     assert len(first_kernel) == len(second_kernel) == 8
     assert {row["Counter_Name"] for row in first} == {"SQ_WAVES"}
@@ -425,15 +501,27 @@ def test_counter_and_hip_trace_compose_in_one_process(tmp_path):
         "csv",
         "json",
         "-d",
-        str(tmp_path),
+        str(tmp_path / "composed root" / "%pid%"),
         "-o",
-        "composed",
+        "nested/composed-%p",
         "--",
         str(workload()),
     )
     assert result.returncode == 0, result.stdout
-    assert len(read_csv(tmp_path / "composed_counter_collection.csv")) == 2
-    document = json.loads((tmp_path / "composed_results.json").read_text("utf-8"))
+    counter_path = next(
+        (tmp_path / "composed root").rglob("*_counter_collection.csv")
+    )
+    counter_rows = read_csv(counter_path)
+    assert len(counter_rows) == 2
+    process_id = counter_rows[0]["Process_Id"]
+    output = tmp_path / "composed root" / process_id / "nested"
+    prefix = output / f"composed-{process_id}"
+    assert counter_path == prefix.with_name(
+        f"composed-{process_id}_counter_collection.csv"
+    )
+    document = json.loads(
+        prefix.with_name(f"composed-{process_id}_results.json").read_text("utf-8")
+    )
     assert (
         len(
             document["rocprofiler-sdk-tool"][0]["callback_records"][
@@ -442,7 +530,9 @@ def test_counter_and_hip_trace_compose_in_one_process(tmp_path):
         )
         == 2
     )
-    hip_rows = read_csv(tmp_path / "composed_hip_api_trace.csv")
+    hip_rows = read_csv(
+        prefix.with_name(f"composed-{process_id}_hip_api_trace.csv")
+    )
     assert hip_rows
     assert {row["Domain"] for row in hip_rows} == {"HIP_RUNTIME_API"}
 

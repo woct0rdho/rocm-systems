@@ -27,6 +27,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -37,18 +38,24 @@ namespace rocprofiler
 {
 namespace tool
 {
-namespace windows
-{
 class kernel_selector
 {
 public:
     kernel_selector(std::string include_expression,
                     std::string exclude_expression,
                     std::string iteration_expression)
+    : kernel_selector{std::move(include_expression),
+                      std::move(exclude_expression),
+                      common_config::parse_kernel_filter_range(
+                          std::move(iteration_expression))}
+    {}
+
+    kernel_selector(std::string                include_expression,
+                    std::string                exclude_expression,
+                    std::unordered_set<size_t> iteration_range)
     : include_expression_{std::move(include_expression)}
     , exclude_expression_{std::move(exclude_expression)}
-    , iteration_range_{common_config::parse_kernel_filter_range(
-          std::move(iteration_expression))}
+    , iteration_range_{std::move(iteration_range)}
     {
         // Parse both expressions during tool configuration rather than allowing a malformed
         // pattern to escape through the queue callback.
@@ -79,6 +86,22 @@ public:
         return selected;
     }
 
+    std::optional<bool> find(uint64_t dispatch_id) const
+    {
+        if(auto itr = decisions_.find(dispatch_id); itr != decisions_.end())
+            return itr->second;
+        return std::nullopt;
+    }
+
+    std::optional<bool> take(uint64_t dispatch_id)
+    {
+        auto decision = find(dispatch_id);
+        decisions_.erase(dispatch_id);
+        return decision;
+    }
+
+    void erase(uint64_t dispatch_id) { decisions_.erase(dispatch_id); }
+
 private:
     std::string include_expression_ = {};
     std::string exclude_expression_ = {};
@@ -86,6 +109,5 @@ private:
     std::unordered_map<std::string, size_t> iterations_ = {};
     std::unordered_map<uint64_t, bool> decisions_ = {};
 };
-}  // namespace windows
 }  // namespace tool
 }  // namespace rocprofiler

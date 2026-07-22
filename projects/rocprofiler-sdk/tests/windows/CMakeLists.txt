@@ -17,6 +17,21 @@ set_tests_properties(
         ENVIRONMENT
             "ROCPROFV3_TEST_SCRIPT=${PROJECT_SOURCE_DIR}/source/bin/rocprofv3.py;PYTHONDONTWRITEBYTECODE=1")
 
+set(_dispatch_analysis_test_directory ${CMAKE_CURRENT_LIST_DIR}/../dispatch-analysis)
+add_test(
+    NAME rocprofiler-sdk.windows.dispatch-analysis-contract
+    COMMAND
+        Python3::Interpreter ${_windows_pytest_runner}
+        --owner-root ${PROJECT_BINARY_DIR}
+        --basetemp ${PROJECT_BINARY_DIR}/pytest-dispatch-analysis-contract
+        -- ${_dispatch_analysis_test_directory}/test_behavior_contract.py)
+set_tests_properties(
+    rocprofiler-sdk.windows.dispatch-analysis-contract
+    PROPERTIES
+        LABELS "windows;unit;cpu-only;dispatch-analysis"
+        TIMEOUT 30
+        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 set(_pmc_parity_test_directory ${CMAKE_CURRENT_LIST_DIR}/../pmc-parity)
 add_test(
     NAME rocprofiler-sdk.windows.pmc-contract
@@ -361,6 +376,29 @@ if(ROCPROFILER_BUILD_WINDOWS_INTEGRATION_TESTS)
         rocprofiler-sdk-windows-hip-workload ALL
         DEPENDS ${_windows_workload})
 
+    set(_windows_dispatch_analysis_source
+        ${PROJECT_SOURCE_DIR}/tests/bin/dispatch-analysis/dispatch_analysis.cpp)
+    set(_windows_dispatch_analysis_workload
+        ${PROJECT_BINARY_DIR}/tests/windows/bin/rocprofiler-sdk-dispatch-analysis.exe)
+    add_custom_command(
+        OUTPUT ${_windows_dispatch_analysis_workload}
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                ${PROJECT_BINARY_DIR}/tests/windows/bin
+        COMMAND ${ROCPROFILER_WINDOWS_TEST_HIPCC}
+                ${_windows_dispatch_analysis_source}
+                -O2
+                --offload-arch=gfx1151
+                --rocm-device-lib-path=${ROCM_PATH}/lib/llvm/amdgcn/bitcode
+                ${_windows_workload_compat_args}
+                -o ${_windows_dispatch_analysis_workload}
+        DEPENDS
+            ${_windows_dispatch_analysis_source}
+            ${_windows_workload_compat_dependencies}
+        VERBATIM)
+    add_custom_target(
+        rocprofiler-sdk-windows-dispatch-analysis-workload ALL
+        DEPENDS ${_windows_dispatch_analysis_workload})
+
     add_test(
         NAME rocprofiler-sdk.windows.rocprofv3.pmc-process
         COMMAND ${Python3_EXECUTABLE} ${_windows_pytest_runner}
@@ -486,6 +524,8 @@ if(ROCPROFILER_BUILD_WINDOWS_INTEGRATION_TESTS)
         --rocprofv3-avail ${PROJECT_BINARY_DIR}/bin/rocprofv3-avail
         --runtime-root ${ROCPROFILER_WINDOWS_TEST_RUNTIME_ROOT}
         --workload ${_windows_workload}
+        --dispatch-analysis-workload ${_windows_dispatch_analysis_workload}
+        --dispatch-analysis-contract ${_dispatch_analysis_test_directory}/behavior_cases.json
         --roctx-workload $<TARGET_FILE:rocprofiler-sdk-windows-roctx-workload>
         --hsa-barrier-probe ${_windows_hsa_barrier_probe}
         --sdk-build ${PROJECT_BINARY_DIR}
@@ -515,6 +555,7 @@ if(ROCPROFILER_BUILD_WINDOWS_INTEGRATION_TESTS)
             availability
             baseline
             kernel-trace
+            dispatch-analysis-contract
             hip-trace
             hip-graph
             hip-marker

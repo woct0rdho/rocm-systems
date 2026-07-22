@@ -154,6 +154,7 @@ if (-not $BuildAllTargets) {
     if ($RunIntegrationTests) {
         $buildTargets += @(
             "rocprofiler-sdk-windows-hip-workload",
+            "rocprofiler-sdk-windows-dispatch-analysis-workload",
             "rocprofiler-sdk-windows-roctx-workload"
         )
     }
@@ -164,7 +165,7 @@ Invoke-NativeCommand -FilePath "cmake.exe" -ArgumentList $buildArguments
 Invoke-NativeCommand -FilePath "ctest.exe" -ArgumentList @(
     "--test-dir", $buildDirectory,
     "-C", $BuildType,
-    "-R", "^rocprofiler-sdk\.windows\.(rocprofv3\.(unit|process|pmc-process)|pmc-contract|aqlprofile-mirror|job-object|registration\.(normal|late|reentrancy|concurrent|multi-client|finalization-failure))$",
+    "-R", "^rocprofiler-sdk\.windows\.(rocprofv3\.(unit|process|pmc-process)|dispatch-analysis-contract|pmc-contract|aqlprofile-mirror|job-object|registration\.(normal|late|reentrancy|concurrent|multi-client|finalization-failure))$",
     "-V",
     "--output-on-failure",
     "--no-tests=error",
@@ -174,7 +175,7 @@ if ($RunIntegrationTests) {
     Invoke-NativeCommand -FilePath "ctest.exe" -ArgumentList @(
         "--test-dir", $buildDirectory,
         "-C", $BuildType,
-        "-R", "^rocprofiler-sdk\.windows\.(availability|baseline|kernel-trace|hip-trace|hip-graph|hip-marker|roctx-trace|no-overwrite|hsa-barrier)\.(execute|validate)$",
+        "-R", "^rocprofiler-sdk\.windows\.(availability|baseline|kernel-trace|dispatch-analysis-contract|hip-trace|hip-graph|hip-marker|roctx-trace|no-overwrite|hsa-barrier)\.(execute|validate)$",
         "-V",
         "--output-on-failure",
         "--no-tests=error",

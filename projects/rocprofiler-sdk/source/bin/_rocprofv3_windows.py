@@ -31,6 +31,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -93,6 +94,36 @@ def windows_launch_in_job(command, environment, cwd, prepare=None):
 
 def windows_output_reservation_path(output_path):
     return output_path.with_name(f".{output_path.name}.rocprofv3-reserve")
+
+
+def windows_format_process_output_value(value, process_id):
+    replacement = str(process_id)
+    result = str(value)
+    for token in ("%pid%", "{pid}", "%p"):
+        result = result.replace(token, replacement)
+    return result
+
+
+def windows_output_directory_value(args, pass_id=None):
+    output_directory = str(getattr(args, "output_directory", None) or os.getcwd())
+    sub_directory = getattr(args, "sub_directory", None)
+    if pass_id is not None and sub_directory:
+        output_directory = os.path.join(
+            output_directory, f"{sub_directory}{pass_id}"
+        )
+    return output_directory
+
+
+def windows_output_base_path(output_directory, output_file, process_id):
+    directory = Path(
+        windows_format_process_output_value(output_directory, process_id)
+    ).resolve()
+    prefix = Path(windows_format_process_output_value(output_file, process_id))
+    return directory / prefix
+
+
+def windows_private_directory():
+    return Path(tempfile.gettempdir()).resolve()
 
 
 class WindowsOutputTransaction:
@@ -532,22 +563,28 @@ def windows_kernel_stats_rows(kernel_rows):
 
 
 def windows_kernel_output_path(args, process_id):
-    output_directory = Path(args.output_directory or os.getcwd()).resolve()
-    output_name = args.output_file or str(process_id)
-    output_name = Path(output_name).name
-    if not output_name.lower().endswith(".csv"):
-        output_name = f"{output_name}_kernel_trace.csv"
-    return output_directory / output_name
+    base = windows_output_base_path(
+        windows_output_directory_value(args),
+        getattr(args, "output_file", None) or "%pid%",
+        process_id,
+    )
+    if base.name.lower().endswith(".csv"):
+        return base
+    return base.with_name(f"{base.name}_kernel_trace.csv")
 
 
 def windows_kernel_stats_output_path(args, process_id):
-    output_directory = Path(args.output_directory or os.getcwd()).resolve()
-    output_name = Path(args.output_file or str(process_id)).name
+    base = windows_output_base_path(
+        windows_output_directory_value(args),
+        getattr(args, "output_file", None) or "%pid%",
+        process_id,
+    )
+    output_name = base.name
     if output_name.lower().endswith(".csv"):
         output_name = output_name[:-4]
         if output_name.lower().endswith("_kernel_trace"):
             output_name = output_name[: -len("_kernel_trace")]
-    return output_directory / f"{output_name}_kernel_stats.csv"
+    return base.with_name(f"{output_name}_kernel_stats.csv")
 
 
 def run_windows_kernel_trace(app_args, args):
@@ -835,10 +872,12 @@ def windows_api_trace_rows(trace_path):
 def windows_api_trace_output_paths(
     args, process_id, requested_domains, output_directory=None
 ):
-    output_directory = Path(
-        output_directory or args.output_directory or os.getcwd()
-    ).resolve()
-    output_name = Path(args.output_file or str(process_id)).name
+    base = windows_output_base_path(
+        output_directory or windows_output_directory_value(args),
+        getattr(args, "output_file", None) or "%pid%",
+        process_id,
+    )
+    output_name = base.name
     if output_name.lower().endswith(".csv"):
         output_name = output_name[:-4]
     suffixes = {
@@ -848,7 +887,7 @@ def windows_api_trace_output_paths(
         "marker": "marker_trace.csv",
     }
     return {
-        domain: output_directory / f"{output_name}_{suffixes[domain]}"
+        domain: base.with_name(f"{output_name}_{suffixes[domain]}")
         for domain in requested_domains
     }
 
@@ -957,12 +996,11 @@ def run_windows_api_trace(app_args, args, pass_id=None, trace_request=None):
     core_bin = windows_core_bin()
     sdk_path = windows_api_trace_sdk_path()
     target = windows_target_path(app_args[0])
-    output_directory = Path(args.output_directory or os.getcwd()).resolve()
-    if pass_id is not None and getattr(args, "sub_directory", None):
-        output_directory /= f"{args.sub_directory}{pass_id}"
+    output_directory = windows_output_directory_value(args, pass_id)
 
-    trace_path = output_directory / f".rocprofv3-windows-sdk-{uuid.uuid4().hex}.log"
-    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    trace_path = windows_private_directory() / (
+        f".rocprofv3-windows-sdk-{uuid.uuid4().hex}.log"
+    )
     child_env = dict(os.environ)
     child_env["PATH"] = os.pathsep.join(
         [str(core_bin), str(sdk_path.parent), child_env.get("PATH", "")]
@@ -990,7 +1028,7 @@ def run_windows_api_trace(app_args, args, pass_id=None, trace_request=None):
             sdk_path,
             tool_path,
         )
-        counter_result_path = windows_sdk_result_path(output_directory)
+        counter_result_path = windows_sdk_result_path(windows_private_directory())
         child_env["ROCPROFILER_WINDOWS_RESULT_FILE"] = str(counter_result_path)
     for name in (
         "HSA_TOOLS_LIB",
@@ -1201,16 +1239,7 @@ def windows_sdk_output_paths(
     kernel_trace=False,
     stats=False,
 ):
-    prefix = str(output_file)
-    replacements = {
-        "%pid%": str(process_id),
-        "{pid}": str(process_id),
-        "%cwd%": os.getcwd(),
-        "%hostname%": os.environ.get("COMPUTERNAME", "localhost"),
-    }
-    for key, value in replacements.items():
-        prefix = prefix.replace(key, value)
-    base = Path(output_directory) / prefix
+    base = windows_output_base_path(output_directory, output_file, process_id)
     paths = []
     if "csv" in formats:
         paths.extend(
@@ -1351,12 +1380,7 @@ def run_windows_sdk_pmc(app_args, args, pass_id=None):
 
     environment = dict(os.environ)
 
-    output_directory = Path(
-        getattr(args, "output_directory", None) or os.getcwd()
-    ).resolve()
-    sub_directory = getattr(args, "sub_directory", None)
-    if pass_id is not None and sub_directory:
-        output_directory /= f"{sub_directory}{pass_id}"
+    output_directory = windows_output_directory_value(args, pass_id)
     output_file = windows_configure_sdk_counter_environment(
         environment,
         args,
@@ -1368,7 +1392,7 @@ def run_windows_sdk_pmc(app_args, args, pass_id=None):
         tool_path,
     )
 
-    result_path = windows_sdk_result_path(output_directory)
+    result_path = windows_sdk_result_path(windows_private_directory())
     environment["ROCPROFILER_WINDOWS_RESULT_FILE"] = str(result_path)
     expected_outputs = []
     rocpd_json_path = None

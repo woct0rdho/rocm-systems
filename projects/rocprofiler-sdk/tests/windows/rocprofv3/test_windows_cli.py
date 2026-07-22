@@ -297,6 +297,8 @@ def test_sdk_counter_environment_uses_common_contract(
         mangled_kernels=True,
         selected_regions=True,
         selected_regions_ref_count=True,
+        kernel_trace=True,
+        stats=True,
     )
     environment = {
         "PATH": "inherited",
@@ -335,6 +337,22 @@ def test_sdk_counter_environment_uses_common_contract(
     assert environment["ROCPROF_DEMANGLE_KERNELS"] == "0"
     assert environment["ROCPROF_SELECTED_REGIONS"] == "1"
     assert environment["ROCPROF_SELECTED_REGIONS_REF_COUNT"] == "1"
+    assert environment["ROCPROF_KERNEL_TRACE"] == "1"
+    assert environment["ROCPROF_STATS"] == "1"
+
+    outputs = rocprofv3.windows_sdk_output_paths(
+        tmp_path / "output",
+        "profile-%pid%",
+        ["csv", "json"],
+        4242,
+        kernel_trace=True,
+    )
+    assert [path.name for path in outputs] == [
+        "profile-4242_agent_info.csv",
+        "profile-4242_counter_collection.csv",
+        "profile-4242_kernel_trace.csv",
+        "profile-4242_results.json",
+    ]
 
 
 def test_availability_initialization_failure_is_reported(

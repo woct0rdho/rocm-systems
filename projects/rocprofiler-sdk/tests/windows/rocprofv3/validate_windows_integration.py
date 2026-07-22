@@ -185,8 +185,8 @@ def test_windows_integration_case():
             assert "dispatches=6" in run["stdout"]
             assert "streams=2" in run["stdout"]
 
-        # Step 0 freezes the observed gaps. Later stages replace these assertions
-        # with the completed behavior while retaining the same fixture and matrix.
+        # The standalone CLR path retains its Step 0 gaps until Steps 3-5. The
+        # composed SDK path below advances independently from one dispatch object.
         standalone_rows = standalone["trace_rows"]
         assert standalone["trace_exists"]
         assert not standalone["stats_exists"]
@@ -207,10 +207,12 @@ def test_windows_integration_case():
             )
 
         counter_rows = composed["counter_rows"]
+        trace_rows = composed["trace_rows"]
         assert composed["json_exists"]
-        assert not composed["trace_exists"]
+        assert composed["trace_exists"]
         assert not composed["stats_exists"]
         assert len(counter_rows) == 18
+        assert len(trace_rows) == 6
         assert {row["Counter_Name"] for row in counter_rows} == {
             "L2CacheHit",
             "VALUInsts",
@@ -222,6 +224,49 @@ def test_windows_integration_case():
             int(row["End_Timestamp"]) > int(row["Start_Timestamp"])
             for row in counter_rows
         )
+
+        counter_by_dispatch = {}
+        for row in counter_rows:
+            counter_by_dispatch.setdefault(int(row["Dispatch_Id"]), row)
+        trace_by_dispatch = {int(row["Dispatch_Id"]): row for row in trace_rows}
+        assert set(trace_by_dispatch) == set(counter_by_dispatch) == set(range(1, 7))
+        for dispatch_id, trace in trace_by_dispatch.items():
+            counter = counter_by_dispatch[dispatch_id]
+            for field in (
+                "Agent_Id",
+                "Queue_Id",
+                "Thread_Id",
+                "Dispatch_Id",
+                "Kernel_Id",
+                "Kernel_Name",
+                "Correlation_Id",
+                "Start_Timestamp",
+                "End_Timestamp",
+                "LDS_Block_Size",
+                "Scratch_Size",
+                "VGPR_Count",
+                "Accum_VGPR_Count",
+                "SGPR_Count",
+            ):
+                assert trace[field] == counter[field]
+
+        json_records = composed["json_kernel_records"]
+        assert len(json_records) == 6
+        assert [record["dispatch_info"]["dispatch_id"] for record in json_records] == list(
+            range(1, 7)
+        )
+        for record in json_records:
+            trace = trace_by_dispatch[record["dispatch_info"]["dispatch_id"]]
+            assert record["thread_id"] == int(trace["Thread_Id"])
+            assert record["correlation_id"]["internal"] == int(
+                trace["Correlation_Id"]
+            )
+            assert record["start_timestamp"] == int(trace["Start_Timestamp"])
+            assert record["end_timestamp"] == int(trace["End_Timestamp"])
+            assert record["dispatch_info"]["queue_id"]["handle"] == int(
+                trace["Queue_Id"]
+            )
+            assert record["dispatch_info"]["kernel_id"] == int(trace["Kernel_Id"])
     elif case == "hip-trace":
         assert data["returncode"] == 0
         require_workload(data["stdout"])

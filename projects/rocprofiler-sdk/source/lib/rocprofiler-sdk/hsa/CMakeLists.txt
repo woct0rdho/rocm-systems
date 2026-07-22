@@ -19,6 +19,7 @@ else()
         hsa_barrier.cpp
         hsa.cpp
         memory_allocation.cpp
+        pc_sampling.cpp
         pc_sampling.hpp
         profile_serializer.cpp
         queue_controller.cpp
@@ -36,7 +37,6 @@ set(ROCPROFILER_LIB_HSA_HEADERS
     defines.hpp
     hsa_barrier.hpp
     hsa.hpp
-    pc_sampling.cpp
     profile_serializer.hpp
     queue_controller.hpp
     queue_interposition.hpp

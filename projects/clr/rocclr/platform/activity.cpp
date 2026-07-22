@@ -39,6 +39,24 @@ static inline size_t linearSize(const amd::Coord3D& size3d) {
   return size;
 }
 
+bool GetKernelResourceData(const amd::Kernel& kernel, const amd::Device& device,
+                           KernelResourceData& output) {
+  const auto* device_kernel = kernel.getDeviceKernel(device);
+  if (device_kernel == nullptr || device.isa().versionMajor() < 10) return false;
+
+  const auto* workgroup = device_kernel->workGroupInfo();
+  if (workgroup == nullptr || workgroup->usedVGPRs_ == 0) return false;
+
+  const auto granularity = workgroup->wavefrontSize_ == 32 ? uint32_t{8} : uint32_t{4};
+  const auto used_vgprs = static_cast<uint32_t>(workgroup->usedVGPRs_);
+  output.group_segment_size = device_kernel->WorkgroupGroupSegmentByteSize();
+  output.private_segment_size = device_kernel->WorkitemPrivateSegmentByteSize();
+  output.arch_vgpr_count = (used_vgprs + granularity - 1) & ~(granularity - 1);
+  output.accum_vgpr_count = 0;
+  output.sgpr_count = 128;
+  return output.arch_vgpr_count != 0;
+}
+
 bool IsEnabled(OpId operation_id) {
   if (operation_id < OP_ID_NUMBER)
     if (auto report = report_activity.load(std::memory_order_acquire))
@@ -84,10 +102,20 @@ void ReportActivity(const amd::Command& command) {
   };
 
   switch (command.type()) {
-    case CL_COMMAND_NDRANGE_KERNEL:
-      record.kernel_name =
-          static_cast<const amd::NDRangeKernelCommand&>(command).kernel().name().c_str();
+    case CL_COMMAND_NDRANGE_KERNEL: {
+      const auto& dispatch = static_cast<const amd::NDRangeKernelCommand&>(command);
+      record.kernel_name = dispatch.kernel().name().c_str();
+      auto resource = KernelResourceData{};
+      if (GetKernelResourceData(dispatch.kernel(), queue->device(), resource)) {
+        record.group_segment_size = resource.group_segment_size;
+        record.private_segment_size = resource.private_segment_size;
+        record.arch_vgpr_count = resource.arch_vgpr_count;
+        record.accum_vgpr_count = resource.accum_vgpr_count;
+        record.sgpr_count = resource.sgpr_count;
+        record.resource_metadata_valid = 1;
+      }
       break;
+    }
     case CL_COMMAND_READ_BUFFER:
     case CL_COMMAND_READ_BUFFER_RECT:
       record.bytes = linearSize(static_cast<const amd::ReadMemoryCommand&>(command).size());

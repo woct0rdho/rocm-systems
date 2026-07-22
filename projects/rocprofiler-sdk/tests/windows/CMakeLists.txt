@@ -106,6 +106,16 @@ set_tests_properties(
         ENVIRONMENT
             "PYTHONPATH=${CMAKE_CURRENT_LIST_DIR}/common;PYTHONDONTWRITEBYTECODE=1")
 
+add_executable(rocprofiler-sdk-windows-kernel-descriptor kernel_descriptor_test.cpp)
+target_include_directories(rocprofiler-sdk-windows-kernel-descriptor
+                           PRIVATE "${PROJECT_SOURCE_DIR}/source")
+target_compile_features(rocprofiler-sdk-windows-kernel-descriptor PRIVATE cxx_std_17)
+add_test(NAME rocprofiler-sdk.windows.kernel-descriptor
+         COMMAND rocprofiler-sdk-windows-kernel-descriptor)
+set_tests_properties(
+    rocprofiler-sdk.windows.kernel-descriptor
+    PROPERTIES LABELS "windows;unit;cpu-only;resource-metadata" TIMEOUT 30)
+
 if(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
     if(NOT IS_ABSOLUTE "${ROCPROFILER_WINDOWS_TEST_RUNTIME_ROOT}" OR
        NOT EXISTS "${ROCPROFILER_WINDOWS_TEST_RUNTIME_ROOT}/bin/amdhip64_7.dll")

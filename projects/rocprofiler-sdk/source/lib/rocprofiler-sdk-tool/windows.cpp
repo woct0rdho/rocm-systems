@@ -262,6 +262,7 @@ struct tool_state
     int64_t selected_ref_count = 0;
     std::atomic<bool> unknown_counter{false};
     std::atomic<bool> failed{false};
+    std::string failure_status = "profiler_failure";
     std::string failure_detail = {};
 
     tool_state()
@@ -299,7 +300,19 @@ check(rocprofiler_status_t status, const char* operation, tool_state* state)
 kernel_metadata
 make_kernel_metadata(const output_config&,
                      rocprofiler_dispatch_counting_service_data_t,
-                     std::string);
+                     const rocprofiler::hsa::windows::kernel_metadata&);
+
+void
+set_failure(tool_state& state, std::string status, std::string detail)
+{
+    state.failed.store(true, std::memory_order_release);
+    auto lock = std::lock_guard<std::mutex>{state.result_mutex};
+    if(state.failure_detail.empty())
+    {
+        state.failure_status = std::move(status);
+        state.failure_detail = std::move(detail);
+    }
+}
 
 rocprofiler_counter_config_id_t
 get_profile(tool_state& state, rocprofiler_agent_id_t agent_id)
@@ -389,9 +402,24 @@ dispatch_callback(rocprofiler_dispatch_counting_service_data_t data,
                   void* callback_data)
 {
     auto& state = *static_cast<tool_state*>(callback_data);
+    if(state.failed.load(std::memory_order_acquire))
+    {
+        *config = {};
+        return;
+    }
+
     const auto kernel_id = data.dispatch_info.kernel_id;
-    const auto metadata = make_kernel_metadata(
-        state.config, data, rocprofiler::hsa::windows::get_kernel_name(kernel_id));
+    const auto resource  = rocprofiler::hsa::windows::get_kernel_metadata(kernel_id);
+    if(!resource || !resource->valid)
+    {
+        auto detail = std::string{"mandatory resource metadata is unavailable for kernel "} +
+                      std::to_string(kernel_id);
+        if(resource && !resource->error.empty()) detail += ": " + resource->error;
+        set_failure(state, "kernel_metadata_missing", std::move(detail));
+        *config = {};
+        return;
+    }
+    const auto metadata = make_kernel_metadata(state.config, data, *resource);
 
     {
         auto lock = std::lock_guard<std::mutex>{state.mutex};
@@ -434,6 +462,14 @@ record_callback(rocprofiler_dispatch_counting_service_data_t data,
     if(output.records.empty()) return;
 
     auto lock = std::lock_guard<std::mutex>{state.mutex};
+    if(auto metadata = state.kernel_info.find(data.dispatch_info.kernel_id);
+       metadata != state.kernel_info.end())
+    {
+        output.dispatch_data.dispatch_info.group_segment_size =
+            metadata->second.group_segment_size;
+        output.dispatch_data.dispatch_info.private_segment_size =
+            metadata->second.private_segment_size;
+    }
     state.records.emplace_back(std::move(output));
 }
 
@@ -634,21 +670,30 @@ demangle_kernel_name(std::string_view name)
 }
 
 kernel_metadata
-make_kernel_metadata(const output_config&                         config,
-                     rocprofiler_dispatch_counting_service_data_t data,
-                     std::string                                  raw_name)
+make_kernel_metadata(const output_config&                            config,
+                     rocprofiler_dispatch_counting_service_data_t    data,
+                     const rocprofiler::hsa::windows::kernel_metadata& resource)
 {
-    auto output = kernel_metadata{};
-    output.kernel_id             = data.dispatch_info.kernel_id;
-    output.kernel_name           = normalize_kernel_name(std::move(raw_name));
-    output.demangled_kernel_name = demangle_kernel_name(output.kernel_name);
+    auto output                          = kernel_metadata{};
+    output.size                          = sizeof(kernel_metadata);
+    output.kernel_id                     = data.dispatch_info.kernel_id;
+    output.kernel_name                   = normalize_kernel_name(resource.name);
+    output.kernel_object                 = resource.kernel_object;
+    output.kernarg_segment_size          = resource.kernarg_segment_size;
+    output.kernarg_segment_alignment     = resource.kernarg_segment_alignment;
+    output.group_segment_size            = resource.group_segment_size;
+    output.private_segment_size          = resource.private_segment_size;
+    output.sgpr_count                    = resource.sgpr_count;
+    output.arch_vgpr_count               = resource.arch_vgpr_count;
+    output.accum_vgpr_count              = resource.accum_vgpr_count;
+    output.kernel_code_entry_byte_offset = resource.kernel_code_entry_offset;
+    output.kernel_address                = resource.kernel_address;
+    output.demangled_kernel_name         = demangle_kernel_name(output.kernel_name);
     output.truncated_kernel_name =
         rocprofiler::common::truncate_name(output.demangled_kernel_name);
     output.formatted_kernel_name =
         config.demangle ? output.demangled_kernel_name : output.kernel_name;
     if(config.truncate) output.formatted_kernel_name = output.truncated_kernel_name;
-    output.group_segment_size   = data.dispatch_info.group_segment_size;
-    output.private_segment_size = data.dispatch_info.private_segment_size;
     return output;
 }
 
@@ -879,6 +924,14 @@ find_invalid_sq_waves_dispatch(const tool_state& state)
     return 0;
 }
 
+uint32_t
+lds_block_size(const kernel_metadata& metadata)
+{
+    constexpr auto block_size = uint64_t{512};
+    return static_cast<uint32_t>((metadata.group_segment_size + block_size - 1) &
+                                 ~(block_size - 1));
+}
+
 std::string
 generate_counter_csv(tool_state& state)
 {
@@ -903,8 +956,12 @@ generate_counter_csv(tool_state& state)
         const auto& dispatch = record.dispatch_data;
         const auto& info     = dispatch.dispatch_info;
         auto kernel_name = rocprofiler::hsa::windows::get_kernel_name(info.kernel_id);
+        auto metadata    = kernel_metadata{};
         if(auto itr = state.kernel_info.find(info.kernel_id); itr != state.kernel_info.end())
-            kernel_name = itr->second.formatted_kernel_name;
+        {
+            metadata    = itr->second;
+            kernel_name = metadata.formatted_kernel_name;
+        }
         for(const auto& [counter_id, value] : values)
         {
             auto counter_name = std::string{"counter_"} + std::to_string(counter_id);
@@ -915,8 +972,9 @@ generate_counter_csv(tool_state& state)
                    << info.queue_id.handle << ',' << ::GetCurrentProcessId() << ','
                    << record.thread_id << ',' << magnitude(info.grid_size) << ','
                    << info.kernel_id << ',' << rocprofiler::tool::csv::quote(kernel_name) << ','
-                   << magnitude(info.workgroup_size) << ',' << info.group_segment_size << ','
-                   << info.private_segment_size << ",0,0,0,"
+                   << magnitude(info.workgroup_size) << ',' << lds_block_size(metadata) << ','
+                   << metadata.private_segment_size << ',' << metadata.arch_vgpr_count << ','
+                   << metadata.accum_vgpr_count << ',' << metadata.sgpr_count << ','
                    << rocprofiler::tool::csv::quote(counter_name) << ',' << value << ','
                    << dispatch.start_timestamp << ',' << dispatch.end_timestamp << '\n';
         }
@@ -976,8 +1034,8 @@ generate_kernel_csv(tool_state& state)
                << record.thread_id << ',' << info.dispatch_id << ',' << info.kernel_id << ','
                << rocprofiler::tool::csv::quote(kernel_name) << ','
                << dispatch.correlation_id.internal << ',' << dispatch.start_timestamp << ','
-               << dispatch.end_timestamp << ',' << info.group_segment_size << ','
-               << info.private_segment_size << ',' << metadata.arch_vgpr_count << ','
+               << dispatch.end_timestamp << ',' << lds_block_size(metadata) << ','
+               << metadata.private_segment_size << ',' << metadata.arch_vgpr_count << ','
                << metadata.accum_vgpr_count << ',' << metadata.sgpr_count << ','
                << info.workgroup_size.x << ',' << info.workgroup_size.y << ','
                << info.workgroup_size.z << ',' << info.grid_size.x << ',' << info.grid_size.y
@@ -1203,7 +1261,10 @@ tool_finalize(void* data)
         // Do not duplicate that destruction; process teardown reclaims any remaining resources.
         if(state.failed.load(std::memory_order_acquire))
         {
-            status = "profiler_failure";
+            auto failure_lock = std::lock_guard<std::mutex>{state.result_mutex};
+            status = state.failure_status;
+            detail = state.failure_detail.empty() ? "profiler operation failed"
+                                                  : state.failure_detail;
         }
         else if(state.unknown_counter.load(std::memory_order_acquire))
         {
@@ -1320,12 +1381,6 @@ tool_finalize(void* data)
         }
     }
 
-    if(status == "profiler_failure")
-    {
-        auto lock = std::lock_guard<std::mutex>{state.result_mutex};
-        detail    = state.failure_detail.empty() ? "profiler operation failed"
-                                                 : state.failure_detail;
-    }
     if(!rocprofiler::windows::result::write(status, detail))
         std::fprintf(stderr, "rocprofv3 could not publish its private result status\n");
     if(get_state() == &state) get_state() = nullptr;

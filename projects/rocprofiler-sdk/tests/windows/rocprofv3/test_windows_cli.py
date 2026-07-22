@@ -11,6 +11,16 @@ from types import SimpleNamespace
 import pytest
 
 
+RESOURCE_METADATA = {
+    "resource_metadata_valid": True,
+    "group_segment_size": 1024,
+    "private_segment_size": 64,
+    "arch_vgpr_count": 32,
+    "accum_vgpr_count": 0,
+    "sgpr_count": 128,
+}
+
+
 def load_rocprofv3():
     script = Path(os.environ["ROCPROFV3_TEST_SCRIPT"]).resolve()
     spec = importlib.util.spec_from_file_location("rocprofv3_windows_unit", script)
@@ -71,6 +81,7 @@ def test_kernel_trace_conversion_normalizes_agent_identity(rocprofv3, tmp_path, 
                             "enqueue_operation_index": 1,
                             "mangled_kernel_name": "_Z10vector_addv",
                             "thread_id": 100 + device_id,
+                            **RESOURCE_METADATA,
                         },
                     }
                     for device_id in (0, 1)
@@ -85,6 +96,11 @@ def test_kernel_trace_conversion_normalizes_agent_identity(rocprofv3, tmp_path, 
         rows = list(csv.DictReader(stream))
     assert [row["Agent_Id"] for row in rows] == ["Agent 1", "Agent 1"]
     assert [int(row["Queue_Id"]) for row in rows] == [0, 1]
+    assert [int(row["LDS_Block_Size"]) for row in rows] == [1024, 1024]
+    assert [int(row["Scratch_Size"]) for row in rows] == [64, 64]
+    assert [int(row["VGPR_Count"]) for row in rows] == [32, 32]
+    assert [int(row["Accum_VGPR_Count"]) for row in rows] == [0, 0]
+    assert [int(row["SGPR_Count"]) for row in rows] == [128, 128]
     retained = output.read_bytes()
     require_fatal(
         capsys,
@@ -92,6 +108,63 @@ def test_kernel_trace_conversion_normalizes_agent_identity(rocprofv3, tmp_path, 
         "output already exists",
     )
     assert output.read_bytes() == retained
+
+
+@pytest.mark.parametrize(
+    ("missing_field", "resource_override", "message"),
+    [
+        (None, {"resource_metadata_valid": False}, "contains invalid resource fields"),
+        ("sgpr_count", {}, "is missing resource fields"),
+    ],
+)
+def test_kernel_trace_rejects_missing_or_invalid_resource_metadata(
+    rocprofv3,
+    tmp_path,
+    capsys,
+    missing_field,
+    resource_override,
+    message,
+):
+    activity = tmp_path / "missing-resource.json"
+    event_args = {
+        "grid": "1x1x1",
+        "block": "64x1x1",
+        "queue_id": 1,
+        "enqueue_ordinal": 1,
+        "enqueue_operation_index": 1,
+        "mangled_kernel_name": "_Z10vector_addv",
+        "thread_id": 100,
+        **RESOURCE_METADATA,
+        **resource_override,
+    }
+    if missing_field is not None:
+        event_args.pop(missing_field)
+    activity.write_text(
+        json.dumps(
+            {
+                "traceEvents": [
+                    {
+                        "ph": "X",
+                        "name": "vector_add",
+                        "pid": 0,
+                        "tid": 2,
+                        "ts": 1.0,
+                        "dur": 0.5,
+                        "args": event_args,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    require_fatal(
+        capsys,
+        lambda: rocprofv3.write_windows_kernel_csv(
+            activity, tmp_path / "missing-resource.csv", 4242
+        ),
+        f"kernel_metadata_missing: Windows HIP kernel activity {message}",
+    )
 
 
 def test_kernel_trace_filters_explicit_enqueue_order_and_formatted_name(
@@ -121,6 +194,7 @@ def test_kernel_trace_filters_explicit_enqueue_order_and_formatted_name(
                 "enqueue_operation_index": 1,
                 "mangled_kernel_name": mangled,
                 "thread_id": 700,
+                **RESOURCE_METADATA,
             },
         }
         for ordinal, name, mangled in sequence

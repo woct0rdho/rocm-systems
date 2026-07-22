@@ -26,8 +26,8 @@
 #include <rocprofiler-sdk/fwd.h>
 
 #include <cstdint>
+#include <optional>
 #include <string>
-#include <string_view>
 
 namespace rocprofiler
 {
@@ -35,14 +35,36 @@ namespace hsa
 {
 namespace windows
 {
+struct kernel_metadata
+{
+    rocprofiler_kernel_id_t kernel_id{0};
+    uint64_t                kernel_object             = 0;
+    uint64_t                kernel_address            = 0;
+    int64_t                 kernel_code_entry_offset  = 0;
+    uint32_t                kernarg_segment_size      = 0;
+    uint32_t                kernarg_segment_alignment = 0;
+    uint32_t                group_segment_size        = 0;
+    uint32_t                private_segment_size      = 0;
+    uint32_t                arch_vgpr_count           = 0;
+    uint32_t                accum_vgpr_count          = 0;
+    uint32_t                sgpr_count                = 0;
+    std::string             name                      = {};
+    std::string             architecture              = {};
+    std::string             error                     = {};
+    bool                    valid                     = false;
+};
+
 bool
 set_api_table(::HsaApiTable* api_table, uint64_t runtime_version, uint64_t failed_tool_count);
 
 void
-register_kernel_name(uint64_t kernel_object, std::string_view name);
+register_kernel_metadata(kernel_metadata metadata);
 
 std::string
 get_kernel_name(rocprofiler_kernel_id_t kernel_id);
+
+std::optional<kernel_metadata>
+get_kernel_metadata(rocprofiler_kernel_id_t kernel_id);
 }  // namespace windows
 }  // namespace hsa
 }  // namespace rocprofiler

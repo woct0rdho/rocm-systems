@@ -14,7 +14,7 @@ def load_contract():
 
 def test_dispatch_analysis_contract_is_complete():
     contract = load_contract()
-    assert contract["version"] == 2
+    assert contract["version"] == 3
     workload = contract["workload"]
     sequence = workload["enqueue_sequence"]
     assert workload["dispatch_count"] == len(sequence) == 6
@@ -34,6 +34,43 @@ def test_dispatch_analysis_contract_is_complete():
         "dispatch_vector",
         "dispatch_resource",
     ]
+    windows_resources = workload["gfx1151_windows_resource_metadata"]
+    linux_resources = workload["gfx1151_linux_resource_metadata"]
+    assert windows_resources == {
+        "dispatch_vector": {
+            "LDS_Block_Size": 0,
+            "Scratch_Size": 0,
+            "VGPR_Count": 8,
+            "Accum_VGPR_Count": 0,
+            "SGPR_Count": 128,
+        },
+        "dispatch_lds_conflict": {
+            "LDS_Block_Size": 8192,
+            "Scratch_Size": 0,
+            "VGPR_Count": 8,
+            "Accum_VGPR_Count": 0,
+            "SGPR_Count": 128,
+        },
+        "dispatch_resource": {
+            "LDS_Block_Size": 4096,
+            "Scratch_Size": 132,
+            "VGPR_Count": 24,
+            "Accum_VGPR_Count": 0,
+            "SGPR_Count": 128,
+        },
+    }
+    assert set(linux_resources) == set(windows_resources)
+    for name in windows_resources:
+        for field in (
+            "LDS_Block_Size",
+            "VGPR_Count",
+            "Accum_VGPR_Count",
+            "SGPR_Count",
+        ):
+            assert linux_resources[name][field] == windows_resources[name][field]
+    assert linux_resources["dispatch_vector"]["Scratch_Size"] == 0
+    assert linux_resources["dispatch_lds_conflict"]["Scratch_Size"] == 0
+    assert linux_resources["dispatch_resource"]["Scratch_Size"] == 144
     assert contract["counter_group"] == [
         "L2CacheHit",
         "VALUInsts",
@@ -87,6 +124,10 @@ def test_linux_oracle_freezes_schema_shape_and_current_filter_scope():
     assert oracle["csv"]["kernel_stats"]["rows"] == 3
     assert oracle["invariants"]["dispatch_ids"] == list(range(1, 7))
     assert oracle["invariants"]["counter_rows_per_dispatch"] == 3
+    assert oracle["invariants"]["nonzero_scratch_kernel"] == "dispatch_resource"
+    assert oracle["invariants"]["resource_metadata"] == load_contract()["workload"][
+        "gfx1151_linux_resource_metadata"
+    ]
     selection = oracle["selection_oracle"]
     assert selection["selected_counter_dispatch_ids"] == [3]
     assert selection["kernel_trace_dispatch_ids"] == list(range(1, 7))

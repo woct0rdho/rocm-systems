@@ -59,7 +59,8 @@ else()
         runtime_initialization.cpp)
 endif()
 
-list(APPEND ROCPROFILER_LIB_HEADERS code_object/kernel_descriptor.hpp)
+list(APPEND ROCPROFILER_LIB_HEADERS code_object/kernel_descriptor.hpp
+                                    code_object/kernel_descriptor_cases.hpp)
 
 # ----------------------------------------------------------------------------------------#
 #

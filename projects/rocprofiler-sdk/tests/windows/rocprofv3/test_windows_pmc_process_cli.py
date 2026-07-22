@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import csv
-import json
 import math
 import os
 from pathlib import Path
-import sqlite3
 import subprocess
 import sys
 
@@ -14,6 +11,7 @@ COMMON = Path(__file__).resolve().parent.parent / "common"
 if str(COMMON) not in sys.path:
     sys.path.insert(0, str(COMMON))
 
+from output_readers import open_rocpd, read_csv, read_json
 from process_cleanup import assert_target_stopped
 
 
@@ -49,11 +47,6 @@ def run_cli(
     return result
 
 
-def read_csv(path: Path):
-    with path.open(encoding="utf-8", newline="") as stream:
-        return list(csv.DictReader(stream))
-
-
 def workload():
     return Path(os.environ["ROCPROFV3_TEST_WORKLOAD"]).resolve()
 
@@ -61,7 +54,7 @@ def workload():
 def expected_rocpd_schema():
     script = Path(os.environ["ROCPROFV3_TEST_BUILT_SCRIPT"]).resolve()
     manifest = script.parent.parent / "share/rocprofiler-sdk-rocpd/latest-schema.json"
-    return json.loads(manifest.read_text(encoding="utf-8"))
+    return read_json(manifest)
 
 
 def assert_kernel_stats(kernel_rows, stats_rows):
@@ -228,7 +221,7 @@ def test_ordinary_csv_json_and_filtering(tmp_path):
     assert all(int(row["End_Timestamp"]) > int(row["Start_Timestamp"]) for row in rows)
     assert all(row["Kernel_Name"].startswith("vector_add(") for row in rows)
 
-    document = json.loads((tmp_path / "filtered_results.json").read_text("utf-8"))
+    document = read_json(tmp_path / "filtered_results.json")
     root = document["rocprofiler-sdk-tool"][0]
     assert len(root["callback_records"]["counter_collection"]) == 2
     assert root["buffer_records"]["kernel_dispatch"] == []
@@ -265,9 +258,9 @@ def test_counter_and_kernel_trace_use_one_dispatch_record(tmp_path):
     assert_kernel_stats(kernel_rows, stats_rows)
     assert all(row["Kind"] == "KERNEL_DISPATCH" for row in kernel_rows)
 
-    document = json.loads(
-        (tmp_path / "composed-kernel_results.json").read_text("utf-8")
-    )["rocprofiler-sdk-tool"][0]
+    document = read_json(tmp_path / "composed-kernel_results.json")[
+        "rocprofiler-sdk-tool"
+    ][0]
     json_kernel = document["buffer_records"]["kernel_dispatch"]
     json_counter = document["callback_records"]["counter_collection"]
     json_summary = document["summary"]
@@ -314,7 +307,7 @@ def test_rocpd_database_uses_authoritative_dispatch_and_counter_records(tmp_path
     assert not (tmp_path / "dispatch-database_results.json").exists()
     assert not (tmp_path / "dispatch-database_counter_collection.csv").exists()
     schema = expected_rocpd_schema()
-    with sqlite3.connect(database) as connection:
+    with open_rocpd(database) as connection:
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
         assert connection.execute(
@@ -432,7 +425,7 @@ def test_multiple_pmc_groups_publish_process_local_rocpd_databases(tmp_path):
         database = output / "multi-database_results.db"
         assert database.is_file()
         assert not (output / "multi-database_results.json").exists()
-        with sqlite3.connect(database) as connection:
+        with open_rocpd(database) as connection:
             assert [
                 row[0]
                 for row in connection.execute(
@@ -529,9 +522,7 @@ def test_counter_and_hip_trace_compose_in_one_process(tmp_path):
     assert counter_path == prefix.with_name(
         f"composed-{process_id}_counter_collection.csv"
     )
-    document = json.loads(
-        prefix.with_name(f"composed-{process_id}_results.json").read_text("utf-8")
-    )
+    document = read_json(prefix.with_name(f"composed-{process_id}_results.json"))
     assert (
         len(
             document["rocprofiler-sdk-tool"][0]["callback_records"][

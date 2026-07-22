@@ -10,6 +10,8 @@
 #include "lib/common/windows_result.hpp"
 #include "lib/output/counter_output_columns.hpp"
 #include "lib/output/csv.hpp"
+#include "lib/output/csv_output_helpers.hpp"
+#include "lib/output/resource_info.hpp"
 #include "lib/output/statistics.hpp"
 #include "lib/output/stream_info.hpp"
 
@@ -32,7 +34,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
-#include <iomanip>
 #include <iterator>
 #include <map>
 #include <mutex>
@@ -805,34 +806,10 @@ generate_kernel_statistics(const tool_state&                    state,
 std::string
 generate_kernel_stats_csv(const rocprofiler::tool::stats_entry_t& stats)
 {
-    constexpr auto columns = std::array<std::string_view, 8>{"Name",
-                                                              "Calls",
-                                                              "TotalDurationNs",
-                                                              "AverageNs",
-                                                              "Percentage",
-                                                              "MinNs",
-                                                              "MaxNs",
-                                                              "StdDev"};
     auto output = std::ostringstream{};
-    for(size_t index = 0; index < std::size(columns); ++index)
-    {
-        if(index > 0) output << ',';
-        output << rocprofiler::tool::csv::quote(columns[index]);
-    }
-    output << '\n';
-
-    for(const auto& [name, value] : stats.entries)
-        rocprofiler::tool::csv::stats_csv_encoder::write_row<
-            rocprofiler::tool::stats_formatter>(output,
-                                                name,
-                                                value.get_count(),
-                                                value.get_sum(),
-                                                value.get_mean(),
-                                                rocprofiler::tool::percentage{
-                                                    value.get_percent(stats.total)},
-                                                value.get_min(),
-                                                value.get_max(),
-                                                value.get_stddev());
+    rocprofiler::tool::csv::stats_csv_encoder::write_row(
+        output, rocprofiler::tool::csv::statistics_columns);
+    output << rocprofiler::tool::csv::format_statistics_rows(stats);
     return output.str();
 }
 
@@ -845,52 +822,10 @@ generate_agent_csv(const tool_state& state)
     });
 
     auto output = std::ostringstream{};
-    for(size_t index = 0; index < rocprofiler::tool::csv::agent_info_columns.size(); ++index)
-    {
-        if(index > 0) output << ',';
-        output << rocprofiler::tool::csv::quote(
-            rocprofiler::tool::csv::agent_info_columns[index]);
-    }
-    output << '\n';
-
+    rocprofiler::tool::csv::agent_info_csv_encoder::write_row(
+        output, rocprofiler::tool::csv::agent_info_columns);
     for(const auto& agent : agents)
-    {
-        auto type = std::string_view{"UNK"};
-        if(agent.type == ROCPROFILER_AGENT_TYPE_CPU)
-            type = "CPU";
-        else if(agent.type == ROCPROFILER_AGENT_TYPE_GPU)
-            type = "GPU";
-        output << agent.node_id << ',' << agent.logical_node_id << ','
-               << rocprofiler::tool::csv::quote(type) << ',' << agent.cpu_cores_count << ','
-               << agent.simd_count << ','
-               << agent.cpu_core_id_base << ',' << agent.simd_id_base << ','
-               << agent.max_waves_per_simd << ',' << agent.lds_size_in_kb << ','
-               << agent.gds_size_in_kb << ',' << agent.num_gws << ','
-               << agent.wave_front_size << ',' << agent.num_xcc << ',' << agent.cu_count << ','
-               << agent.array_count << ',' << agent.num_shader_banks << ','
-               << agent.simd_arrays_per_engine << ',' << agent.cu_per_simd_array << ','
-               << agent.simd_per_cu << ',' << agent.max_slots_scratch_cu << ','
-               << agent.gfx_target_version << ',' << agent.vendor_id << ',' << agent.device_id
-               << ',' << agent.location_id << ',' << agent.domain << ','
-               << agent.drm_render_minor << ',' << agent.num_sdma_engines << ','
-               << agent.num_sdma_xgmi_engines << ',' << agent.num_sdma_queues_per_engine << ','
-               << agent.num_cp_queues << ',' << agent.max_engine_clk_ccompute << ','
-               << agent.max_engine_clk_fcompute << ',' << agent.sdma_fw_version.Value << ','
-               << agent.fw_version.Value << ',' << agent.capability.Value << ','
-               << agent.cu_per_engine << ',' << agent.max_waves_per_cu << ','
-               << agent.family_id << ',' << agent.workgroup_max_size << ','
-               << agent.grid_max_size << ',' << agent.local_mem_size << ',' << agent.hive_id << ','
-               << agent.gpu_id << ',' << agent.workgroup_max_dim.x << ','
-               << agent.workgroup_max_dim.y << ',' << agent.workgroup_max_dim.z << ','
-               << agent.grid_max_dim.x << ',' << agent.grid_max_dim.y << ','
-               << agent.grid_max_dim.z << ','
-               << rocprofiler::tool::csv::quote(agent.name ? agent.name : "") << ','
-               << rocprofiler::tool::csv::quote(agent.vendor_name ? agent.vendor_name : "")
-               << ','
-               << rocprofiler::tool::csv::quote(agent.product_name ? agent.product_name : "")
-               << ','
-               << rocprofiler::tool::csv::quote(agent.model_name ? agent.model_name : "") << '\n';
-    }
+        output << rocprofiler::tool::csv::format_agent_info_row(agent);
     return output.str();
 }
 
@@ -916,28 +851,13 @@ find_invalid_sq_waves_dispatch(const tool_state& state)
     return 0;
 }
 
-uint32_t
-lds_block_size(const kernel_metadata& metadata)
-{
-    constexpr auto block_size = uint64_t{512};
-    return static_cast<uint32_t>((metadata.group_segment_size + block_size - 1) &
-                                 ~(block_size - 1));
-}
-
 std::string
 generate_counter_csv(tool_state& state)
 {
     const auto records = sorted_counter_records(state);
     auto       output  = std::ostringstream{};
-    for(size_t index = 0;
-        index < rocprofiler::tool::csv::counter_collection_columns.size();
-        ++index)
-    {
-        if(index > 0) output << ',';
-        output << rocprofiler::tool::csv::quote(
-            rocprofiler::tool::csv::counter_collection_columns[index]);
-    }
-    output << '\n' << std::fixed << std::setprecision(6);
+    rocprofiler::tool::csv::counter_collection_csv_encoder::write_row(
+        output, rocprofiler::tool::csv::counter_collection_columns);
 
     for(const auto& record : records)
     {
@@ -959,16 +879,27 @@ generate_counter_csv(tool_state& state)
             auto counter_name = std::string{"counter_"} + std::to_string(counter_id);
             if(auto itr = state.counter_names.find(counter_id); itr != state.counter_names.end())
                 counter_name = itr->second;
-            output << dispatch.correlation_id.internal << ',' << info.dispatch_id << ','
-                   << rocprofiler::tool::csv::quote(agent_label(state, info.agent_id)) << ','
-                   << info.queue_id.handle << ',' << ::GetCurrentProcessId() << ','
-                   << record.thread_id << ',' << magnitude(info.grid_size) << ','
-                   << info.kernel_id << ',' << rocprofiler::tool::csv::quote(kernel_name) << ','
-                   << magnitude(info.workgroup_size) << ',' << lds_block_size(metadata) << ','
-                   << metadata.private_segment_size << ',' << metadata.arch_vgpr_count << ','
-                   << metadata.accum_vgpr_count << ',' << metadata.sgpr_count << ','
-                   << rocprofiler::tool::csv::quote(counter_name) << ',' << value << ','
-                   << dispatch.start_timestamp << ',' << dispatch.end_timestamp << '\n';
+            rocprofiler::tool::csv::counter_collection_csv_encoder::write_row(
+                output,
+                dispatch.correlation_id.internal,
+                info.dispatch_id,
+                agent_label(state, info.agent_id),
+                info.queue_id.handle,
+                ::GetCurrentProcessId(),
+                record.thread_id,
+                magnitude(info.grid_size),
+                info.kernel_id,
+                kernel_name,
+                magnitude(info.workgroup_size),
+                rocprofiler::tool::normalize_lds_allocation_size(metadata.group_segment_size),
+                metadata.private_segment_size,
+                metadata.arch_vgpr_count,
+                metadata.accum_vgpr_count,
+                metadata.sgpr_count,
+                counter_name,
+                value,
+                dispatch.start_timestamp,
+                dispatch.end_timestamp);
         }
     }
     return output.str();
@@ -977,36 +908,10 @@ generate_counter_csv(tool_state& state)
 std::string
 generate_kernel_csv(tool_state& state)
 {
-    constexpr auto columns = std::array<std::string_view, 22>{"Kind",
-                                                               "Agent_Id",
-                                                               "Queue_Id",
-                                                               "Stream_Id",
-                                                               "Thread_Id",
-                                                               "Dispatch_Id",
-                                                               "Kernel_Id",
-                                                               "Kernel_Name",
-                                                               "Correlation_Id",
-                                                               "Start_Timestamp",
-                                                               "End_Timestamp",
-                                                               "LDS_Block_Size",
-                                                               "Scratch_Size",
-                                                               "VGPR_Count",
-                                                               "Accum_VGPR_Count",
-                                                               "SGPR_Count",
-                                                               "Workgroup_Size_X",
-                                                               "Workgroup_Size_Y",
-                                                               "Workgroup_Size_Z",
-                                                               "Grid_Size_X",
-                                                               "Grid_Size_Y",
-                                                               "Grid_Size_Z"};
     const auto records = sorted_counter_records(state);
     auto       output  = std::ostringstream{};
-    for(size_t index = 0; index < std::size(columns); ++index)
-    {
-        if(index > 0) output << ',';
-        output << rocprofiler::tool::csv::quote(columns[index]);
-    }
-    output << '\n';
+    rocprofiler::tool::csv::kernel_trace_with_stream_csv_encoder::write_row(
+        output, rocprofiler::tool::csv::kernel_trace_columns);
 
     for(const auto& record : records)
     {
@@ -1020,82 +925,32 @@ generate_kernel_csv(tool_state& state)
             kernel_name = metadata.formatted_kernel_name;
         }
 
-        output << "KERNEL_DISPATCH," << rocprofiler::tool::csv::quote(
-                      agent_label(state, info.agent_id))
-               << ',' << info.queue_id.handle << ',' << record.stream.handle << ','
-               << record.thread_id << ',' << info.dispatch_id << ',' << info.kernel_id << ','
-               << rocprofiler::tool::csv::quote(kernel_name) << ','
-               << dispatch.correlation_id.internal << ',' << dispatch.start_timestamp << ','
-               << dispatch.end_timestamp << ',' << lds_block_size(metadata) << ','
-               << metadata.private_segment_size << ',' << metadata.arch_vgpr_count << ','
-               << metadata.accum_vgpr_count << ',' << metadata.sgpr_count << ','
-               << info.workgroup_size.x << ',' << info.workgroup_size.y << ','
-               << info.workgroup_size.z << ',' << info.grid_size.x << ',' << info.grid_size.y
-               << ',' << info.grid_size.z << '\n';
+        rocprofiler::tool::csv::kernel_trace_with_stream_csv_encoder::write_row(
+            output,
+            std::string_view{"KERNEL_DISPATCH"},
+            agent_label(state, info.agent_id),
+            info.queue_id.handle,
+            record.stream.handle,
+            record.thread_id,
+            info.dispatch_id,
+            info.kernel_id,
+            kernel_name,
+            dispatch.correlation_id.internal,
+            dispatch.start_timestamp,
+            dispatch.end_timestamp,
+            rocprofiler::tool::normalize_lds_allocation_size(metadata.group_segment_size),
+            metadata.private_segment_size,
+            metadata.arch_vgpr_count,
+            metadata.accum_vgpr_count,
+            metadata.sgpr_count,
+            info.workgroup_size.x,
+            info.workgroup_size.y,
+            info.workgroup_size.z,
+            info.grid_size.x,
+            info.grid_size.y,
+            info.grid_size.z);
     }
     return output.str();
-}
-
-template <typename ArchiveT>
-void
-serialize_statistics(ArchiveT& archive, const rocprofiler::tool::stats_data_t& stats)
-{
-    const auto count    = stats.get_count();
-    const auto sum      = stats.get_sum();
-    const auto sqr      = stats.get_sqr();
-    const auto min      = stats.get_min();
-    const auto max      = stats.get_max();
-    const auto mean     = stats.get_mean();
-    const auto stddev   = stats.get_stddev();
-    const auto variance = stats.get_variance();
-    archive(cereal::make_nvp("count", count),
-            cereal::make_nvp("sum", sum),
-            cereal::make_nvp("sqr", sqr),
-            cereal::make_nvp("min", min),
-            cereal::make_nvp("max", max),
-            cereal::make_nvp("mean", mean),
-            cereal::make_nvp("stddev", stddev),
-            cereal::make_nvp("variance", variance));
-}
-
-template <typename ArchiveT>
-void
-serialize_statistics_entry(ArchiveT& archive,
-                           const rocprofiler::tool::stats_entry_t& stats)
-{
-    const auto class_version = uint32_t{0};
-    archive(cereal::make_nvp("cereal_class_version", class_version));
-    serialize_statistics(archive, stats.total);
-
-    auto operations = std::vector<const rocprofiler::tool::stats_pair_t*>{};
-    operations.reserve(stats.entries.size());
-    for(const auto& entry : stats.entries)
-        operations.emplace_back(&entry);
-    std::sort(operations.begin(), operations.end(), [](const auto* lhs, const auto* rhs) {
-        return lhs->first < rhs->first;
-    });
-
-    archive.setNextName("operations");
-    archive.startNode();
-    archive.makeArray();
-    auto first = true;
-    for(const auto* entry : operations)
-    {
-        archive.startNode();
-        const auto key = std::string{entry->first};
-        archive(cereal::make_nvp("key", key));
-        archive.setNextName("value");
-        archive.startNode();
-        if(first)
-        {
-            archive(cereal::make_nvp("cereal_class_version", class_version));
-            first = false;
-        }
-        serialize_statistics(archive, entry->second);
-        archive.finishNode();
-        archive.finishNode();
-    }
-    archive.finishNode();
 }
 
 std::string
@@ -1151,7 +1006,8 @@ generate_json(tool_state& state, const rocprofiler::tool::stats_entry_t& kernel_
             archive(cereal::make_nvp("domain", std::string{"KERNEL_DISPATCH"}));
             archive.setNextName("stats");
             archive.startNode();
-            serialize_statistics_entry(archive, kernel_stats);
+            archive(cereal::make_nvp("cereal_class_version", uint32_t{0}));
+            kernel_stats.serialize(archive, 0);
             archive.finishNode();
             archive.finishNode();
         }

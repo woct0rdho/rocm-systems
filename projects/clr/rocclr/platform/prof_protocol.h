@@ -64,6 +64,12 @@ struct activity_record_t {
     size_t bytes;  // data size bytes
     const char* kernel_name;
   };
+  uint32_t group_segment_size;
+  uint32_t private_segment_size;
+  uint32_t arch_vgpr_count;
+  uint32_t accum_vgpr_count;
+  uint32_t sgpr_count;
+  uint32_t resource_metadata_valid;
 };
 
 // Activity sync calback type

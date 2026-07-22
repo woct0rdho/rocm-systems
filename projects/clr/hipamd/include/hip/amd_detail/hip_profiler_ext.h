@@ -24,7 +24,7 @@
 #include "hip/hip_runtime_api.h"
 
 #define HIP_PROFILER_EXT_VERSION_MAJOR 0
-#define HIP_PROFILER_EXT_VERSION_MINOR 1
+#define HIP_PROFILER_EXT_VERSION_MINOR 2
 #define HIP_PROFILER_EXT_VERSION_PATCH 0
 
 #ifdef __cplusplus
@@ -116,7 +116,7 @@ typedef struct hipGpuActivityExt {
   };
   /* Originally _pad1[96].  First 16 bytes repurposed for multi-op linked list;
    * next 40 bytes repurposed for op-specific payload (dispatch dims/args or copy src/dst);
-   * remaining 40 bytes stay reserved and must be treated as zero by external callers. */
+   * next 24 bytes hold dispatch resource metadata; the remaining 16 bytes stay reserved. */
   uint32_t                   gpu_op_count; /**< Total GPU ops (0=none, 1=in gpu field, >1=graph) */
   uint32_t                   _reserved_u32;/**< Reserved — must be zero */
   const struct hipGpuActivityExt* next;    /**< Next spill node (ops 2..N); NULL at tail or when
@@ -144,7 +144,13 @@ typedef struct hipGpuActivityExt {
       uint8_t     _reserved_copy[24]; /**< Reserved — must be zero */
     };
   };
-  uint8_t     _pad1[40];           /**< Remaining reserved padding — must be zero */
+  uint32_t group_segment_size;       /**< Static LDS bytes (op==HIP_OP_DISPATCH_EXT) */
+  uint32_t private_segment_size;     /**< Scratch bytes per workitem */
+  uint32_t arch_vgpr_count;          /**< Allocated architecture VGPRs per workitem */
+  uint32_t accum_vgpr_count;         /**< Allocated accumulated VGPRs per workitem */
+  uint32_t sgpr_count;               /**< Allocated SGPRs per wave */
+  uint32_t resource_metadata_valid;  /**< Nonzero when all resource fields are authoritative */
+  uint8_t  _pad1[16];                /**< Remaining reserved padding — must be zero */
 } hipGpuActivityExt;
 #ifdef __cplusplus
 static_assert(sizeof(hipGpuActivityExt) == 128, "hipGpuActivityExt must be 128 bytes");

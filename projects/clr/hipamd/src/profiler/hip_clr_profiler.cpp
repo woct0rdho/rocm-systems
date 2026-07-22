@@ -394,6 +394,12 @@ int HipActivityCallbackExt(activity_domain_t domain, uint32_t op_id, void* data)
   auto fill_dispatch_info = [&](hipGpuActivityExt* gact) {
     if (ar->op != OP_ID_DISPATCH) return;
     gact->kernel_name = ar->kernel_name;
+    gact->group_segment_size = ar->group_segment_size;
+    gact->private_segment_size = ar->private_segment_size;
+    gact->arch_vgpr_count = ar->arch_vgpr_count;
+    gact->accum_vgpr_count = ar->accum_vgpr_count;
+    gact->sgpr_count = ar->sgpr_count;
+    gact->resource_metadata_valid = ar->resource_metadata_valid;
     if (!is_graph_launch()) {
       // Single launch: dims and kernel_args were already written by the wrapper
       // directly into rec->gpu (which IS gact for the first-op branch).
@@ -416,6 +422,12 @@ int HipActivityCallbackExt(activity_domain_t domain, uint32_t op_id, void* data)
             gact->block_x = ni.gpu.block_x;
             gact->block_y = ni.gpu.block_y;
             gact->block_z = ni.gpu.block_z;
+            gact->group_segment_size = ni.gpu.group_segment_size;
+            gact->private_segment_size = ni.gpu.private_segment_size;
+            gact->arch_vgpr_count = ni.gpu.arch_vgpr_count;
+            gact->accum_vgpr_count = ni.gpu.accum_vgpr_count;
+            gact->sgpr_count = ni.gpu.sgpr_count;
+            gact->resource_metadata_valid = ni.gpu.resource_metadata_valid;
             if (ni.gpu.kernel_args && ni.gpu.kernel_args_size > 0) {
               uint8_t* copy = new uint8_t[ni.gpu.kernel_args_size];
               std::memcpy(copy, ni.gpu.kernel_args, ni.gpu.kernel_args_size);
@@ -773,7 +785,14 @@ void WriteJsonTraceImpl(const char* filepath) {
           sep();
           trace << "\"enqueue_ordinal\":" << (static_cast<uint64_t>(rec.chunk_id) + 1)
                 << ",\"enqueue_operation_index\":" << enqueue_operation_index
-                << ",\"thread_id\":" << rec.thread_id;
+                << ",\"thread_id\":" << rec.thread_id
+                << ",\"resource_metadata_valid\":"
+                << (gop.resource_metadata_valid ? "true" : "false")
+                << ",\"group_segment_size\":" << gop.group_segment_size
+                << ",\"private_segment_size\":" << gop.private_segment_size
+                << ",\"arch_vgpr_count\":" << gop.arch_vgpr_count
+                << ",\"accum_vgpr_count\":" << gop.accum_vgpr_count
+                << ",\"sgpr_count\":" << gop.sgpr_count;
           if (gop.kernel_name) {
             sep();
             trace << "\"mangled_kernel_name\":\"" << gop.kernel_name << "\"";
@@ -2596,6 +2615,20 @@ void HipCaptureGraphNodeArgsExt(HipGraphNodeInfoExt* info, hipFunction_t func, v
     auto [it, ok] = g_kernel_names.emplace(mangled, mangled);
     (void)ok;
     info->gpu.kernel_name = it->first.c_str();
+  }
+
+  auto* current_device = hip::getCurrentDevice();
+  if (current_device != nullptr && !current_device->devices().empty()) {
+    auto resource = amd::activity_prof::KernelResourceData{};
+    if (amd::activity_prof::GetKernelResourceData(
+            *kernel, *current_device->devices()[0], resource)) {
+      info->gpu.group_segment_size = resource.group_segment_size;
+      info->gpu.private_segment_size = resource.private_segment_size;
+      info->gpu.arch_vgpr_count = resource.arch_vgpr_count;
+      info->gpu.accum_vgpr_count = resource.accum_vgpr_count;
+      info->gpu.sgpr_count = resource.sgpr_count;
+      info->gpu.resource_metadata_valid = 1;
+    }
   }
 
   if (!args) return;

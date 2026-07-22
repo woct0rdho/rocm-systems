@@ -79,7 +79,31 @@
     "counter_rows_per_dispatch": 3,
     "positive_counters": ["L2CacheHit", "VALUInsts"],
     "nonzero_lds_kernel": "dispatch_lds_conflict",
+    "nonzero_scratch_kernel": "dispatch_resource",
     "nonzero_vgpr_kernel": "dispatch_resource",
+    "resource_metadata": {
+      "dispatch_vector": {
+        "LDS_Block_Size": 0,
+        "Scratch_Size": 0,
+        "VGPR_Count": 8,
+        "Accum_VGPR_Count": 0,
+        "SGPR_Count": 128
+      },
+      "dispatch_lds_conflict": {
+        "LDS_Block_Size": 8192,
+        "Scratch_Size": 0,
+        "VGPR_Count": 8,
+        "Accum_VGPR_Count": 0,
+        "SGPR_Count": 128
+      },
+      "dispatch_resource": {
+        "LDS_Block_Size": 4096,
+        "Scratch_Size": 144,
+        "VGPR_Count": 24,
+        "Accum_VGPR_Count": 0,
+        "SGPR_Count": 128
+      }
+    },
     "timestamps": "positive_ordered_system_nanoseconds",
     "database_views": ["kernels", "top_kernels"],
     "json_nodes": [

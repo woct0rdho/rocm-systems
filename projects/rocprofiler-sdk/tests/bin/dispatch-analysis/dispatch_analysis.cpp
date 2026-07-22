@@ -102,14 +102,17 @@ dispatch_resource(const float* input, float* output, size_t size)
     __shared__ float shared_values[1024];
     const auto local  = static_cast<uint32_t>(threadIdx.x);
     const auto global = static_cast<size_t>(blockIdx.x) * blockDim.x + local;
-    float      values[16] = {};
-    const auto seed       = (global < size) ? input[global] : 0.0F;
-    for(uint32_t index = 0; index < 16; ++index)
-        values[index] = seed + static_cast<float>(index) * 0.125F;
-    shared_values[local] = values[(local >> 4U) & 15U];
+    volatile float values[32] = {};
+    const auto     seed       = (global < size) ? input[global] : 0.0F;
+    for(uint32_t index = 0; index < 32; ++index)
+    {
+        const auto slot = (index + local) & 31U;
+        values[slot] = seed + static_cast<float>(index) * 0.125F;
+    }
+    shared_values[local] = values[(local >> 3U) & 31U];
     __syncthreads();
     if(global < size)
-        output[global] = values[local & 15U] + shared_values[(local + 17U) & 255U];
+        output[global] = values[(local * 5U) & 31U] + shared_values[(local + 17U) & 255U];
 }
 
 int

@@ -390,6 +390,7 @@ def main() -> int:
                 pmc_result, pmc_output = run_wrapper(
                     wrapper,
                     [
+                        "--kernel-trace",
                         "--pmc",
                         "SQ_WAVES",
                         "--output-format",
@@ -410,6 +411,7 @@ def main() -> int:
                     expected_outputs=(
                         pmc_directory / f"{output_name}_agent_info.csv",
                         pmc_directory / f"{output_name}_counter_collection.csv",
+                        pmc_directory / f"{output_name}_kernel_trace.csv",
                         pmc_directory / f"{output_name}_results.json",
                     ),
                 )
@@ -449,6 +451,31 @@ def main() -> int:
                     raise RuntimeError(
                         f"installed PMC run {iteration} values are not positive: {pmc_values}"
                     )
+                kernel_rows = read_csv(
+                    pmc_directory / f"{output_name}_kernel_trace.csv"
+                )
+                if len(kernel_rows) != 2:
+                    raise RuntimeError(
+                        f"installed kernel run {iteration} row count mismatch: "
+                        f"{len(kernel_rows)}"
+                    )
+                for counter, kernel in zip(pmc_rows, kernel_rows):
+                    for field in (
+                        "Agent_Id",
+                        "Queue_Id",
+                        "Thread_Id",
+                        "Dispatch_Id",
+                        "Kernel_Id",
+                        "Kernel_Name",
+                        "Correlation_Id",
+                        "Start_Timestamp",
+                        "End_Timestamp",
+                    ):
+                        if counter[field] != kernel[field]:
+                            raise RuntimeError(
+                                f"installed run {iteration} kernel/counter mismatch "
+                                f"for {field}: {counter[field]} != {kernel[field]}"
+                            )
                 document = json.loads(
                     (pmc_directory / f"{output_name}_results.json").read_text(
                         encoding="utf-8"
@@ -474,6 +501,21 @@ def main() -> int:
                         f"installed PMC run {iteration} JSON dispatch IDs do not match: "
                         f"{json_dispatch_ids}"
                     )
+                kernel_json_records = tool_document["buffer_records"][
+                    "kernel_dispatch"
+                ]
+                if len(kernel_json_records) != 2:
+                    raise RuntimeError(
+                        f"installed kernel run {iteration} JSON record count mismatch: "
+                        f"{len(kernel_json_records)}"
+                    )
+                if [
+                    int(record["dispatch_info"]["dispatch_id"])
+                    for record in kernel_json_records
+                ] != dispatch_ids:
+                    raise RuntimeError(
+                        f"installed kernel run {iteration} JSON dispatch IDs do not match"
+                    )
                 pmc_processes.append(pmc_result)
                 pmc_totals.append(sum(pmc_values))
             hip_trace = {
@@ -488,6 +530,8 @@ def main() -> int:
                 "pmc_rows_per_run": 2,
                 "pmc_totals": pmc_totals,
                 "pmc_json_records_per_run": 2,
+                "kernel_rows_per_run": 2,
+                "kernel_json_records_per_run": 2,
             }
         finally:
             shutil.rmtree(hip_target_directory, ignore_errors=True)

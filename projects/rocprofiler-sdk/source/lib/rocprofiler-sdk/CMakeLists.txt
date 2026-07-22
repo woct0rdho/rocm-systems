@@ -59,6 +59,8 @@ else()
         runtime_initialization.cpp)
 endif()
 
+list(APPEND ROCPROFILER_LIB_HEADERS code_object/kernel_descriptor.hpp)
+
 # ----------------------------------------------------------------------------------------#
 #
 # object library allows us to compile rocprofiler code once and generate both a shared and

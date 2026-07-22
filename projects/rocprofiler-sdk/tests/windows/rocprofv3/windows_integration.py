@@ -481,6 +481,7 @@ def run_dispatch_analysis_contract(args, env, output):
         composed_stats = composed_directory / "contract_kernel_stats.csv"
         composed_json = composed_directory / "contract_results.json"
         composed_json_kernels = []
+        composed_json_symbols = []
         composed_json_summary = []
         if composed_json.is_file():
             document = json.loads(composed_json.read_text(encoding="utf-8"))
@@ -488,6 +489,7 @@ def run_dispatch_analysis_contract(args, env, output):
             if isinstance(tool_document, list):
                 tool_document = tool_document[0]
             composed_json_kernels = tool_document["buffer_records"]["kernel_dispatch"]
+            composed_json_symbols = tool_document["kernel_symbols"]
             composed_json_summary = tool_document["summary"]
 
         selection_runs.append(
@@ -516,6 +518,7 @@ def run_dispatch_analysis_contract(args, env, output):
                     "stats_exists": composed_stats.is_file(),
                     "json_exists": composed_json.is_file(),
                     "json_kernel_records": composed_json_kernels,
+                    "json_kernel_symbols": composed_json_symbols,
                     "json_summary": composed_json_summary,
                 },
             }
@@ -529,6 +532,9 @@ def run_dispatch_analysis_contract(args, env, output):
     return {
         "contract_version": contract["version"],
         "enqueue_sequence": contract["workload"]["enqueue_sequence"],
+        "resource_metadata": contract["workload"][
+            "gfx1151_windows_resource_metadata"
+        ],
         "selection_cases": selection_runs,
         "standalone": standalone,
         "composed": composed,

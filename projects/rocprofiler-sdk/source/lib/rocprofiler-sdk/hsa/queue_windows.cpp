@@ -34,20 +34,20 @@ namespace
 {
 constexpr auto null_signal = hsa_signal_t{.handle = 0};
 
-struct kernel_metadata
+struct kernel_registry
 {
-    std::unordered_map<uint64_t, rocprofiler_kernel_id_t> object_ids   = {};
-    std::unordered_map<uint64_t, std::string>             object_names = {};
-    std::unordered_map<rocprofiler_kernel_id_t, std::string> id_names = {};
+    std::unordered_map<uint64_t, rocprofiler_kernel_id_t> object_ids = {};
+    std::unordered_map<rocprofiler_kernel_id_t, uint64_t> id_objects = {};
+    std::unordered_map<uint64_t, windows::kernel_metadata> object_metadata = {};
     uint64_t sequence = 0;
 };
 
-using kernel_metadata_t = common::Synchronized<kernel_metadata>;
+using kernel_registry_t = common::Synchronized<kernel_registry>;
 
-kernel_metadata_t&
-get_kernel_metadata()
+kernel_registry_t&
+get_kernel_registry()
 {
-    static auto*& value = common::static_object<kernel_metadata_t>::construct();
+    static auto*& value = common::static_object<kernel_registry_t>::construct();
     return *value;
 }
 
@@ -67,14 +67,15 @@ get_kernel_id(uint64_t kernel_object)
 {
     if(kernel_object == 0) return 0;
 
-    return get_kernel_metadata().wlock([&](auto& values) {
+    return get_kernel_registry().wlock([&](auto& values) {
         auto [itr, inserted] = values.object_ids.emplace(kernel_object, 0);
         if(inserted)
         {
             itr->second = ++values.sequence;
-            if(auto name = values.object_names.find(kernel_object);
-               name != values.object_names.end())
-                values.id_names.emplace(itr->second, name->second);
+            values.id_objects.emplace(itr->second, kernel_object);
+            if(auto metadata = values.object_metadata.find(kernel_object);
+               metadata != values.object_metadata.end())
+                metadata->second.kernel_id = itr->second;
         }
         return itr->second;
     });
@@ -348,24 +349,37 @@ write_interceptor(const void* packets,
 namespace windows
 {
 void
-register_kernel_name(uint64_t kernel_object, std::string_view name)
+register_kernel_metadata(kernel_metadata metadata)
 {
-    if(kernel_object == 0 || name.empty()) return;
-    get_kernel_metadata().wlock([&](auto& values) {
-        values.object_names.insert_or_assign(kernel_object, std::string{name});
-        if(auto id = values.object_ids.find(kernel_object); id != values.object_ids.end())
-            values.id_names.insert_or_assign(id->second, std::string{name});
+    if(metadata.kernel_object == 0) return;
+    get_kernel_registry().wlock([&](auto& values) {
+        if(auto id = values.object_ids.find(metadata.kernel_object); id != values.object_ids.end())
+            metadata.kernel_id = id->second;
+        if(auto previous = values.object_metadata.find(metadata.kernel_object);
+           previous != values.object_metadata.end() && previous->second.valid && !metadata.valid)
+            return;
+        values.object_metadata.insert_or_assign(metadata.kernel_object, std::move(metadata));
+    });
+}
+
+std::optional<kernel_metadata>
+get_kernel_metadata(rocprofiler_kernel_id_t kernel_id)
+{
+    return get_kernel_registry().rlock([&](const auto& values) -> std::optional<kernel_metadata> {
+        const auto object = values.id_objects.find(kernel_id);
+        if(object == values.id_objects.end()) return std::nullopt;
+        const auto metadata = values.object_metadata.find(object->second);
+        if(metadata == values.object_metadata.end()) return std::nullopt;
+        return metadata->second;
     });
 }
 
 std::string
 get_kernel_name(rocprofiler_kernel_id_t kernel_id)
 {
-    return get_kernel_metadata().rlock([&](const auto& values) {
-        if(auto itr = values.id_names.find(kernel_id); itr != values.id_names.end())
-            return itr->second;
-        return fmt::format("kernel_{}", kernel_id);
-    });
+    if(auto metadata = get_kernel_metadata(kernel_id); metadata && !metadata->name.empty())
+        return metadata->name;
+    return fmt::format("kernel_{}", kernel_id);
 }
 }  // namespace windows
 

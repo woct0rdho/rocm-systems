@@ -262,6 +262,34 @@ def write_windows_kernel_csv(profile_path, output_path, process_id, args=None):
                     enqueue_ordinal,
                     operation_index,
                 )
+            resource_fields = (
+                "group_segment_size",
+                "private_segment_size",
+                "arch_vgpr_count",
+                "accum_vgpr_count",
+                "sgpr_count",
+            )
+            try:
+                resource_values = {
+                    name: int(event_args[name]) for name in resource_fields
+                }
+            except (KeyError, TypeError, ValueError):
+                fatal_error(
+                    "kernel_metadata_missing: Windows HIP kernel activity is missing "
+                    "resource fields"
+                )
+            if (
+                not event_args.get("resource_metadata_valid", False)
+                or resource_values["group_segment_size"] < 0
+                or resource_values["private_segment_size"] < 0
+                or resource_values["arch_vgpr_count"] <= 0
+                or resource_values["accum_vgpr_count"] < 0
+                or resource_values["sgpr_count"] <= 0
+            ):
+                fatal_error(
+                    "kernel_metadata_missing: Windows HIP kernel activity contains "
+                    "invalid resource fields"
+                )
             events.append((enqueue_ordinal, operation_index, event))
 
     if not events:
@@ -346,6 +374,8 @@ def write_windows_kernel_csv(profile_path, output_path, process_id, args=None):
         device_id = int(event.get("pid", 0))
         queue_id = int(event_args.get("queue_id", 0))
         stream_id = int(event.get("tid", 0))
+        group_segment_size = int(event_args["group_segment_size"])
+        lds_block_size = (group_segment_size + 511) & ~511
         rows.append(
             {
                 "Kind": "KERNEL_DISPATCH",
@@ -359,11 +389,11 @@ def write_windows_kernel_csv(profile_path, output_path, process_id, args=None):
                 "Correlation_Id": enqueue_ordinal,
                 "Start_Timestamp": begin_ns,
                 "End_Timestamp": end_ns,
-                "LDS_Block_Size": 0,
-                "Scratch_Size": 0,
-                "VGPR_Count": 0,
-                "Accum_VGPR_Count": 0,
-                "SGPR_Count": 0,
+                "LDS_Block_Size": lds_block_size,
+                "Scratch_Size": int(event_args["private_segment_size"]),
+                "VGPR_Count": int(event_args["arch_vgpr_count"]),
+                "Accum_VGPR_Count": int(event_args["accum_vgpr_count"]),
+                "SGPR_Count": int(event_args["sgpr_count"]),
                 "Workgroup_Size_X": workgroup[0],
                 "Workgroup_Size_Y": workgroup[1],
                 "Workgroup_Size_Z": workgroup[2],

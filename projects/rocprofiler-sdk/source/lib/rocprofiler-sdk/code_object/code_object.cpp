@@ -21,6 +21,7 @@
 // THE SOFTWARE.
 
 #include "lib/rocprofiler-sdk/code_object/code_object.hpp"
+#include "lib/rocprofiler-sdk/code_object/kernel_descriptor.hpp"
 #include "lib/common/logging.hpp"
 #include "lib/common/scope_destructor.hpp"
 #include "lib/common/static_object.hpp"
@@ -169,154 +170,18 @@ get_names()
 
 namespace
 {
-using hsa_loader_table_t             = hsa_ven_amd_loader_1_01_pfn_t;
-using context_t                      = context::context;
-using user_data_t                    = rocprofiler_user_data_t;
-using context_array_t                = context::context_array_t;
-using context_user_data_map_t        = std::unordered_map<const context_t*, user_data_t>;
-using amd_compute_pgm_rsrc_three32_t = uint32_t;
+
+using hsa_loader_table_t      = hsa_ven_amd_loader_1_01_pfn_t;
+using context_t               = context::context;
+using user_data_t             = rocprofiler_user_data_t;
+using context_array_t         = context::context_array_t;
+using context_user_data_map_t = std::unordered_map<const context_t*, user_data_t>;
 
 RocAttachDispatchTable**
 get_attach_table()
 {
     static auto* table = common::static_object<RocAttachDispatchTable*>::construct();
     return table;
-}
-
-struct kernel_descriptor_t
-{
-    uint8_t  reserved0[16];
-    int64_t  kernel_code_entry_byte_offset = 0;
-    uint8_t  reserved1[20];
-    uint32_t compute_pgm_rsrc3      = 0;
-    uint32_t compute_pgm_rsrc1      = 0;
-    uint32_t compute_pgm_rsrc2      = 0;
-    uint16_t kernel_code_properties = 0;
-    uint8_t  reserved2[6];
-};
-
-// AMD Compute Program Resource Register Three.
-enum amd_compute_gfx9_pgm_rsrc_three_t
-{
-    AMD_HSA_BITS_CREATE_ENUM_ENTRIES(AMD_COMPUTE_PGM_RSRC_THREE_ACCUM_OFFSET, 0, 5),
-    AMD_HSA_BITS_CREATE_ENUM_ENTRIES(AMD_COMPUTE_PGM_RSRC_THREE_TG_SPLIT, 16, 1)
-};
-
-enum amd_compute_gfx10_gfx11_pgm_rsrc_three_t
-{
-    AMD_HSA_BITS_CREATE_ENUM_ENTRIES(AMD_COMPUTE_PGM_RSRC_THREE_SHARED_VGPR_COUNT, 0, 4),
-    AMD_HSA_BITS_CREATE_ENUM_ENTRIES(AMD_COMPUTE_PGM_RSRC_THREE_INST_PREF_SIZE, 4, 6),
-    AMD_HSA_BITS_CREATE_ENUM_ENTRIES(AMD_COMPUTE_PGM_RSRC_THREE_TRAP_ON_START, 10, 1),
-    AMD_HSA_BITS_CREATE_ENUM_ENTRIES(AMD_COMPUTE_PGM_RSRC_THREE_TRAP_ON_END, 11, 1),
-    AMD_HSA_BITS_CREATE_ENUM_ENTRIES(AMD_COMPUTE_PGM_RSRC_THREE_IMAGE_OP, 31, 1)
-};
-
-// Kernel code properties.
-enum amd_kernel_code_property_t
-{
-    AMD_HSA_BITS_CREATE_ENUM_ENTRIES(AMD_KERNEL_CODE_PROPERTY_ENABLE_SGPR_PRIVATE_SEGMENT_BUFFER,
-                                     0,
-                                     1),
-    AMD_HSA_BITS_CREATE_ENUM_ENTRIES(AMD_KERNEL_CODE_PROPERTY_ENABLE_SGPR_DISPATCH_PTR, 1, 1),
-    AMD_HSA_BITS_CREATE_ENUM_ENTRIES(AMD_KERNEL_CODE_PROPERTY_ENABLE_SGPR_QUEUE_PTR, 2, 1),
-    AMD_HSA_BITS_CREATE_ENUM_ENTRIES(AMD_KERNEL_CODE_PROPERTY_ENABLE_SGPR_KERNARG_SEGMENT_PTR,
-                                     3,
-                                     1),
-    AMD_HSA_BITS_CREATE_ENUM_ENTRIES(AMD_KERNEL_CODE_PROPERTY_ENABLE_SGPR_DISPATCH_ID, 4, 1),
-    AMD_HSA_BITS_CREATE_ENUM_ENTRIES(AMD_KERNEL_CODE_PROPERTY_ENABLE_SGPR_FLAT_SCRATCH_INIT, 5, 1),
-    AMD_HSA_BITS_CREATE_ENUM_ENTRIES(AMD_KERNEL_CODE_PROPERTY_ENABLE_SGPR_PRIVATE_SEGMENT_SIZE,
-                                     6,
-                                     1),
-    AMD_HSA_BITS_CREATE_ENUM_ENTRIES(AMD_KERNEL_CODE_PROPERTY_RESERVED0, 7, 3),
-    AMD_HSA_BITS_CREATE_ENUM_ENTRIES(AMD_KERNEL_CODE_PROPERTY_ENABLE_WAVEFRONT_SIZE32,
-                                     10,
-                                     1),  // GFX10+
-    AMD_HSA_BITS_CREATE_ENUM_ENTRIES(AMD_KERNEL_CODE_PROPERTY_USES_DYNAMIC_STACK, 11, 1),
-    AMD_HSA_BITS_CREATE_ENUM_ENTRIES(AMD_KERNEL_CODE_PROPERTY_RESERVED1, 12, 4),
-};
-
-uint32_t
-arch_vgpr_count(std::string_view name, kernel_descriptor_t kernel_code)
-{
-    if(name == "gfx90a" || name.find("gfx94") == 0 || name.find("gfx95") == 0)
-        return (AMD_HSA_BITS_GET(kernel_code.compute_pgm_rsrc3,
-                                 AMD_COMPUTE_PGM_RSRC_THREE_ACCUM_OFFSET) +
-                1) *
-               4;
-
-    return (AMD_HSA_BITS_GET(kernel_code.compute_pgm_rsrc1,
-                             AMD_COMPUTE_PGM_RSRC_ONE_GRANULATED_WORKITEM_VGPR_COUNT) +
-            1) *
-           (AMD_HSA_BITS_GET(kernel_code.kernel_code_properties,
-                             AMD_KERNEL_CODE_PROPERTY_ENABLE_WAVEFRONT_SIZE32)
-                ? 8
-                : 4);
-}
-
-uint32_t
-accum_vgpr_count(std::string_view name, kernel_descriptor_t kernel_code)
-{
-    if(name == "gfx908")
-        return arch_vgpr_count(name, kernel_code);
-    else if(name == "gfx90a" || name.find("gfx94") == 0 || name.find("gfx95") == 0)
-        return ((AMD_HSA_BITS_GET(kernel_code.compute_pgm_rsrc1,
-                                  AMD_COMPUTE_PGM_RSRC_ONE_GRANULATED_WORKITEM_VGPR_COUNT) +
-                 1) *
-                8) -
-               arch_vgpr_count(name, kernel_code);
-
-    bool emplaced = false;
-    {
-        static auto warned = std::unordered_set<std::string>{};
-        static auto mtx    = std::mutex{};
-        auto        lk     = std::unique_lock<std::mutex>{mtx};
-        emplaced           = warned.emplace(name).second;
-    }
-
-    ROCP_INFO_IF(emplaced) << "Missing support for accum_vgpr_count for " << name;
-    return 0;
-}
-
-uint32_t
-sgpr_count(std::string_view name, kernel_descriptor_t kernel_code)
-{
-    // GFX10 and later always allocate 128 sgprs.
-    constexpr uint32_t gfx10_sgprs = 128;
-
-    auto begp = name.find_first_of("0123456789");
-    if(!name.empty() && begp != std::string_view::npos)
-    {
-        auto endp      = name.find_first_not_of("0123456789", begp);
-        auto lenp      = (endp - begp) + 1;
-        auto gfxip_str = name.substr(begp, lenp);
-        auto gfxip_n   = int32_t{0};
-        if(!gfxip_str.empty()) gfxip_n = std::stoi(std::string{gfxip_str});
-
-        if(gfxip_n >= 1000)
-        {
-            return gfx10_sgprs;
-        }
-        else
-        {
-            return (AMD_HSA_BITS_GET(kernel_code.compute_pgm_rsrc1,
-                                     AMD_COMPUTE_PGM_RSRC_ONE_GRANULATED_WAVEFRONT_SGPR_COUNT) /
-                        2 +
-                    1) *
-                   16;
-        }
-    }
-
-    bool emplaced = false;
-    {
-        static auto warned = std::unordered_set<std::string>{};
-        static auto mtx    = std::mutex{};
-        auto        lk     = std::unique_lock<std::mutex>{mtx};
-        emplaced           = warned.emplace(name).second;
-    }
-
-    ROCP_INFO_IF(emplaced) << "Missing support for sgpr_count for " << name;
-
-    return 0;
 }
 
 hsa_loader_table_t&
@@ -360,9 +225,7 @@ get_kernel_descriptor(uint64_t kernel_object)
 
     ROCP_WARNING << "hsa_ven_amd_loader_query_host_address(kernel_object=" << kernel_object
                  << ") returned " << status << ": " << get_status_string(status);
-
-    // NOLINTNEXTLINE(performance-no-int-to-ptr)
-    return reinterpret_cast<kernel_descriptor_t*>(kernel_object);
+    return nullptr;
 }
 
 auto&
@@ -623,14 +486,18 @@ executable_iterate_agent_symbols_load_callback(hsa_executable_t        executabl
     if(CHECK_NOTNULL(code_obj_v) && CHECK_NOTNULL(kernel_descript))
     {
         data.kernel_code_entry_byte_offset = kernel_descript->kernel_code_entry_byte_offset;
-        data.kernel_address.handle = data.kernel_object + data.kernel_code_entry_byte_offset;
+        if(auto address = kernel_address(data.kernel_object, data.kernel_code_entry_byte_offset))
+            data.kernel_address.handle = *address;
 
         if(const auto* rocp_agent = agent::get_agent(code_obj_v->rocp_data.rocp_agent);
            CHECK_NOTNULL(rocp_agent))
         {
-            data.arch_vgpr_count  = arch_vgpr_count(rocp_agent->name, *kernel_descript);
-            data.accum_vgpr_count = accum_vgpr_count(rocp_agent->name, *kernel_descript);
-            data.sgpr_count       = sgpr_count(rocp_agent->name, *kernel_descript);
+            if(auto descriptor = decode_kernel_descriptor(rocp_agent->name, *kernel_descript))
+            {
+                data.arch_vgpr_count  = descriptor->arch_vgpr_count;
+                data.accum_vgpr_count = descriptor->accum_vgpr_count;
+                data.sgpr_count       = descriptor->sgpr_count;
+            }
         }
     }
 

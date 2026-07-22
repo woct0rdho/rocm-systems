@@ -18,6 +18,7 @@ set(rocprofiler_lib_sources
     enum_string.cpp
     hsa.cpp
     late_start.cpp
+    kernel_descriptor.cpp
     naming.cpp
     queue_interposition.cpp
     timestamp.cpp

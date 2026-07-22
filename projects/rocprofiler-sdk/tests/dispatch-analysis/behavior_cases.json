@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "workload": {
     "dispatch_count": 6,
     "enqueue_sequence": [
@@ -17,7 +17,53 @@
       "Kernel_Id",
       "Correlation_Id",
       "Dispatch_Id"
-    ]
+    ],
+    "gfx1151_windows_resource_metadata": {
+      "dispatch_vector": {
+        "LDS_Block_Size": 0,
+        "Scratch_Size": 0,
+        "VGPR_Count": 8,
+        "Accum_VGPR_Count": 0,
+        "SGPR_Count": 128
+      },
+      "dispatch_lds_conflict": {
+        "LDS_Block_Size": 8192,
+        "Scratch_Size": 0,
+        "VGPR_Count": 8,
+        "Accum_VGPR_Count": 0,
+        "SGPR_Count": 128
+      },
+      "dispatch_resource": {
+        "LDS_Block_Size": 4096,
+        "Scratch_Size": 132,
+        "VGPR_Count": 24,
+        "Accum_VGPR_Count": 0,
+        "SGPR_Count": 128
+      }
+    },
+    "gfx1151_linux_resource_metadata": {
+      "dispatch_vector": {
+        "LDS_Block_Size": 0,
+        "Scratch_Size": 0,
+        "VGPR_Count": 8,
+        "Accum_VGPR_Count": 0,
+        "SGPR_Count": 128
+      },
+      "dispatch_lds_conflict": {
+        "LDS_Block_Size": 8192,
+        "Scratch_Size": 0,
+        "VGPR_Count": 8,
+        "Accum_VGPR_Count": 0,
+        "SGPR_Count": 128
+      },
+      "dispatch_resource": {
+        "LDS_Block_Size": 4096,
+        "Scratch_Size": 144,
+        "VGPR_Count": 24,
+        "Accum_VGPR_Count": 0,
+        "SGPR_Count": 128
+      }
+    }
   },
   "counter_group": ["L2CacheHit", "VALUInsts", "LDSBankConflict"],
   "cases": [

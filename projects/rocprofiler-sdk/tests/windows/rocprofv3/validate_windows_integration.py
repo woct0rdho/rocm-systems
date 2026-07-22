@@ -179,9 +179,33 @@ def test_windows_integration_case():
             assert int(row["Grid_Size_Y"]) == 1
             assert int(row["Grid_Size_Z"]) == 1
     elif case == "dispatch-analysis-contract":
-        assert data["contract_version"] == 2
+        assert data["contract_version"] == 3
         standalone = data["standalone"]
         composed = data["composed"]
+        enqueue_sequence = data["enqueue_sequence"]
+        resource_metadata = data["resource_metadata"]
+        resource_fields = (
+            "LDS_Block_Size",
+            "Scratch_Size",
+            "VGPR_Count",
+            "Accum_VGPR_Count",
+            "SGPR_Count",
+        )
+
+        def base_kernel_names(rows):
+            return [
+                next(
+                    name for name in set(enqueue_sequence) if name in row["Kernel_Name"]
+                )
+                for row in rows
+            ]
+
+        def validate_resource_rows(rows):
+            for row, name in zip(rows, base_kernel_names(rows)):
+                assert {
+                    field: int(row[field]) for field in resource_fields
+                } == resource_metadata[name]
+
         assert standalone["returncode"] == 0
         assert composed["returncode"] == 0
         for run in (standalone, composed):
@@ -190,25 +214,15 @@ def test_windows_integration_case():
             assert "dispatches=6" in run["stdout"]
             assert "streams=2" in run["stdout"]
 
-        # Standalone CLR activity now uses its explicit enqueue ordinal for the same
-        # formatted-name and per-name range semantics. Resource metadata remains Step 5.
+        # Standalone CLR activity uses its explicit enqueue ordinal for the same
+        # formatted-name, range, and authoritative resource-metadata semantics.
         standalone_rows = standalone["trace_rows"]
         assert standalone["trace_exists"]
         assert not standalone["stats_exists"]
         assert len(standalone_rows) == 1
         assert int(standalone_rows[0]["Dispatch_Id"]) == 3
         assert "dispatch_vector" in standalone_rows[0]["Kernel_Name"]
-        for row in standalone_rows:
-            assert all(
-                int(row[field]) == 0
-                for field in (
-                    "LDS_Block_Size",
-                    "Scratch_Size",
-                    "VGPR_Count",
-                    "Accum_VGPR_Count",
-                    "SGPR_Count",
-                )
-            )
+        validate_resource_rows(standalone_rows)
 
         expected_case_names = {
             "no-filter",
@@ -225,15 +239,6 @@ def test_windows_integration_case():
         }
         selection_cases = data["selection_cases"]
         assert {entry["name"] for entry in selection_cases} == expected_case_names
-        enqueue_sequence = data["enqueue_sequence"]
-
-        def base_kernel_names(rows):
-            return [
-                next(
-                    name for name in set(enqueue_sequence) if name in row["Kernel_Name"]
-                )
-                for row in rows
-            ]
 
         def recompute_stats(trace_rows):
             samples = {}
@@ -358,6 +363,7 @@ def test_windows_integration_case():
                 int(row["Dispatch_Id"]) for row in standalone_case_rows
             ] == expected_ids
             assert base_kernel_names(standalone_case_rows) == expected_names
+            validate_resource_rows(standalone_case_rows)
 
             composed_case_rows = composed_case["trace_rows"]
             composed_counter_rows = composed_case["counter_rows"]
@@ -371,6 +377,8 @@ def test_windows_integration_case():
                 int(row["Dispatch_Id"]) for row in composed_case_rows
             ] == expected_ids
             assert base_kernel_names(composed_case_rows) == expected_names
+            validate_resource_rows(composed_case_rows)
+            validate_resource_rows(composed_counter_rows)
             assert len(composed_counter_rows) == 3 * len(expected_ids)
             assert {int(row["Dispatch_Id"]) for row in composed_counter_rows} == set(
                 expected_ids
@@ -423,6 +431,8 @@ def test_windows_integration_case():
             int(row["End_Timestamp"]) > int(row["Start_Timestamp"])
             for row in counter_rows
         )
+        validate_resource_rows(trace_rows)
+        validate_resource_rows(counter_rows)
 
         counter_by_dispatch = {}
         for row in counter_rows:
@@ -464,6 +474,29 @@ def test_windows_integration_case():
                 trace["Queue_Id"]
             )
             assert record["dispatch_info"]["kernel_id"] == int(trace["Kernel_Id"])
+            assert record["dispatch_info"]["group_segment_size"] == int(
+                trace["LDS_Block_Size"]
+            )
+            assert record["dispatch_info"]["private_segment_size"] == int(
+                trace["Scratch_Size"]
+            )
+
+        json_symbols = composed["json_kernel_symbols"]
+        assert len(json_symbols) == len(resource_metadata)
+        for symbol in json_symbols:
+            name = next(
+                name
+                for name in resource_metadata
+                if name in symbol["formatted_kernel_name"]
+            )
+            expected = resource_metadata[name]
+            assert symbol["kernel_object"] > 0
+            assert symbol["kernel_address"]["handle"] > 0
+            assert symbol["group_segment_size"] == expected["LDS_Block_Size"]
+            assert symbol["private_segment_size"] == expected["Scratch_Size"]
+            assert symbol["arch_vgpr_count"] == expected["VGPR_Count"]
+            assert symbol["accum_vgpr_count"] == expected["Accum_VGPR_Count"]
+            assert symbol["sgpr_count"] == expected["SGPR_Count"]
     elif case == "hip-trace":
         assert data["returncode"] == 0
         require_workload(data["stdout"])

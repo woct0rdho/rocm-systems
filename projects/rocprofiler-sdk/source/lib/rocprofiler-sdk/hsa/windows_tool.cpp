@@ -23,15 +23,18 @@
 #include "lib/rocprofiler-sdk/hsa/windows_tool.hpp"
 
 #include "lib/rocprofiler-sdk/agent.hpp"
+#include "lib/rocprofiler-sdk/code_object/kernel_descriptor.hpp"
 #include "lib/rocprofiler-sdk/hsa/queue_controller.hpp"
 #include "lib/rocprofiler-sdk/hsa/windows_api.hpp"
 #include "lib/rocprofiler-sdk/registration.hpp"
 
 #include <Windows.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <mutex>
 #include <string>
@@ -100,6 +103,27 @@ decltype(CoreApiTable::hsa_executable_iterate_agent_symbols_fn)
 decltype(CoreApiTable::hsa_executable_symbol_get_info_fn) original_symbol_get_info = nullptr;
 HsaApiTable* registered_api_table = nullptr;
 std::once_flag queue_controller_once = {};
+std::mutex loader_table_mutex = {};
+hsa_ven_amd_loader_1_01_pfn_t loader_table = {};
+bool loader_table_initialized = false;
+
+bool
+initialize_loader_table()
+{
+    auto lock = std::lock_guard<std::mutex>{loader_table_mutex};
+    if(loader_table_initialized) return true;
+    if(!registered_api_table || !registered_api_table->core_ ||
+       !registered_api_table->core_->hsa_system_get_major_extension_table_fn)
+        return false;
+
+    loader_table = {};
+    const auto status =
+        registered_api_table->core_->hsa_system_get_major_extension_table_fn(
+            HSA_EXTENSION_AMD_LOADER, 1, sizeof(loader_table), &loader_table);
+    loader_table_initialized =
+        status == HSA_STATUS_SUCCESS && loader_table.hsa_ven_amd_loader_query_host_address;
+    return loader_table_initialized;
+}
 
 void
 initialize_queue_controller()
@@ -108,6 +132,7 @@ initialize_queue_controller()
         if(!registered_api_table || !registered_api_table->core_ ||
            !registered_api_table->amd_ext_)
             return;
+        initialize_loader_table();
         rocprofiler::agent::construct_agent_cache(registered_api_table);
         rocprofiler::hsa::queue_controller_init(registered_api_table);
     });
@@ -142,8 +167,15 @@ struct symbol_callback_data
 };
 
 void
-observe_kernel_symbol(hsa_executable_symbol_t symbol, uint64_t known_kernel_object = 0)
+observe_kernel_symbol(hsa_executable_symbol_t symbol,
+                      uint64_t                known_kernel_object = 0,
+                      hsa_agent_t             known_agent = {.handle = 0})
 {
+    using rocprofiler::code_object::decode_kernel_descriptor;
+    using rocprofiler::code_object::kernel_address;
+    using rocprofiler::code_object::kernel_descriptor_t;
+    using rocprofiler::hsa::windows::kernel_metadata;
+
     if(!original_symbol_get_info) return;
 
     auto kind = hsa_symbol_kind_t{};
@@ -152,26 +184,133 @@ observe_kernel_symbol(hsa_executable_symbol_t symbol, uint64_t known_kernel_obje
        kind != HSA_SYMBOL_KIND_KERNEL)
         return;
 
-    auto kernel_object = known_kernel_object;
-    if(kernel_object == 0 &&
+    auto metadata          = kernel_metadata{};
+    metadata.kernel_object = known_kernel_object;
+    if(metadata.kernel_object == 0 &&
        original_symbol_get_info(symbol,
                                 HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_OBJECT,
-                                &kernel_object) != HSA_STATUS_SUCCESS)
+                                &metadata.kernel_object) != HSA_STATUS_SUCCESS)
         return;
 
-    uint32_t name_length = 0;
-    if(original_symbol_get_info(symbol,
-                                HSA_EXECUTABLE_SYMBOL_INFO_NAME_LENGTH,
-                                &name_length) != HSA_STATUS_SUCCESS ||
-       name_length == 0 || name_length == std::numeric_limits<uint32_t>::max())
-        return;
+    auto record_error = [&](const char* message) {
+        if(metadata.error.empty()) metadata.error = message;
+    };
+    auto query = [&](hsa_executable_symbol_info_t attribute, void* value, const char* message) {
+        if(original_symbol_get_info(symbol, attribute, value) == HSA_STATUS_SUCCESS) return true;
+        record_error(message);
+        return false;
+    };
 
-    auto name = std::string(name_length + 1, '\0');
-    if(original_symbol_get_info(symbol, HSA_EXECUTABLE_SYMBOL_INFO_NAME, name.data()) !=
-       HSA_STATUS_SUCCESS)
-        return;
-    name.resize(name.find_first_of('\0'));
-    rocprofiler::hsa::windows::register_kernel_name(kernel_object, name);
+    auto name_length = uint32_t{0};
+    if(query(HSA_EXECUTABLE_SYMBOL_INFO_NAME_LENGTH,
+             &name_length,
+             "kernel symbol name length is unavailable") &&
+       name_length > 0 && name_length != std::numeric_limits<uint32_t>::max())
+    {
+        auto name = std::string(name_length + 1, '\0');
+        if(query(HSA_EXECUTABLE_SYMBOL_INFO_NAME,
+                 name.data(),
+                 "kernel symbol name is unavailable"))
+        {
+            name.resize(name.find_first_of('\0'));
+            metadata.name = std::move(name);
+        }
+    }
+    else
+    {
+        record_error("kernel symbol name is empty");
+    }
+
+    query(HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_KERNARG_SEGMENT_SIZE,
+          &metadata.kernarg_segment_size,
+          "kernel argument segment size is unavailable");
+    query(HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_KERNARG_SEGMENT_ALIGNMENT,
+          &metadata.kernarg_segment_alignment,
+          "kernel argument segment alignment is unavailable");
+    query(HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_GROUP_SEGMENT_SIZE,
+          &metadata.group_segment_size,
+          "kernel group segment size is unavailable");
+    query(HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_PRIVATE_SEGMENT_SIZE,
+          &metadata.private_segment_size,
+          "kernel private segment size is unavailable");
+
+    auto agent = known_agent;
+    if(agent.handle == 0)
+        query(HSA_EXECUTABLE_SYMBOL_INFO_AGENT,
+              &agent,
+              "kernel symbol agent is unavailable");
+    if(agent.handle != 0 && registered_api_table && registered_api_table->core_ &&
+       registered_api_table->core_->hsa_agent_get_info_fn)
+    {
+        auto architecture = std::array<char, 64>{};
+        if(registered_api_table->core_->hsa_agent_get_info_fn(
+               agent, HSA_AGENT_INFO_NAME, architecture.data()) == HSA_STATUS_SUCCESS)
+            metadata.architecture = architecture.data();
+        else
+            record_error("kernel architecture is unavailable");
+    }
+    else
+    {
+        record_error("kernel architecture is unavailable");
+    }
+
+    const void* descriptor_address = nullptr;
+    if(!initialize_loader_table())
+    {
+        record_error("AMD loader host-address translation is unavailable");
+    }
+    else if(loader_table.hsa_ven_amd_loader_query_host_address(
+                reinterpret_cast<const void*>(metadata.kernel_object),
+                &descriptor_address) != HSA_STATUS_SUCCESS ||
+            !descriptor_address)
+    {
+        record_error("kernel descriptor host-address translation failed");
+    }
+    else
+    {
+        auto descriptor = kernel_descriptor_t{};
+        std::memcpy(&descriptor, descriptor_address, sizeof(descriptor));
+        if(auto decoded = decode_kernel_descriptor(metadata.architecture, descriptor))
+        {
+            metadata.kernel_code_entry_offset = decoded->kernel_code_entry_byte_offset;
+            metadata.arch_vgpr_count          = decoded->arch_vgpr_count;
+            metadata.accum_vgpr_count         = decoded->accum_vgpr_count;
+            metadata.sgpr_count               = decoded->sgpr_count;
+            if(auto address = kernel_address(metadata.kernel_object,
+                                             metadata.kernel_code_entry_offset))
+                metadata.kernel_address = *address;
+            else
+                record_error("kernel entry address overflowed");
+        }
+        else
+        {
+            record_error("kernel descriptor register metadata is invalid");
+        }
+    }
+
+    metadata.valid = metadata.error.empty() && !metadata.name.empty() &&
+                     !metadata.architecture.empty() && metadata.kernel_object != 0 &&
+                     metadata.kernel_address != 0 && metadata.arch_vgpr_count != 0 &&
+                     metadata.sgpr_count != 0;
+    rocprofiler::hsa::windows::register_kernel_metadata(metadata);
+
+    char message[768] = {};
+    std::snprintf(message,
+                  sizeof(message),
+                  "event=kernel_metadata status=%s kernel_object=%llu name=%s "
+                  "architecture=%s group_segment_size=%u private_segment_size=%u "
+                  "arch_vgpr_count=%u accum_vgpr_count=%u sgpr_count=%u error=%s\n",
+                  metadata.valid ? "valid" : "invalid",
+                  static_cast<unsigned long long>(metadata.kernel_object),
+                  metadata.name.c_str(),
+                  metadata.architecture.c_str(),
+                  metadata.group_segment_size,
+                  metadata.private_segment_size,
+                  metadata.arch_vgpr_count,
+                  metadata.accum_vgpr_count,
+                  metadata.sgpr_count,
+                  metadata.error.c_str());
+    append_tool_log(message);
 }
 
 hsa_status_t
@@ -193,7 +332,7 @@ observe_symbol(hsa_executable_t        executable,
                hsa_executable_symbol_t symbol,
                void*                   data)
 {
-    observe_kernel_symbol(symbol);
+    observe_kernel_symbol(symbol, 0, agent);
 
     auto* callback_data = static_cast<symbol_callback_data*>(data);
     return (callback_data && callback_data->callback)
@@ -379,6 +518,16 @@ set_api_table(::HsaApiTable* api_table, uint64_t runtime_version, uint64_t faile
         has_table_member(api_table->core_,
                          offsetof(CoreApiTable, hsa_queue_destroy_fn),
                          &CoreApiTable::hsa_queue_destroy_fn);
+    const auto has_agent_get_info =
+        has_core && api_table->core_ &&
+        has_table_member(api_table->core_,
+                         offsetof(CoreApiTable, hsa_agent_get_info_fn),
+                         &CoreApiTable::hsa_agent_get_info_fn);
+    const auto has_major_extension_table =
+        has_core && api_table->core_ &&
+        has_table_member(api_table->core_,
+                         offsetof(CoreApiTable, hsa_system_get_major_extension_table_fn),
+                         &CoreApiTable::hsa_system_get_major_extension_table_fn);
     const auto has_iterate_agent_symbols =
         has_core && api_table->core_ &&
         has_table_member(api_table->core_,
@@ -402,9 +551,13 @@ set_api_table(::HsaApiTable* api_table, uint64_t runtime_version, uint64_t faile
     const auto usable =
         api_table && api_table->version.major_id == runtime_version && has_queue_create &&
         api_table->core_->hsa_queue_create_fn && has_queue_destroy &&
-        api_table->core_->hsa_queue_destroy_fn && has_intercept_create &&
-        api_table->amd_ext_->hsa_amd_queue_intercept_create_fn && has_intercept_register &&
-        api_table->amd_ext_->hsa_amd_queue_intercept_register_fn;
+        api_table->core_->hsa_queue_destroy_fn && has_agent_get_info &&
+        api_table->core_->hsa_agent_get_info_fn && has_major_extension_table &&
+        api_table->core_->hsa_system_get_major_extension_table_fn &&
+        has_iterate_agent_symbols && api_table->core_->hsa_executable_iterate_agent_symbols_fn &&
+        has_symbol_get_info && api_table->core_->hsa_executable_symbol_get_info_fn &&
+        has_intercept_create && api_table->amd_ext_->hsa_amd_queue_intercept_create_fn &&
+        has_intercept_register && api_table->amd_ext_->hsa_amd_queue_intercept_register_fn;
 
     const auto root_major = (api_table) ? api_table->version.major_id : 0;
     const auto root_minor = (api_table) ? api_table->version.minor_id : 0;

@@ -152,4 +152,14 @@ typedef struct AMD_QUEUE_ALIGN amd_queue_v2_s {
   scratch_last_used_index_xcc_t scratch_last_used_index[MAX_NUM_XCC];
 } amd_queue_v2_t;
 
+static inline void amd_hsa_queue_set_profiling(amd_queue_v2_t* queue, int enabled) {
+  AMD_HSA_BITS_SET(queue->queue_properties, AMD_QUEUE_PROPERTIES_ENABLE_PROFILING,
+                   enabled != 0);
+}
+
+static inline int amd_hsa_queue_profiling_enabled(const amd_queue_v2_t* queue) {
+  return AMD_HSA_BITS_GET(queue->queue_properties,
+                          AMD_QUEUE_PROPERTIES_ENABLE_PROFILING) != 0;
+}
+
 #endif // AMD_HSA_QUEUE_H

@@ -29,6 +29,7 @@ if(ROCPROFILER_BUILD_WINDOWS_MINIMAL)
         hsa/dlsym_windows.cpp
         hsa/windows_tool.cpp
         internal_threading.cpp
+        kernel_dispatch/profiling_time.cpp
         registration_windows.cpp
         roctx/windows_registration.cpp
         rocprofiler.cpp

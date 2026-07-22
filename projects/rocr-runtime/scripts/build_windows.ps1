@@ -113,7 +113,7 @@ Invoke-NativeCommand -FilePath "cmake.exe" -ArgumentList @(
     "--build", $buildDirectory,
     "--config", $BuildType,
     "--target", "hsa-runtime64", "hsakmt-windows-packet-publication-test", `
-        "hsakmt-windows-profiling-adapter-test",
+        "hsakmt-windows-profiling-adapter-test", "rocr-windows-queue-profiling-test",
     "--parallel"
 )
 
@@ -122,7 +122,7 @@ New-Item -ItemType Directory -Force -Path $validationDirectory | Out-Null
 Invoke-NativeCommand -FilePath "ctest.exe" -ArgumentList @(
     "--test-dir", $buildDirectory,
     "-C", $BuildType,
-    "-R", "^(hsakmt\.windows\.(packet-publication|profiling-adapter)|rocr\.windows\.runtime-binary)$",
+    "-R", "^(hsakmt\.windows\.(packet-publication|profiling-adapter)|rocr\.windows\.(runtime-binary|queue-profiling))$",
     "-V",
     "--output-on-failure",
     "--no-tests=error",

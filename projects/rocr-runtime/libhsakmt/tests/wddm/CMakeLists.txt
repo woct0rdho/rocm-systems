@@ -57,7 +57,19 @@ set_tests_properties(hsakmt.windows.profiling-adapter PROPERTIES
   LABELS "windows;unit;cpu-only;wddm;pmc"
   TIMEOUT 30
   PASS_REGULAR_EXPRESSION
-    "profiling_adapter checks=46 failures=0 capability_version=1 max_dwords=256")
+    "profiling_adapter checks=50 failures=0 capability_version=1 max_dwords=256")
+
+add_executable(rocr-windows-queue-profiling-test queue_profiling.cpp)
+target_compile_features(rocr-windows-queue-profiling-test PRIVATE cxx_std_20)
+target_include_directories(rocr-windows-queue-profiling-test PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/../../../runtime)
+add_test(NAME rocr.windows.queue-profiling
+  COMMAND rocr-windows-queue-profiling-test)
+set_tests_properties(rocr.windows.queue-profiling PROPERTIES
+  LABELS "windows;unit;cpu-only;profiling;wddm"
+  TIMEOUT 30
+  PASS_REGULAR_EXPRESSION
+    "queue_profiling=passed initially_disabled=1 enabled=1 disabled=1")
 
 if(TARGET hsa-runtime64)
   set(_rocr_windows_runtime_validation

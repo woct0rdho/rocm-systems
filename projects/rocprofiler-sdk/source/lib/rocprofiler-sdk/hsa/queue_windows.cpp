@@ -14,6 +14,7 @@
 #include "lib/rocprofiler-sdk/hsa/queue_controller.hpp"
 #include "lib/rocprofiler-sdk/hsa/signal_pool.hpp"
 #include "lib/rocprofiler-sdk/hsa/windows_tool.hpp"
+#include "lib/rocprofiler-sdk/kernel_dispatch/profiling_time.hpp"
 #include "lib/rocprofiler-sdk/registration.hpp"
 #include "lib/rocprofiler-sdk/tracing/tracing.hpp"
 
@@ -22,6 +23,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <stdexcept>
 #include <unordered_map>
 
 namespace rocprofiler
@@ -47,6 +49,17 @@ get_kernel_metadata()
 {
     static auto*& value = common::static_object<kernel_metadata_t>::construct();
     return *value;
+}
+
+void
+enable_queue_profiling(const AmdExtTable& table, hsa_queue_t* queue)
+{
+    if(!queue || !table.hsa_amd_profiling_set_profiler_enabled_fn)
+        throw std::runtime_error("HSA queue profiling is unavailable");
+    const auto status = table.hsa_amd_profiling_set_profiler_enabled_fn(queue, true);
+    if(status != HSA_STATUS_SUCCESS)
+        throw std::runtime_error(fmt::format("HSA queue profiling failed with status {}",
+                                             static_cast<int>(status)));
 }
 
 rocprofiler_kernel_id_t
@@ -77,21 +90,11 @@ completion_handler(hsa_signal_value_t, void* data)
     auto& session = **session_ptr;
     for(auto& packet : session.packet_data)
     {
-        auto dispatch_time = kernel_dispatch::profiling_time{};
-        auto* ext          = get_amd_ext_table();
-        if(ext && ext->hsa_amd_profiling_get_dispatch_time_fn)
-        {
-            auto raw_time = hsa_amd_profiling_dispatch_time_t{};
-            dispatch_time.status = ext->hsa_amd_profiling_get_dispatch_time_fn(
-                session.queue.get_agent().get_hsa_agent(),
-                packet.kernel_packet.kernel_dispatch.completion_signal,
-                &raw_time);
-            if(dispatch_time.status == HSA_STATUS_SUCCESS)
-            {
-                dispatch_time.start = raw_time.start;
-                dispatch_time.end   = raw_time.end;
-            }
-        }
+        const auto dispatch_time = kernel_dispatch::get_dispatch_time(
+            session.queue.get_agent().get_hsa_agent(),
+            packet.kernel_packet.kernel_dispatch.completion_signal,
+            packet.callback_record.dispatch_info.kernel_id,
+            session.enqueue_ts);
 
         session.queue.signal_callback([&](const auto& callbacks) {
             for(const auto& [_, callback] : callbacks)
@@ -397,8 +400,7 @@ Queue::Queue(const AgentCache& agent,
                                                               &_intercept_queue);
     if(status != HSA_STATUS_SUCCESS) throw std::runtime_error("HSA intercept queue creation failed");
 
-    if(_ext_api.hsa_amd_profiling_set_profiler_enabled_fn)
-        _ext_api.hsa_amd_profiling_set_profiler_enabled_fn(_intercept_queue, true);
+    enable_queue_profiling(_ext_api, _intercept_queue);
 
     status = _ext_api.hsa_amd_queue_intercept_register_fn(
         _intercept_queue, write_interceptor, this);
@@ -423,6 +425,7 @@ Queue::Queue(const AgentCache& agent,
 , _agent(agent)
 , _intercept_queue(queue)
 {
+    enable_queue_profiling(_ext_api, _intercept_queue);
     create_signal(0, &ready_signal, false);
     create_signal(0, &block_signal, false);
     create_signal(0, &_active_kernels, false);

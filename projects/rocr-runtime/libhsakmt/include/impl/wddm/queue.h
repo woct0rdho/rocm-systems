@@ -240,7 +240,7 @@ public:
 
 private:
   bool EnableProfiling() {
-    return AMD_HSA_BITS_GET(amd_queue_rocr_->queue_properties, AMD_QUEUE_PROPERTIES_ENABLE_PROFILING);
+    return amd_hsa_queue_profiling_enabled(amd_queue_rocr_) != 0;
   }
   void HandleError(hsa_status_t status);
   bool UpdateScratch(uint32_t private_segment_size, bool wave32);

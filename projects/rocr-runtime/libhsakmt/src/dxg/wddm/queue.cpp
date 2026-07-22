@@ -732,9 +732,11 @@ hsa_status_t ComputeQueue::KernelDispatchAqlToPm4(char* cpu, hsa_kernel_dispatch
     return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
 
   amd_signal_t* signal = (amd_signal_t*)packet->completion_signal.handle;
+  const auto timestamp_targets = profiling::SelectDispatchTimestampTargets(
+      EnableProfiling(), signal ? &signal->start_ts : nullptr, signal ? &signal->end_ts : nullptr);
 
-  // Record start timestamp when enabling profiling
-  if (signal && EnableProfiling()) i += cmd_util.BuildCopyData(&signal->start_ts, cpu + i);
+  // Record start timestamp when enabling profiling.
+  if (timestamp_targets.start) i += cmd_util.BuildCopyData(timestamp_targets.start, cpu + i);
 
   // Build a barrier packet if it is requested
   const bool is_barrier_packet = (packet->header >> HSA_PACKET_HEADER_BARRIER) & 0x1;
@@ -779,8 +781,8 @@ hsa_status_t ComputeQueue::KernelDispatchAqlToPm4(char* cpu, hsa_kernel_dispatch
     // wait cs done
     i += cmd_util.BuildBarrier(cpu + i);
 
-    // Record end timestamp when enabling profiling
-    if (EnableProfiling()) i += cmd_util.BuildCopyData(&signal->end_ts, cpu + i);
+    // Record end timestamp when enabling profiling.
+    if (timestamp_targets.end) i += cmd_util.BuildCopyData(timestamp_targets.end, cpu + i);
 
     // flush cache
     i += cmd_util.BuildAcquireMem(major, cpu + i);
@@ -992,15 +994,17 @@ hsa_status_t ComputeQueue::BarrierGenericAqlToPm4(char* cpu, hsa_barrier_and_pac
     uint64_t* signal_addr = (uint64_t*)&signal->value;
     pr_debug("signal value=%" PRIx64 "\n", signal->value);
 
-    // Record start timestamp when enabling profiling
-    if (EnableProfiling()) i += cmd_util.BuildCopyData(&signal->start_ts, cpu + i);
+    const auto timestamp_targets = profiling::SelectDispatchTimestampTargets(
+        EnableProfiling(), &signal->start_ts, &signal->end_ts);
+    // Record start timestamp when enabling profiling.
+    if (timestamp_targets.start) i += cmd_util.BuildCopyData(timestamp_targets.start, cpu + i);
 
     if (needs_barrier) i += cmd_util.BuildBarrier(cpu + i);
 
     needs_barrier = false;
 
-    // Record end timestamp when enabling profiling
-    if (EnableProfiling()) i += cmd_util.BuildCopyData(&signal->end_ts, cpu + i);
+    // Record end timestamp when enabling profiling.
+    if (timestamp_targets.end) i += cmd_util.BuildCopyData(timestamp_targets.end, cpu + i);
 
     // flush cache
     i += cmd_util.BuildAcquireMem(major, cpu + i);
@@ -1167,9 +1171,11 @@ hsa_status_t ComputeQueue::VendorSpecificAqlToPm4(char* cpu,
         reinterpret_cast<uint64_t*>(const_cast<int64_t*>(&signal->value));
     pr_debug("signal value=%" PRIx64 "\n", signal->value);
 
-    if (EnableProfiling()) i += cmd_util.BuildCopyData(&signal->start_ts, cpu + i);
+    const auto timestamp_targets = profiling::SelectDispatchTimestampTargets(
+        EnableProfiling(), &signal->start_ts, &signal->end_ts);
+    if (timestamp_targets.start) i += cmd_util.BuildCopyData(timestamp_targets.start, cpu + i);
     i += cmd_util.BuildBarrier(cpu + i);
-    if (EnableProfiling()) i += cmd_util.BuildCopyData(&signal->end_ts, cpu + i);
+    if (timestamp_targets.end) i += cmd_util.BuildCopyData(timestamp_targets.end, cpu + i);
     i += cmd_util.BuildAcquireMem(major, cpu + i);
 
     if (platform_atomic_support_)

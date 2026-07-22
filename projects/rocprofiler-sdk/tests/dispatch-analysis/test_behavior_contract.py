@@ -114,9 +114,9 @@ def test_iteration_cases_are_per_formatted_kernel_enqueue_order():
     assert cases["truncated-vector"]["name_mode"] == "truncated"
 
 
-def test_linux_oracle_freezes_schema_shape_and_current_filter_scope():
+def test_linux_oracle_freezes_schema_shape_and_shared_dispatch_selection():
     oracle = json.loads(LINUX_ORACLE_PATH.read_text(encoding="utf-8"))
-    assert oracle["version"] == 1
+    assert oracle["version"] == 2
     assert oracle["architecture"] == "gfx1151"
     assert oracle["workload_dispatches"] == 6
     assert oracle["csv"]["kernel_trace"]["rows"] == 6
@@ -129,5 +129,14 @@ def test_linux_oracle_freezes_schema_shape_and_current_filter_scope():
         "gfx1151_linux_resource_metadata"
     ]
     selection = oracle["selection_oracle"]
-    assert selection["selected_counter_dispatch_ids"] == [3]
-    assert selection["kernel_trace_dispatch_ids"] == list(range(1, 7))
+    expected_ids = selection["selected_dispatch_ids"]
+    assert expected_ids == [3]
+    for key in (
+        "counter_dispatch_ids",
+        "kernel_trace_dispatch_ids",
+        "json_counter_dispatch_ids",
+        "json_kernel_dispatch_ids",
+        "rocpd_dispatch_ids",
+    ):
+        assert selection[key] == expected_ids
+    assert selection["statistics_calls"] == len(expected_ids)

@@ -39,6 +39,7 @@ else()
         helper.hpp
         kernel_filter_range.hpp
         kernel_iteration_filter.hpp
+        kernel_selector.hpp
         stream_stack.hpp)
 
     set(TOOL_SOURCES att_no_intercept.cpp config.cpp graph_stack.cpp kernel_filter_range.cpp

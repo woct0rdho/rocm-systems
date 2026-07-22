@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "architecture": "gfx1151",
   "workload_dispatches": 6,
   "csv": {
@@ -116,8 +116,13 @@
   },
   "selection_oracle": {
     "case": "vector-iteration-two",
-    "selected_counter_dispatch_ids": [3],
-    "kernel_trace_dispatch_ids": [1, 2, 3, 4, 5, 6],
-    "note": "The current Linux tool applies this selector to counter collection but not to the independent kernel trace/statistics stream. The Windows composed contract intentionally applies one cached selection to both artifacts."
+    "selected_dispatch_ids": [3],
+    "counter_dispatch_ids": [3],
+    "kernel_trace_dispatch_ids": [3],
+    "json_counter_dispatch_ids": [3],
+    "json_kernel_dispatch_ids": [3],
+    "rocpd_dispatch_ids": [3],
+    "statistics_calls": 1,
+    "note": "One enqueue-time dispatch decision governs PMC, kernel trace, statistics, JSON, and ROCpd records."
   }
 }

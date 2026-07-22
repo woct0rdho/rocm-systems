@@ -28,41 +28,178 @@ import math
 import os
 from pathlib import Path
 import platform
+import re
 import sqlite3
 import subprocess
 import uuid
 
 
-SCHEMA_VERSION = "3.0.3"
-SCHEMA_FILES = (
-    "rocpd_tables.sql",
-    "rocpd_indexes.sql",
-    "rocpd_views.sql",
-    "data_views.sql",
-    "summary_views.sql",
-    "rocpd_metadata.sql",
+SCHEMA_MANIFEST = "latest-schema.json"
+SCHEMA_KEYS = (
+    "rocpd_metadata",
+    "rocpd_tables",
+    "rocpd_views",
+    "rocpd_indexes",
+    "rocpd_data_views",
+    "rocpd_summary_views",
 )
+SCHEMA_EXECUTION_ORDER = (
+    "rocpd_tables",
+    "rocpd_indexes",
+    "rocpd_views",
+    "rocpd_data_views",
+    "rocpd_summary_views",
+    "rocpd_metadata",
+)
+_VERSION_PATTERN = re.compile(r"^([0-9]+)\.([0-9]+)\.([0-9]+)$")
+_VERSION_LINE_PATTERN = re.compile(
+    r'^    - version: "([0-9]+\.[0-9]+\.[0-9]+)"$'
+)
+_SCHEMA_LINE_PATTERN = re.compile(r"^      ([a-z_]+): +([^ ]+)$")
 
 
 class RocpdConversionError(RuntimeError):
     pass
 
 
-def schema_directory(configured=None):
-    candidates = []
+def _version_parts(value, field):
+    match = _VERSION_PATTERN.fullmatch(value) if isinstance(value, str) else None
+    if match is None:
+        raise RocpdConversionError(f"invalid {field}: {value!r}")
+    parts = tuple(int(item) for item in match.groups())
+    if parts[1] > 99 or parts[2] > 99:
+        raise RocpdConversionError(
+            f"{field} components cannot be represented as a SQLite user_version: {value}"
+        )
+    if value != ".".join(str(item) for item in parts):
+        raise RocpdConversionError(f"non-canonical {field}: {value}")
+    return parts
+
+
+def _versions_configuration(path):
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise RocpdConversionError(f"could not read {path}: {error}") from error
+    entries = {}
+    current = None
+    for line in lines:
+        version_match = _VERSION_LINE_PATTERN.fullmatch(line)
+        if version_match:
+            current = version_match.group(1)
+            if current in entries:
+                raise RocpdConversionError(f"duplicate ROCpd schema version {current}")
+            entries[current] = {}
+            continue
+        schema_match = _SCHEMA_LINE_PATTERN.fullmatch(line)
+        if current is not None and schema_match and schema_match.group(1) in SCHEMA_KEYS:
+            key, value = schema_match.groups()
+            if key in entries[current]:
+                raise RocpdConversionError(
+                    f"duplicate {key} asset for ROCpd schema {current}"
+                )
+            entries[current][key] = value
+    if not entries:
+        raise RocpdConversionError(f"no ROCpd schema versions are declared in {path}")
+    latest = max(entries, key=lambda value: _version_parts(value, "schema version"))
+    return latest, entries[latest]
+
+
+def _manifest_integer(manifest, field):
+    value = manifest.get(field)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RocpdConversionError(f"invalid {field} in {SCHEMA_MANIFEST}: {value!r}")
+    return value
+
+
+def _load_schema_configuration(directory):
+    directory = Path(directory).resolve()
+    manifest_path = directory / SCHEMA_MANIFEST
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise RocpdConversionError(f"could not read {manifest_path}: {error}") from error
+    if not isinstance(manifest, dict) or manifest.get("format") != 1:
+        raise RocpdConversionError(f"invalid ROCpd schema manifest format in {manifest_path}")
+
+    version = manifest.get("version")
+    parts = _version_parts(version, "schema manifest version")
+    manifest_parts = tuple(
+        _manifest_integer(manifest, field) for field in ("major", "minor", "patch")
+    )
+    if manifest_parts != parts:
+        raise RocpdConversionError(
+            f"inconsistent version components in {manifest_path}: {manifest_parts} != {parts}"
+        )
+    user_version = _manifest_integer(manifest, "user_version")
+    expected_user_version = parts[0] * 10000 + parts[1] * 100 + parts[2]
+    if user_version != expected_user_version:
+        raise RocpdConversionError(
+            f"inconsistent user_version in {manifest_path}: "
+            f"{user_version} != {expected_user_version}"
+        )
+
+    schema_files = manifest.get("schema_files")
+    if not isinstance(schema_files, dict) or set(schema_files) != set(SCHEMA_KEYS):
+        raise RocpdConversionError(
+            f"incomplete schema_files mapping in {manifest_path}"
+        )
+    latest_version, latest_files = _versions_configuration(directory / "versions.yml")
+    if version != latest_version or schema_files != latest_files:
+        raise RocpdConversionError(
+            f"schema manifest does not match the latest versions.yml entry in {directory}"
+        )
+    if len(set(schema_files.values())) != len(schema_files):
+        raise RocpdConversionError(f"schema assets are not unique in {manifest_path}")
+
+    resolved_files = {}
+    for key, name in schema_files.items():
+        if not isinstance(name, str) or not name:
+            raise RocpdConversionError(f"invalid {key} asset in {manifest_path}: {name!r}")
+        asset = (directory / name).resolve()
+        try:
+            asset.relative_to(directory)
+        except ValueError as error:
+            raise RocpdConversionError(
+                f"schema asset escapes its schema directory: {name}"
+            ) from error
+        if not asset.is_file():
+            raise RocpdConversionError(f"schema asset does not exist: {asset}")
+        resolved_files[key] = asset
+
+    return {
+        "directory": directory,
+        "version": version,
+        "version_parts": parts,
+        "user_version": user_version,
+        "files": tuple(resolved_files[key] for key in SCHEMA_EXECUTION_ORDER),
+    }
+
+
+def schema_configuration(configured=None):
     configured = configured or os.environ.get("ROCPD_SCHEMA_PATH")
-    if configured:
-        candidates.append(Path(configured))
-    candidates.append(
-        Path(__file__).resolve().parent.parent / "share" / "rocprofiler-sdk-rocpd"
+    candidates = (
+        [Path(configured)]
+        if configured
+        else [
+            Path(__file__).resolve().parent.parent
+            / "share"
+            / "rocprofiler-sdk-rocpd"
+        ]
     )
+    errors = []
     for candidate in candidates:
-        if all((candidate / name).is_file() for name in SCHEMA_FILES):
-            return candidate.resolve()
-    searched = ", ".join(str(path) for path in candidates)
+        try:
+            return _load_schema_configuration(candidate)
+        except RocpdConversionError as error:
+            errors.append(str(error))
     raise RocpdConversionError(
-        f"could not locate ROCpd 3.0.3 SQL schemas in: {searched}"
+        "could not locate a complete ROCpd schema configuration: " + "; ".join(errors)
     )
+
+
+def schema_directory(configured=None):
+    return schema_configuration(configured)["directory"]
 
 
 def _integer(value, field):
@@ -88,15 +225,16 @@ def _json(value):
     return json.dumps(value, separators=(",", ":"), sort_keys=True)
 
 
-def _render_schema(path, suffix, guid):
+def _render_schema(path, suffix, guid, schema):
     contents = path.read_text(encoding="utf-8")
+    major, minor, patch = schema["version_parts"]
     replacements = {
         "{{uuid}}": suffix,
         "{{guid}}": guid,
-        "{{schema_version}}": SCHEMA_VERSION,
-        "{{schema_version_major}}": "3",
-        "{{schema_version_minor}}": "0",
-        "{{schema_version_patch}}": "3",
+        "{{schema_version}}": schema["version"],
+        "{{schema_version_major}}": str(major),
+        "{{schema_version_minor}}": str(minor),
+        "{{schema_version_patch}}": str(patch),
     }
     for key, value in replacements.items():
         contents = contents.replace(key, value)
@@ -608,7 +746,7 @@ def convert_json_to_rocpd(source, output, command=(), configured_schema=None):
     if output.exists():
         raise RocpdConversionError(f"output already exists: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
-    schema = schema_directory(configured_schema)
+    schema = schema_configuration(configured_schema)
     tool = _load_document(source)
     guid = str(uuid.uuid4())
     suffix = f"_windows_{guid.replace('-', '_')}"
@@ -625,13 +763,27 @@ def convert_json_to_rocpd(source, output, command=(), configured_schema=None):
             try:
                 connection.execute("PRAGMA journal_mode=DELETE")
                 connection.execute("PRAGMA foreign_keys=ON")
-                connection.execute("PRAGMA user_version=30003")
-                for name in SCHEMA_FILES:
+                connection.execute(f"PRAGMA user_version={schema['user_version']}")
+                for path in schema["files"]:
                     connection.executescript(
-                        _render_schema(schema / name, suffix, guid)
+                        _render_schema(path, suffix, guid, schema)
                     )
                 with connection:
                     counts = _insert_document(connection, suffix, tool, command)
+                actual_version = connection.execute(
+                    "SELECT value FROM rocpd_metadata WHERE tag = 'schema_version'"
+                ).fetchone()
+                if actual_version != (schema["version"],):
+                    raise RocpdConversionError(
+                        "generated schema metadata does not match its manifest: "
+                        f"{actual_version!r} != {schema['version']!r}"
+                    )
+                actual_user_version = connection.execute("PRAGMA user_version").fetchone()
+                if actual_user_version != (schema["user_version"],):
+                    raise RocpdConversionError(
+                        "generated SQLite user_version does not match its manifest: "
+                        f"{actual_user_version!r} != {schema['user_version']!r}"
+                    )
                 foreign_key_errors = connection.execute(
                     "PRAGMA foreign_key_check"
                 ).fetchall()

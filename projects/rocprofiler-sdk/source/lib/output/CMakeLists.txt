@@ -27,6 +27,7 @@ set(TOOL_OUTPUT_HEADERS
     output_config.hpp
     output_key.hpp
     output_stream.hpp
+    resource_info.hpp
     statistics.hpp
     stream_info.hpp
     timestamps.hpp

@@ -35,10 +35,15 @@ import tempfile
 import time
 import uuid
 
-from _rocprofv3_rocpd import RocpdConversionError, convert_json_to_rocpd
+from _rocprofv3_rocpd import (
+    RocpdConversionError,
+    convert_json_to_rocpd,
+    schema_configuration,
+)
 from _rocprofv3_windows_job import SuspendedWindowsJob, WindowsJobError
 
 
+rocpd_schema_configuration = schema_configuration
 fatal_error = None
 
 

@@ -58,6 +58,12 @@ def workload():
     return Path(os.environ["ROCPROFV3_TEST_WORKLOAD"]).resolve()
 
 
+def expected_rocpd_schema():
+    script = Path(os.environ["ROCPROFV3_TEST_BUILT_SCRIPT"]).resolve()
+    manifest = script.parent.parent / "share/rocprofiler-sdk-rocpd/latest-schema.json"
+    return json.loads(manifest.read_text(encoding="utf-8"))
+
+
 def assert_kernel_stats(kernel_rows, stats_rows):
     samples = {}
     for row in kernel_rows:
@@ -307,12 +313,16 @@ def test_rocpd_database_uses_authoritative_dispatch_and_counter_records(tmp_path
     assert database.is_file()
     assert not (tmp_path / "dispatch-database_results.json").exists()
     assert not (tmp_path / "dispatch-database_counter_collection.csv").exists()
+    schema = expected_rocpd_schema()
     with sqlite3.connect(database) as connection:
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
         assert connection.execute(
             "SELECT value FROM rocpd_metadata WHERE tag = 'schema_version'"
-        ).fetchone() == ("3.0.3",)
+        ).fetchone() == (schema["version"],)
+        assert connection.execute("PRAGMA user_version").fetchone() == (
+            schema["user_version"],
+        )
         kernels = connection.execute(
             "SELECT dispatch_id, name, start, end, duration, lds_size, scratch_size, "
             "vgpr_count, accum_vgpr_count, sgpr_count FROM kernels ORDER BY dispatch_id"

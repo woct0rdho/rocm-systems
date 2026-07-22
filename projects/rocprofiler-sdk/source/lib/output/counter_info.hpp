@@ -38,8 +38,6 @@ namespace rocprofiler
 {
 namespace tool
 {
-constexpr uint32_t lds_block_size = 128 * 4;
-
 using counter_dimension_id_vec_t   = std::vector<rocprofiler_counter_dimension_id_t>;
 using counter_dimension_info_vec_t = std::vector<rocprofiler_counter_record_dimension_info_t>;
 

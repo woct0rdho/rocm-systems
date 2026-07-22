@@ -637,7 +637,8 @@ def test_windows_integration_case():
         require_workload(data["stdout"])
         require_original_target(data)
         assert "Windows trace: hip_records=18" in data["stdout"]
-        assert not data["graph_output_exists"]
+        assert data["graph_output_exists"]
+        assert data["graph_rows"] == []
         rows = data["rows"]
         assert rows
         functions = [row["Function"] for row in rows]
@@ -669,20 +670,9 @@ def test_windows_integration_case():
             "graph_records=2",
         ):
             assert marker in data["stdout"]
+        assert not data["api_output_exists"]
+        assert data["rows"] == []
         assert data["graph_output_exists"]
-        functions = [row["Function"] for row in data["rows"]]
-        for function in (
-            "hipGraphCreate",
-            "hipGraphAddKernelNode",
-            "hipGraphInstantiate",
-            "hipGraphExecDestroy",
-            "hipGraphDestroy",
-        ):
-            assert functions.count(function) == 1
-        assert functions.count("hipGraphLaunch") == 2
-        launch_rows = [
-            row for row in data["rows"] if row["Function"] == "hipGraphLaunch"
-        ]
         graph_rows = data["graph_rows"]
         assert len(graph_rows) == 2
         assert {row["Kind"] for row in graph_rows} == {"HIP_GRAPH_LAUNCH"}
@@ -690,9 +680,9 @@ def test_windows_integration_case():
         assert len({row["Graph_Exec_Id"] for row in graph_rows}) == 1
         assert graph_rows[0]["Graph_Exec_Id"] not in ("", "0x0")
         assert {row["Status"] for row in graph_rows} == {"0"}
-        assert {row["Correlation_Id"] for row in graph_rows} == {
-            row["Correlation_Id"] for row in launch_rows
-        }
+        correlations = [int(row["Correlation_Id"]) for row in graph_rows]
+        assert len(correlations) == len(set(correlations))
+        assert all(value > 0 for value in correlations)
     elif case == "hip-marker":
         assert data["returncode"] == 0
         require_original_target(data)
@@ -708,6 +698,8 @@ def test_windows_integration_case():
             "marker_records=4",
         ):
             assert marker in data["stdout"]
+        assert data["graph_output_exists"]
+        assert data["graph_rows"] == []
         hip_rows = data["rows"]
         marker_api_rows = data["marker_api_rows"]
         marker_rows = data["marker_rows"]

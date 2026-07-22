@@ -26,14 +26,8 @@ import os
 import sys
 import re
 import argparse
-import csv
-import hashlib
-import json
-import shutil
 import textwrap
 import subprocess
-import time
-import uuid
 from pathlib import Path
 
 if os.name == "nt":
@@ -1542,18 +1536,130 @@ def int_auto(num_str):
         )
 
 
+EFFECTIVE_TRACE_OPTIONS = (
+    "runtime_trace",
+    "sys_trace",
+    "hip_trace",
+    "hip_runtime_trace",
+    "hip_compiler_trace",
+    "hip_graph_trace",
+    "marker_trace",
+    "kernel_trace",
+    "memory_copy_trace",
+    "memory_allocation_trace",
+    "kfd_trace",
+    "kfd_page_migration_trace",
+    "kfd_page_mapping_trace",
+    "kfd_queue_trace",
+    "kfd_dropped_events_trace",
+    "scratch_memory_trace",
+    "hsa_trace",
+    "hsa_core_trace",
+    "hsa_amd_trace",
+    "hsa_image_trace",
+    "hsa_finalizer_trace",
+    "rccl_trace",
+    "ompt_trace",
+    "rocdecode_trace",
+    "rocjpeg_trace",
+    "rocshmem_trace",
+    "hipfile_trace",
+)
+
+
+def resolve_effective_trace_request(args):
+    explicit = frozenset(
+        name
+        for name in EFFECTIVE_TRACE_OPTIONS
+        if getattr(args, name, None) is not None
+    )
+
+    def set_if_unspecified(name, value=True):
+        if getattr(args, name, None) is None:
+            setattr(args, name, value)
+
+    if args.kokkos_trace:
+        set_if_unspecified("marker_trace")
+        set_if_unspecified("kernel_rename")
+
+    if args.sys_trace:
+        for name in (
+            "hip_trace",
+            "hsa_trace",
+            "marker_trace",
+            "kernel_trace",
+            "kfd_trace",
+            "memory_copy_trace",
+            "memory_allocation_trace",
+            "scratch_memory_trace",
+            "rccl_trace",
+            "ompt_trace",
+            "rocdecode_trace",
+            "rocjpeg_trace",
+            "rocshmem_trace",
+            "hipfile_trace",
+        ):
+            set_if_unspecified(name)
+
+    if args.runtime_trace:
+        for name in (
+            "hip_runtime_trace",
+            "marker_trace",
+            "kernel_trace",
+            "kfd_trace",
+            "memory_copy_trace",
+            "memory_allocation_trace",
+            "scratch_memory_trace",
+            "rccl_trace",
+            "ompt_trace",
+            "rocdecode_trace",
+            "rocjpeg_trace",
+            "rocshmem_trace",
+            "hipfile_trace",
+        ):
+            set_if_unspecified(name)
+
+    if args.hip_trace:
+        set_if_unspecified("hip_compiler_trace")
+        set_if_unspecified("hip_runtime_trace")
+    if args.hip_runtime_trace:
+        set_if_unspecified("hip_graph_trace")
+    if args.hsa_trace:
+        for name in ("hsa_core_trace", "hsa_amd_trace", "hsa_image_trace", "hsa_finalizer_trace"):
+            set_if_unspecified(name)
+    if args.kfd_trace:
+        for name in (
+            "kfd_page_migration_trace",
+            "kfd_page_mapping_trace",
+            "kfd_queue_trace",
+            "kfd_dropped_events_trace",
+        ):
+            set_if_unspecified(name)
+    if args.att_no_intercept:
+        args.advanced_thread_trace = True
+
+    return {
+        "enabled": frozenset(
+            name
+            for name in EFFECTIVE_TRACE_OPTIONS
+            if bool(getattr(args, name, False))
+        ),
+        "explicit": explicit,
+    }
+
+
 if os.name == "nt":
     import _rocprofv3_windows as _windows_backend
 
     _windows_backend.configure(fatal_error)
-    for _windows_name in _windows_backend.__all__:
-        globals()[_windows_name] = getattr(_windows_backend, _windows_name)
 
 
 def run(app_args, args, **kwargs):
-
+    trace_request = resolve_effective_trace_request(args)
     if os.name == "nt":
-        return run_windows(app_args, args, **kwargs)
+        return _windows_backend.run_windows(
+            app_args, args, trace_request=trace_request, **kwargs
+        )
 
     app_env = dict(os.environ)
     use_execv = kwargs.get("use_execv", True)
@@ -1615,10 +1721,6 @@ def run(app_args, args, **kwargs):
                     return exit_code
                 except Exception as e:
                     fatal_error(f"{e}\n")
-
-    def setattrifnone(obj, attr, value):
-        if getattr(obj, f"{attr}") is None:
-            setattr(obj, f"{attr}", value)
 
     def update_env(env_var, env_val, **kwargs):
         """Local function for updating application environment which supports
@@ -1767,71 +1869,10 @@ def run(app_args, args, **kwargs):
 
     if args.kokkos_trace:
         update_env("KOKKOS_TOOLS_LIBS", ROCPROF_KOKKOSP_LIBRARY, append=True)
-        for itr in (
-            "marker_trace",
-            "kernel_rename",
-        ):
-            setattrifnone(args, itr, True)
-
-    if args.sys_trace:
-        for itr in (
-            "hip_trace",
-            "hsa_trace",
-            "marker_trace",
-            "kernel_trace",
-            "kfd_trace",
-            "memory_copy_trace",
-            "memory_allocation_trace",
-            "scratch_memory_trace",
-            "rccl_trace",
-            "ompt_trace",
-            "rocdecode_trace",
-            "rocjpeg_trace",
-            "rocshmem_trace",
-            "hipfile_trace",
-        ):
-            setattrifnone(args, itr, True)
-
-    if args.runtime_trace:
-        for itr in (
-            "hip_runtime_trace",
-            "marker_trace",
-            "kernel_trace",
-            "kfd_trace",
-            "memory_copy_trace",
-            "memory_allocation_trace",
-            "scratch_memory_trace",
-            "rccl_trace",
-            "ompt_trace",
-            "rocdecode_trace",
-            "rocjpeg_trace",
-            "rocshmem_trace",
-            "hipfile_trace",
-        ):
-            setattrifnone(args, itr, True)
 
     update_env(
         "ROCPROF_OUTPUT_FORMAT", ",".join(args.output_format), append=True, join_char=","
     )
-
-    if args.hip_trace:
-        for itr in ("compiler", "runtime"):
-            setattrifnone(args, f"hip_{itr}_trace", True)
-
-    if args.hip_runtime_trace:
-        # HIP graphs are part of the HIP runtime
-        setattrifnone(args, "hip_graph_trace", True)
-
-    if args.hsa_trace:
-        for itr in ("core", "amd", "image", "finalizer"):
-            setattrifnone(args, f"hsa_{itr}_trace", True)
-
-    if args.kfd_trace:
-        for itr in ("page_migration", "page_mapping", "queue", "dropped_events"):
-            setattrifnone(args, f"kfd_{itr}_trace", True)
-
-    if args.att_no_intercept:
-        args.advanced_thread_trace = True
 
     trace_count = 0
     trace_opts = ["--hip-trace", "--hsa-trace", "--kfd-trace"]

@@ -91,11 +91,17 @@ using queue_create_fn_t       = decltype(CoreApiTable::hsa_queue_create_fn);
 using queue_destroy_fn_t      = decltype(CoreApiTable::hsa_queue_destroy_fn);
 using intercept_create_fn_t   = decltype(AmdExtTable::hsa_amd_queue_intercept_create_fn);
 using intercept_register_fn_t = decltype(AmdExtTable::hsa_amd_queue_intercept_register_fn);
+#if defined(HSA_AMD_EXT_API_TABLE_STEP_VERSION) && HSA_AMD_EXT_API_TABLE_STEP_VERSION >= 0x10
+using amd_queue_create_fn_t = decltype(AmdExtTable::hsa_amd_queue_create_fn);
+#endif
 
 queue_create_fn_t       original_queue_create     = nullptr;
 queue_destroy_fn_t      original_queue_destroy    = nullptr;
 intercept_create_fn_t   intercept_queue_create    = nullptr;
 intercept_register_fn_t intercept_queue_register  = nullptr;
+#if defined(HSA_AMD_EXT_API_TABLE_STEP_VERSION) && HSA_AMD_EXT_API_TABLE_STEP_VERSION >= 0x10
+amd_queue_create_fn_t original_amd_queue_create = nullptr;
+#endif
 decltype(CoreApiTable::hsa_init_fn) original_hsa_init = nullptr;
 decltype(CoreApiTable::hsa_shut_down_fn) original_hsa_shut_down = nullptr;
 decltype(CoreApiTable::hsa_executable_iterate_agent_symbols_fn)
@@ -125,6 +131,13 @@ initialize_loader_table()
     return loader_table_initialized;
 }
 
+#if defined(HSA_AMD_EXT_API_TABLE_STEP_VERSION) && HSA_AMD_EXT_API_TABLE_STEP_VERSION >= 0x10
+hsa_status_t HSA_API
+lazy_create_amd_queue(hsa_agent_t agent,
+                      hsa_amd_queue_create_desc_t* descs,
+                      uint32_t num_descs);
+#endif
+
 void
 initialize_queue_controller()
 {
@@ -132,11 +145,35 @@ initialize_queue_controller()
         if(!registered_api_table || !registered_api_table->core_ ||
            !registered_api_table->amd_ext_)
             return;
+#if defined(HSA_AMD_EXT_API_TABLE_STEP_VERSION) && HSA_AMD_EXT_API_TABLE_STEP_VERSION >= 0x10
+        // hsa_amd_queue_create can be the first queue API reached after the runtime publishes
+        // its table. Restore the real entry while QueueController copies the table; otherwise its
+        // replacement path would call this lazy wrapper recursively.
+        if(registered_api_table->amd_ext_->hsa_amd_queue_create_fn == lazy_create_amd_queue)
+            registered_api_table->amd_ext_->hsa_amd_queue_create_fn = original_amd_queue_create;
+#endif
         initialize_loader_table();
         rocprofiler::agent::construct_agent_cache(registered_api_table);
         rocprofiler::hsa::queue_controller_init(registered_api_table);
     });
 }
+
+#if defined(HSA_AMD_EXT_API_TABLE_STEP_VERSION) && HSA_AMD_EXT_API_TABLE_STEP_VERSION >= 0x10
+hsa_status_t HSA_API
+lazy_create_amd_queue(hsa_agent_t agent,
+                      hsa_amd_queue_create_desc_t* descs,
+                      uint32_t num_descs)
+{
+    initialize_queue_controller();
+    auto current_create = (registered_api_table && registered_api_table->amd_ext_)
+                              ? registered_api_table->amd_ext_->hsa_amd_queue_create_fn
+                              : nullptr;
+    if(current_create && current_create != lazy_create_amd_queue)
+        return current_create(agent, descs, num_descs);
+    return original_amd_queue_create ? original_amd_queue_create(agent, descs, num_descs)
+                                     : HSA_STATUS_ERROR;
+}
+#endif
 
 hsa_status_t
 initialize_hsa()
@@ -607,6 +644,13 @@ set_api_table(::HsaApiTable* api_table, uint64_t runtime_version, uint64_t faile
         api_table->core_->hsa_init_fn         = initialize_hsa;
         api_table->core_->hsa_shut_down_fn    = shut_down_hsa;
         api_table->core_->hsa_queue_create_fn = create_intercept_queue;
+#if defined(HSA_AMD_EXT_API_TABLE_STEP_VERSION) && HSA_AMD_EXT_API_TABLE_STEP_VERSION >= 0x10
+        if(api_table->amd_ext_->hsa_amd_queue_create_fn)
+        {
+            original_amd_queue_create = api_table->amd_ext_->hsa_amd_queue_create_fn;
+            api_table->amd_ext_->hsa_amd_queue_create_fn = lazy_create_amd_queue;
+        }
+#endif
         if(original_iterate_agent_symbols)
             api_table->core_->hsa_executable_iterate_agent_symbols_fn = iterate_agent_symbols;
         if(original_symbol_get_info)

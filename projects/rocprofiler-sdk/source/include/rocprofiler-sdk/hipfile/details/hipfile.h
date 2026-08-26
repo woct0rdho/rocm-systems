@@ -15,7 +15,9 @@
 
 /* Needed for struct sockaddr */
 #ifdef _WIN32
+#if !defined(_WINSOCKAPI_) && !defined(_WINSOCK2API_)
 #include <winsock2.h>
+#endif
 #else
 #include <sys/socket.h>
 #endif

@@ -151,7 +151,9 @@ std::string GetAdjacentThunkLibraryPath(const std::string& library_name) {
       HSAKMT_PFN(hsaKmtGetWddmAqlProfileCapability) =
           (HSAKMT_DEF(hsaKmtGetWddmAqlProfileCapability)*)rocr::os::GetExportAddress(
               thunk_handle, "hsaKmtGetWddmAqlProfileCapability");
-      if (HSAKMT_PFN(hsaKmtGetWddmAqlProfileCapability) == nullptr) goto LOAD_ERROR;
+      // Optional: older thunks do not expose the Windows AQL Profile
+      // capability. The graph path treats a null query as unsupported and
+      // falls back to the AQL batch path; normal compute must still load.
 #endif
 
       HSAKMT_PFN(hsaKmtAcquireSystemProperties) = (HSAKMT_DEF(hsaKmtAcquireSystemProperties)*)rocr::os::GetExportAddress(thunk_handle, "hsaKmtAcquireSystemProperties");

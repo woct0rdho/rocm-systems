@@ -987,7 +987,7 @@ void AqlQueue::AsyncReclaimAltScratch() {
   return;
 }
 
-void AqlQueue::HandleInsufficientScratch(hsa_signal_value_t& error_code,
+bool AqlQueue::HandleInsufficientScratch(hsa_signal_value_t& error_code,
                                          hsa_signal_value_t& waitVal, bool& changeWait) {
   // Insufficient scratch - recoverable, don't process dynamic scratch if errors are present.
   auto& scratch = queue_scratch_;
@@ -1051,24 +1051,38 @@ void AqlQueue::HandleInsufficientScratch(hsa_signal_value_t& error_code,
 
 
   auto get_dispatch_pkt = [&]() {
+    constexpr uint32_t kMaxUnpublishedPacketRetries = 64;
     dispatch_id = amd_queue_.read_dispatch_id;
-    do {
+    uint32_t unpublished_retries = 0;
+
+    for (;;) {
       // On GPUs where EOP is handled in asic, the read_dispatch_id is not
       // updated after each packet so look for the first dispatch that needs
       // scratch
+      if (dispatch_id > LoadWriteIndexRelaxed()) return (core::AqlPacket *)NULL;
+
       const uint64_t pkt_slot_idx =
           dispatch_id & (amd_queue_.hsa_queue.size - 1);
 
       core::AqlPacket *dispatch_pkt =
           &((core::AqlPacket *)amd_queue_.hsa_queue.base_address)[pkt_slot_idx];
 
+      const uint16_t packet_header =
+          atomic::Load(&dispatch_pkt->packet.header, std::memory_order_acquire);
+      if (!core::AqlPacket::IsValid(packet_header)) {
+        if (unpublished_retries++ < kMaxUnpublishedPacketRetries) {
+          os::YieldThread();
+          continue;
+        }
+        return (core::AqlPacket *)NULL;
+      }
+      unpublished_retries = 0;
+
       if (dispatch_pkt->IsDispatchAndNeedsScratch())
         return dispatch_pkt;
 
       dispatch_id++;
-    } while (dispatch_id <= LoadWriteIndexRelaxed());
-
-    return (core::AqlPacket *)NULL;
+    }
   };
 
   auto calc_dispatch_waves_per_group = [&](core::AqlPacket& pkt) {
@@ -1133,8 +1147,7 @@ void AqlQueue::HandleInsufficientScratch(hsa_signal_value_t& error_code,
   scratch.cooperative = (amd_queue_.hsa_queue.type == HSA_QUEUE_TYPE_COOPERATIVE);
 
   pkt = get_dispatch_pkt(); // Sets dispatch_id
-  assert((pkt && dispatch_id != UINT64_MAX) &&
-         "Could not find dispatch packet with private_segment_size > 0");
+  if (pkt == nullptr || dispatch_id == UINT64_MAX) return false;
 
   tool::notify_event_scratch_alloc_start(
       public_handle(), HSA_AMD_EVENT_SCRATCH_ALLOC_FLAG_NONE, dispatch_id);
@@ -1189,7 +1202,7 @@ void AqlQueue::HandleInsufficientScratch(hsa_signal_value_t& error_code,
       HSA::hsa_signal_store_screlease(amd_queue_.queue_inactive_signal, 0);
       tool::notify_event_scratch_alloc_end(public_handle(), HSA_AMD_EVENT_SCRATCH_ALLOC_FLAG_ALT,
                                            dispatch_id, scratch.alt_size, dispatch_slots);
-      return;
+      return true;
     }
     // Could not allocate enough memory for alternate scratch fallback to primary scratch
     scratch.alt_size = 0;
@@ -1223,7 +1236,7 @@ void AqlQueue::HandleInsufficientScratch(hsa_signal_value_t& error_code,
     // We could not allocate memory to fit even 1 wave
     tool::notify_event_scratch_alloc_end(public_handle(), HSA_AMD_EVENT_SCRATCH_ALLOC_FLAG_USE_ONCE,
                                          dispatch_id, scratch.main_size, dispatch_slots);
-    return;
+    return true;
   }
 
   // If we had to reduce number of waves
@@ -1265,7 +1278,7 @@ void AqlQueue::HandleInsufficientScratch(hsa_signal_value_t& error_code,
   tool::notify_event_scratch_alloc_end(public_handle(), alloc_flag, dispatch_id, scratch.main_size,
                                        dispatch_slots);
 
-  return;
+  return true;
 }
 
 template <bool HandleExceptions>
@@ -1286,7 +1299,13 @@ bool AqlQueue::DynamicQueueEventsHandler(hsa_signal_value_t error_code, void* ar
 
   // Process errors only if queue is not terminating.
   if ((queue->dynamicScratchState & ERROR_HANDLER_TERMINATE) != ERROR_HANDLER_TERMINATE) {
-    if (error_code == 512) {  // Large scratch reclaim
+    if (error_code == static_cast<hsa_signal_value_t>(-1)) {
+      // WDDM reports generic queue failures with -1. This is a sentinel, not
+      // an error bitmask, so it must not enter scratch recovery.
+      errorCode = HSA_STATUS_ERROR;
+      fatal = true;
+
+    } else if (error_code == 512) {  // Large scratch reclaim
       tool::notify_event_scratch_free_start(queue->public_handle(),
                                             HSA_AMD_EVENT_SCRATCH_ALLOC_FLAG_USE_ONCE);
 
@@ -1310,13 +1329,16 @@ bool AqlQueue::DynamicQueueEventsHandler(hsa_signal_value_t error_code, void* ar
     }
 
     // Process only one queue error.
-    if (error_code & 0x401) {  // insufficient scratch, wave64 or wave32
-      queue->HandleInsufficientScratch(error_code, waitVal, changeWait);
-
-      // Out of scratch - promote error
-      if (queue->queue_scratch_.main_queue_base == nullptr &&
-          queue->queue_scratch_.alt_queue_base == nullptr)
-        errorCode = HSA_STATUS_ERROR_OUT_OF_RESOURCES;
+    else if (error_code & 0x401) {  // insufficient scratch, wave64 or wave32
+      if (!queue->HandleInsufficientScratch(error_code, waitVal, changeWait)) {
+        errorCode = HSA_STATUS_ERROR;
+        fatal = true;
+      } else {
+        // Out of scratch - promote error
+        if (queue->queue_scratch_.main_queue_base == nullptr &&
+            queue->queue_scratch_.alt_queue_base == nullptr)
+          errorCode = HSA_STATUS_ERROR_OUT_OF_RESOURCES;
+      }
 
 
     } else if (HandleExceptions) {

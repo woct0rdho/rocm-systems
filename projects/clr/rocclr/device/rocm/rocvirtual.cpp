@@ -1650,20 +1650,41 @@ bool VirtualGPU::dispatchAqlPacket(AqlPacket* packet, uint16_t header,
 }
 // ================================================================================================
 // Publish one metadata-prefetch packet (256B = 4 x 64B segments) to the metadata ring at |dst|.
-// |src| is the captured metadata packet with valid headers already baked into each segment
-// (INVALID for barrier/empty slots).  Each 64B segment carries its own header dword together
-// with its body, so the header/body ordering within a segment is guaranteed by the single 64B
-// store and no intra-packet fence is needed.  This mirrors the single-dispatch staged path
-// (MetaDataPreloader::SetPacket): MOVDIR64B when available, otherwise non-temporal stores.
+// For the non-MOVDIR64B path, leave every segment invalid while copying its body. The metadata
+// prefetcher can inspect headers independently of the AQL packet, so the headers must be armed
+// only after the body copies are fenced. MOVDIR64B keeps the atomic full-segment path.
+static inline void metadata_store_release(uint32_t* location, uint32_t value) {
+#if IS_WINDOWS
+  std::atomic_ref<uint32_t> header(*location);
+  header.store(value, std::memory_order_release);
+#else
+  __atomic_store_n(location, value, __ATOMIC_RELEASE);
+#endif
+}
+
 static inline void writeMetadataPacketToRing(uint8_t* dst, const uint8_t* src,
                                              bool use_movdir64b) {
   static constexpr size_t kMetaSize = 256;
+  static constexpr size_t kHeaderSize = sizeof(uint32_t);
+  static constexpr uint32_t kInvalidMetadataHeader = HSA_PACKET_TYPE_INVALID;
   for (size_t off = 0; off < kMetaSize; off += 64) {
     if (use_movdir64b) {
       amd::movdir64b_copy64(dst + off, src + off);
     } else {
-      amd::nontemporalMemcpy(dst + off, src + off, 64);
+      metadata_store_release(reinterpret_cast<uint32_t*>(dst + off), kInvalidMetadataHeader);
+      amd::nontemporalMemcpy(dst + off + kHeaderSize, src + off + kHeaderSize,
+                              64 - kHeaderSize);
     }
+  }
+}
+
+static inline void publishMetadataPacketHeaders(uint8_t* dst, const uint8_t* src) {
+  static constexpr size_t kMetaSize = 256;
+  static constexpr size_t kHeaderSize = sizeof(uint32_t);
+  for (size_t off = 0; off < kMetaSize; off += 64) {
+    uint32_t header = 0;
+    std::memcpy(&header, src + off, kHeaderSize);
+    metadata_store_release(reinterpret_cast<uint32_t*>(dst + off), header);
   }
 }
 
@@ -1924,9 +1945,8 @@ bool VirtualGPU::dispatchAqlPacketBatchFlat(const amd::AlignedVector64<uint8_t>&
       }
     }
 
-    // Publish this chunk's metadata-prefetch packets. The captured flat buffer already
-    // carries the armed header value for real slots and INVALID for barrier/empty slots;
-    // each 64B segment is written with its header and body together (NT or MOVDIR64B).
+    // Copy this chunk's metadata-prefetch bodies. Non-MOVDIR64B headers remain invalid until
+    // the ordering fence below; MOVDIR64B publishes complete segments in this call.
     if (flatMetadataData != nullptr && metadata_preloader_.HasMetadataQueue()) {
       auto* metaBase = static_cast<uint8_t*>(metadata_preloader_.GetQueueBase());
       for (size_t j = 0; j < thisChunk; ++j) {
@@ -1965,6 +1985,18 @@ bool VirtualGPU::dispatchAqlPacketBatchFlat(const amd::AlignedVector64<uint8_t>&
       // Ordering point: drain all preceding NT body writes from the WC buffer
       // before writing any valid headers (diagram steps #6a, #7, #9).
       amd::nontemporalStoreFence();
+
+      // Metadata headers are independently visible to the CP prefetcher, so arm them only
+      // after the body copies have reached the destination.
+      if (flatMetadataData != nullptr && metadata_preloader_.HasMetadataQueue()) {
+        auto* metaBase = static_cast<uint8_t*>(metadata_preloader_.GetQueueBase());
+        for (size_t j = 0; j < thisChunk; ++j) {
+          const uint64_t slot = (startIndex + chunkStart + j) & queueMask;
+          publishMetadataPacketHeaders(
+              metaBase + slot * kMetaPktSize,
+              flatMetadataData->data() + (chunkStart + j) * kMetaPktSize);
+        }
+      }
 
       // Write valid headers. Hold global packet-0's header back in the first chunk so the
       // GPU sees a fully-committed batch before starting (AQL protocol). Subsequent chunks

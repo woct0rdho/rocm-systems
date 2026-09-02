@@ -49,7 +49,12 @@ target_compile_definitions(hrr-playback PRIVATE
   $<$<BOOL:${WIN32}>:NOMINMAX WIN32_LEAN_AND_MEAN>
 )
 find_package(Threads REQUIRED)
-target_link_libraries(hrr-playback PRIVATE hrr_reader amdhip64 Threads::Threads)
+find_package(hsa-runtime64 REQUIRED)
+target_link_libraries(hrr-playback PRIVATE
+  hrr_reader
+  amdhip64
+  hsa-runtime64::hsa-runtime64
+  Threads::Threads)
 
 install(TARGETS hrr-playback RUNTIME DESTINATION bin)
 

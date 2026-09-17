@@ -327,11 +327,17 @@ TEST_F(SqttBuilderTest, Gfx115xPrimitivesUseStatus2AndDoubleBufferBits)
     EXPECT_FALSE(gfx115x_sqtt_prim::SQ_THREAD_TRACE_BUF1_SIZE_ADDR == Register{});
     EXPECT_TRUE(gfx115x_sqtt_prim::SQ_THREAD_TRACE_BUF1_BASE_HI_ADDR == Register{});
 
-    EXPECT_EQ(gfx115x_sqtt_prim::sqtt_ctrl_value(true, true) &
+    EXPECT_EQ(gfx115x_sqtt_prim::sqtt_ctrl_value(true, true, false) &
                   SQ_THREAD_TRACE_CTRL__DOUBLE_BUFFER_MASK,
               SQ_THREAD_TRACE_CTRL__DOUBLE_BUFFER_MASK);
-    EXPECT_EQ(gfx115x_sqtt_prim::sqtt_ctrl_value(true, false) &
+    EXPECT_EQ(gfx115x_sqtt_prim::sqtt_ctrl_value(true, false, false) &
                   SQ_THREAD_TRACE_CTRL__DOUBLE_BUFFER_MASK,
+              0u);
+    EXPECT_EQ(gfx115x_sqtt_prim::sqtt_ctrl_value(true, false, true) &
+                  SQ_THREAD_TRACE_CTRL__ALL_VMID_MASK,
+              SQ_THREAD_TRACE_CTRL__ALL_VMID_MASK);
+    EXPECT_EQ(gfx115x_sqtt_prim::sqtt_ctrl_value(true, false, false) &
+                  SQ_THREAD_TRACE_CTRL__ALL_VMID_MASK,
               0u);
 
     EXPECT_TRUE(gfxip::gfx11::gfx11_cntx_prim::SQ_THREAD_TRACE_STATUS2_ADDR == Register{});

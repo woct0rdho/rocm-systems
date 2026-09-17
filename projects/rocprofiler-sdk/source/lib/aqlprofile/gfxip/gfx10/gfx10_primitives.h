@@ -729,12 +729,13 @@ public:
     static uint32_t sqtt_zero_size_value() { return 0; }
 
     // Thread trace ctrl register value
-    static uint32_t sqtt_ctrl_value(bool on, bool)
+    static uint32_t sqtt_ctrl_value(bool on, bool, bool all_vmids)
     {
 #if SQTT_PRIM_ENABLED
         uint32_t sq_thread_trace_ctrl{0};
         sq_thread_trace_ctrl =
             SET_REG_FIELD_BITS(SQ_THREAD_TRACE_CTRL, MODE, on ? SQ_TT_MODE_ON : SQ_TT_MODE_OFF) |
+            SET_REG_FIELD_BITS(SQ_THREAD_TRACE_CTRL, ALL_VMID, all_vmids ? 1 : 0) |
             SET_REG_FIELD_BITS(SQ_THREAD_TRACE_CTRL, HIWATER, 5) |
             SET_REG_FIELD_BITS(SQ_THREAD_TRACE_CTRL, UTIL_TIMER, 1) |
             SET_REG_FIELD_BITS(SQ_THREAD_TRACE_CTRL, RT_FREQ, 2) |

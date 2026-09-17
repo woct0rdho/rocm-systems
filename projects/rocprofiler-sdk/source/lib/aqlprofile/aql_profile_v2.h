@@ -415,7 +415,10 @@ typedef enum aqlprofile_att_parameter_name_ext_t
      */
     AQLPROFILE_ATT_PARAMETER_NAME_BUFFER_SIZE_HIGH = 11,
     AQLPROFILE_ATT_PARAMETER_NAME_RT_TIMESTAMP,  // one of aqlprofile_att_parameter_rt_timestamp_t
-    AQLPROFILE_ATT_PARAMETER_NAME_NUM_BUFFERS
+    AQLPROFILE_ATT_PARAMETER_NAME_NUM_BUFFERS,
+    // Device-wide tracing uses a control queue whose VMID may differ from the
+    // application queues. Dispatch tracing must leave this disabled.
+    AQLPROFILE_ATT_PARAMETER_NAME_ALL_VMIDS
 } aqlprofile_att_parameter_name_ext_t;
 
 // Profile parameter object
@@ -616,6 +619,22 @@ aqlprofile_att_get_buffer_packets(uint64_t*                      header,
                                   aqlprofile_handle_t            handle,
                                   int                            shader_engine_id,
                                   int                            flags);
+
+/**
+ * @brief Build a queue-local COMPUTE_THREAD_TRACE_ENABLE packet for device ATT.
+ *
+ * Device-wide SQTT setup may run on an internal queue, but this shader register is
+ * queue context state. Inject the returned packet into each application queue before
+ * dispatches while device tracing is active.
+ *
+ * @param[out] packet Queue-local enable/disable packet
+ * @param[in] handle Created by aqlprofile_att_create_packets()
+ * @param[in] enable Nonzero enables thread-trace dispatches on the target queue
+ */
+hsa_status_t
+aqlprofile_att_get_queue_control_packet(hsa_ext_amd_aql_pm4_packet_t* packet,
+                                        aqlprofile_handle_t            handle,
+                                        int                            enable);
 
 typedef struct aqlprofile_att_buffer_status_t
 {

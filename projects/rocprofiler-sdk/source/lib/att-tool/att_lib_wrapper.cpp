@@ -66,6 +66,13 @@ ATTFileMgr::~ATTFileMgr()
         ROCP_ERROR_IF(status != ROCPROFILER_STATUS_SUCCESS) << "unable to delete codeobj " << id;
     }
 
+    if(codefile)
+    {
+        for(const auto& [_, eventlist] : occupancy)
+            for(const auto& event : eventlist)
+                codefile->addFallbackPC(event.pc);
+    }
+
     OccupancyFile::OccupancyFile(dir, table, occupancy, events, dispatches);
 }
 

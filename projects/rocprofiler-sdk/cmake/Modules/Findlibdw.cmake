@@ -28,7 +28,14 @@ if(PkgConfig_FOUND)
     set(ENV{PKG_CONFIG_SYSTEM_INCLUDE_PATH} "")
     pkg_check_modules(DW libdw)
 
-    if(DW_FOUND
+    set(libdw_PKGCONFIG_VALID ${DW_FOUND})
+    foreach(_DIR ${DW_INCLUDE_DIRS} ${DW_LIBRARY_DIRS})
+        if(_DIR AND NOT EXISTS "${_DIR}")
+            set(libdw_PKGCONFIG_VALID OFF)
+        endif()
+    endforeach()
+
+    if(libdw_PKGCONFIG_VALID
        AND DW_INCLUDE_DIRS
        AND DW_LINK_LIBRARIES)
         set(libdw_INCLUDE_DIR
@@ -82,7 +89,7 @@ if(libdw_FOUND)
     if(NOT TARGET libdw::libdw)
         add_library(libdw::libdw INTERFACE IMPORTED)
 
-        if(TARGET PkgConfig::DW AND DW_FOUND)
+        if(TARGET PkgConfig::DW AND libdw_PKGCONFIG_VALID)
             target_link_libraries(libdw::libdw INTERFACE PkgConfig::DW)
         else()
             target_link_libraries(libdw::libdw INTERFACE ${libdw_LIBRARY})

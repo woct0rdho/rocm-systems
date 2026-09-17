@@ -56,7 +56,12 @@ configure(shader_data_forwarder_t    shader_data_forwarder,
           std::unordered_set<size_t> kernel_filter_range);
 
 agent_trace_config_t
-configure_agent(rocprofiler_agent_id_t id, uint64_t consecutive_kernels);
+configure_agent(rocprofiler_agent_id_t id,
+                uint64_t               consecutive_kernels,
+                rocprofiler_context_id_t context = {});
+
+void
+mark_started();
 
 void
 shader_data_callback(rocprofiler_thread_trace_shader_data_t shader_data,

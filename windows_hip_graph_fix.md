@@ -151,3 +151,70 @@ For separate graph-path validation on a machine with metadata prefetch support, 
 $env:DEBUG_CLR_USE_MOVDIR64B = '0'
 $env:DEBUG_CLR_AQL_DEV_QUEUE = '0'
 ```
+
+## Second failure: retained PM4 graph lowering on Windows
+
+With `DEBUG_HIP_GRAPH_PM4=1` set in the environment, a model run fails while a graph batch is submitted:
+
+```text
+[hipGraph][PM4] retained 4826 dispatches in 139627 dwords, max private 0 bytes
+[wsl::thunk::ComputeQueue::VendorSpecificAqlToPm4] reject AQL Profile vendor packet:
+  validation status 3 format=1 manifest=00000000 ib_header=c0023f00
+[wsl::thunk::ComputeQueue::AqlToPm4Thread] process compute queue fail status = 00001009
+[wsl::thunk::ComputeQueue::HandleError] error 4105, sig_val 32
+GPU HANG ANALYSIS ... Vendor packet (amd_format=1)
+HSA_STATUS_ERROR_INVALID_PACKET_FORMAT: The AQL packet is malformed. code: 0x1009
+```
+
+`validation status 3` is `ValidationStatus::kInvalidManifest`. HIP lowered the graph to a retained PM4 command list (`hsa_ven_amd_graph_*`), and ROCR materialized it as an AQL vendor packet with `vendor_header = 1`, `dword_count_remaining = 10`, and a canonical `IT_INDIRECT_BUFFER` header, but left `reserved[0..7]` zero. The WDDM thunk accepts a format-1 packet only with a manifest (`WCMP` for profile packets, `WRTM` for runtime packets), so it rejected the packet and failed the queue. Even with a manifest, the thunk accepted only IB control bits of `1 << 23`, while the graph encoder also sets the temporal last-use bits (`3 << 28`). A second, independent limit applies: the thunk copies the whole indirect buffer into one fixed-size PM4 frame, so a 139627-dword list (about 558 KB) can never be submitted through a single AQL slot; the validated budget is 1984 dwords (`(kQualifiedFrameBytes - kFrameTrailerReserveBytes) / 4 = (0x2000 - 0x100) / 4`), so the graph is about 70 times over budget.
+
+Linux has no such validator, which is why the same commit works there.
+
+### Retained fix
+
+- `projects/rocr-runtime/runtime/hsa-runtime/core/runtime/hsa_ven_amd_graph.cpp`
+  - `Materialize` stamps the runtime manifest (`WRTM`, version, command dword count, FNV checksum over the indirect buffer) on Windows, matching `AqlQueue::ExecutePM4`.
+  - `Create` rejects a command list larger than the thunk's `MaxPm4Dwords` with `HSA_STATUS_ERROR_OUT_OF_RESOURCES`, so HIP falls back to the AQL batch path for that graph instead of submitting a packet the thunk must reject.
+- `projects/rocr-runtime/libhsakmt/include/impl/wddm/profiling.h`
+  - `ValidateRuntimePacket` accepts the optional temporal last-use IB control bits in addition to `IB_VALID`; every other control bit, the size, the checksum, the memory ownership, and the completion signal are still checked.
+- `projects/rocr-runtime/runtime/docs/contribution/retained-pm4-command-lists.rst` records the Windows packet budget and manifest requirement.
+
+### Verification
+
+Small graph (3 dispatches, 77 dwords), `build\small_graph_test.cpp`, captured and replayed through HIP:
+
+```text
+unfixed runtime:  reject AQL Profile vendor packet: validation status 3 ... ib_header=c0023f00
+                  queue fail status = 00001009, exit 8
+fixed runtime:    [hipGraph][PM4] retained 3 dispatches in 77 dwords, max private 0 bytes
+                  small_graph=passed dispatches=3 kernels=9 value=9.0
+```
+
+Large graph (600 dispatches, about 15k dwords):
+
+```text
+[hipGraph][PM4] ROCR command-list fallback for 600 packets: status=4104
+small_graph=passed dispatches=600 kernels=1800 value=1800.0
+```
+
+End to end with the model command from the report (`-c 262144`):
+
+```text
+[hipGraph][PM4] ROCR command-list fallback for 4826 packets: status=4104
+listening on http://127.0.0.1:8080
+completion: " Paris, which is"
+```
+
+No thunk rejection, no GPU hang, and no queue abort appeared in the fixed run. The four ROCr component tests still pass.
+
+The fixed `amdhip64_7.dll` was installed over `C:\venv_torch\Lib\site-packages\_rocm_sdk_devel\bin\amdhip64_7.dll`; the previous file is kept at `C:\rocm-systems\build\runtime-backup\amdhip64_7.dll` for rollback.
+
+### Attempted: referencing the stream instead of inlining it
+
+A command stream that does not fit a frame was submitted as the packet's own indirect buffer instead of being copied (`VendorSpecificAqlToPm4` emitted a 4-dword `IT_INDIRECT_BUFFER` jump and the trailing packets that order completion behind the stream). Two encodings were tried: the packet's jump words, and a canonical jump rebuilt from the validated address and dword count. The validator accepted both, the submission returned no error, and then the queue stalled: `hipGraphLaunch` reported success and `hipStreamSynchronize` never returned, while the same packet inlined into a frame completed normally.
+
+The submission contract explains why. `D3DKMTSubmitCommandToHwQueue` receives exactly one command buffer address and length through `Wkmi::FillinSubmitPrivData`, which carries no allocation or residency list, and the thunk never emits an indirect-buffer jump for any vendor stream: profile packets are inlined too, even though Linux hands the same packets to the hardware as indirect buffers. Only the command buffer passed to the submit call is therefore fetchable, and a jump into a separate allocation stalls the command processor.
+
+Enabling these graphs on Windows needs a thunk or KMD change: either declare the referenced allocation for the submission, or submit a variable-size command buffer that holds the whole stream plus the trailer.
+
+Measured in the current fixed state, `DEBUG_HIP_GRAPH_PM4=1` and `=0` give pp512 122.57 +- 3.74 / tg128 15.22 +- 0.06 and pp512 122.23 +- 4.31 / tg128 14.96 +- 0.10 t/s for this model, because the graph is declined and both arms run the AQL batch path.

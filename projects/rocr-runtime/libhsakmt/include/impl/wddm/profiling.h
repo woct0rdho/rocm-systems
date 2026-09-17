@@ -353,12 +353,16 @@ ValidationResult ValidateRuntimePacket(const Capability& capability,
   constexpr uint32_t canonical_ib_header =
       (detail::kType3 << 30) | (2u << 16) | (detail::kType3IndirectBuffer << 8);
   constexpr uint32_t canonical_ib_controls = 1u << 23;
+  // The graph command encoder also marks the indirect buffer as temporal last-use. Accept
+  // that cache policy, but no other control bit.
+  constexpr uint32_t optional_ib_controls = 3u << 28;
   const uint64_t command_address =
       (static_cast<uint64_t>(packet.ib[2]) << 32) |
       static_cast<uint64_t>(packet.ib[1] & 0xfffffffc);
   if (packet.ib[0] != canonical_ib_header ||
-      (packet.ib[3] & ~0xfffffu) != canonical_ib_controls || (packet.ib[1] & 0x3) != 0 ||
-      command_address == 0 || (packet.ib[3] & 0xfffff) != result.command_dwords) {
+      (packet.ib[3] & ~0xfffffu & ~optional_ib_controls) != canonical_ib_controls ||
+      (packet.ib[1] & 0x3) != 0 || command_address == 0 ||
+      (packet.ib[3] & 0xfffff) != result.command_dwords) {
     result.status = ValidationStatus::kInvalidIndirectBuffer;
     return result;
   }

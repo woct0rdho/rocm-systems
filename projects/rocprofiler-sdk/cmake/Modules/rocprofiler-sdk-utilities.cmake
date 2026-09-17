@@ -61,6 +61,7 @@ function(rocprofiler_sdk_pc_sampling_disabled _VAR)
     if("${pc-sampling-gpu-0-gfx-info}" MATCHES "^gfx90a$"
        OR "${pc-sampling-gpu-0-gfx-info}" MATCHES "^gfx94[0-9]$"
        OR "${pc-sampling-gpu-0-gfx-info}" MATCHES "^gfx95[0-9]$"
+       OR "${pc-sampling-gpu-0-gfx-info}" MATCHES "^gfx1151$"
        OR "${pc-sampling-gpu-0-gfx-info}" MATCHES "^gfx12[0-9][0-9]$")
         # PC sampling is enabled on this architecture.
         set(${_VAR}
@@ -92,6 +93,7 @@ function(rocprofiler_sdk_pc_sampling_stochastic_disabled _VAR)
 
     if("${pc-sampling-gpu-0-gfx-info}" MATCHES "^gfx94[0-9]$"
        OR "${pc-sampling-gpu-0-gfx-info}" MATCHES "^gfx95[0-9]$"
+       OR "${pc-sampling-gpu-0-gfx-info}" MATCHES "^gfx1151$"
        OR "${pc-sampling-gpu-0-gfx-info}" MATCHES "^gfx1250$")
         # PC sampling is enabled on this architecture.
         set(${_VAR}

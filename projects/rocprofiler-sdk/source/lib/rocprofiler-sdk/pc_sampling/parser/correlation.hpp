@@ -31,6 +31,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -220,6 +221,169 @@ private:
 using address_range_t = rocprofiler::sdk::codeobj::segment::address_range_t;
 
 template <typename GFXIP, typename PcSamplingRecordT>
+inline void
+post_process_pc_sample(PcSamplingRecordT&)
+{}
+
+inline bool
+pc_sampling_inst_starts_with(std::string_view instruction, std::string_view prefix)
+{
+    return instruction.size() >= prefix.size() && instruction.compare(0, prefix.size(), prefix) == 0;
+}
+
+inline uint32_t
+classify_gfx1151_instruction_type(std::string_view instruction)
+{
+    auto space    = instruction.find(' ');
+    auto mnemonic = instruction.substr(0, space);
+
+    if(pc_sampling_inst_starts_with(mnemonic, "v_mfma"))
+        return ROCPROFILER_PC_SAMPLING_INSTRUCTION_TYPE_MATRIX;
+    if(pc_sampling_inst_starts_with(mnemonic, "v_"))
+        return ROCPROFILER_PC_SAMPLING_INSTRUCTION_TYPE_VALU;
+    if(pc_sampling_inst_starts_with(mnemonic, "global_") ||
+       pc_sampling_inst_starts_with(mnemonic, "flat_"))
+        return ROCPROFILER_PC_SAMPLING_INSTRUCTION_TYPE_FLAT;
+    if(pc_sampling_inst_starts_with(mnemonic, "buffer_") ||
+       pc_sampling_inst_starts_with(mnemonic, "image_") ||
+       pc_sampling_inst_starts_with(mnemonic, "tbuffer_"))
+        return ROCPROFILER_PC_SAMPLING_INSTRUCTION_TYPE_TEX;
+    if(pc_sampling_inst_starts_with(mnemonic, "ds_"))
+        return ROCPROFILER_PC_SAMPLING_INSTRUCTION_TYPE_LDS;
+    if(pc_sampling_inst_starts_with(mnemonic, "exp"))
+        return ROCPROFILER_PC_SAMPLING_INSTRUCTION_TYPE_EXPORT;
+    if(pc_sampling_inst_starts_with(mnemonic, "s_sendmsg"))
+        return ROCPROFILER_PC_SAMPLING_INSTRUCTION_TYPE_MESSAGE;
+    if(pc_sampling_inst_starts_with(mnemonic, "s_barrier"))
+        return ROCPROFILER_PC_SAMPLING_INSTRUCTION_TYPE_BARRIER;
+    if(pc_sampling_inst_starts_with(mnemonic, "s_branch") ||
+       pc_sampling_inst_starts_with(mnemonic, "s_cbranch"))
+        return ROCPROFILER_PC_SAMPLING_INSTRUCTION_TYPE_BRANCH_TAKEN;
+    if(pc_sampling_inst_starts_with(mnemonic, "s_setpc") ||
+       pc_sampling_inst_starts_with(mnemonic, "s_swappc"))
+        return ROCPROFILER_PC_SAMPLING_INSTRUCTION_TYPE_JUMP;
+    if(pc_sampling_inst_starts_with(mnemonic, "s_wakeup"))
+        return ROCPROFILER_PC_SAMPLING_INSTRUCTION_TYPE_OTHER;
+    if(pc_sampling_inst_starts_with(mnemonic, "s_"))
+        return ROCPROFILER_PC_SAMPLING_INSTRUCTION_TYPE_SCALAR;
+
+    return ROCPROFILER_PC_SAMPLING_INSTRUCTION_TYPE_OTHER;
+}
+
+inline bool
+is_gfx1151_branch_outcome(uint32_t inst_type)
+{
+    return inst_type == ROCPROFILER_PC_SAMPLING_INSTRUCTION_TYPE_BRANCH_NOT_TAKEN ||
+           inst_type == ROCPROFILER_PC_SAMPLING_INSTRUCTION_TYPE_BRANCH_TAKEN;
+}
+
+struct gfx1151_decoded_instruction_key_t
+{
+    uint64_t code_object_id     = ROCPROFILER_CODE_OBJECT_ID_NONE;
+    uint64_t code_object_offset = 0;
+
+    bool operator==(const gfx1151_decoded_instruction_key_t& other) const
+    {
+        return code_object_id == other.code_object_id &&
+               code_object_offset == other.code_object_offset;
+    }
+};
+
+struct gfx1151_decoded_instruction_key_hash_t
+{
+    size_t operator()(const gfx1151_decoded_instruction_key_t& key) const
+    {
+        return std::hash<uint64_t>{}(key.code_object_id) ^
+               (std::hash<uint64_t>{}(key.code_object_offset) << 1);
+    }
+};
+
+struct gfx1151_decoded_instruction_info_t
+{
+    bool     is_waitcnt              = false;
+    bool     is_conditional_branch   = false;
+    uint32_t classified_instruction  = ROCPROFILER_PC_SAMPLING_INSTRUCTION_TYPE_OTHER;
+};
+
+inline gfx1151_decoded_instruction_info_t
+get_gfx1151_decoded_instruction_info(std::string_view instruction)
+{
+    return {pc_sampling_inst_starts_with(instruction, "s_waitcnt"),
+            pc_sampling_inst_starts_with(instruction, "s_cbranch"),
+            classify_gfx1151_instruction_type(instruction)};
+}
+
+inline bool
+get_cached_gfx1151_decoded_instruction_info(
+    const gfx1151_decoded_instruction_key_t& key,
+    gfx1151_decoded_instruction_info_t&      info)
+{
+    if(key.code_object_id == ROCPROFILER_CODE_OBJECT_ID_NONE) return false;
+
+    static thread_local std::unordered_map<gfx1151_decoded_instruction_key_t,
+                                           gfx1151_decoded_instruction_info_t,
+                                           gfx1151_decoded_instruction_key_hash_t>
+        cache;
+
+    if(auto itr = cache.find(key); itr != cache.end())
+    {
+        info = itr->second;
+        return true;
+    }
+
+    auto inst = rocprofiler::pc_sampling::code_object::decode_instruction(
+        key.code_object_id, key.code_object_offset);
+    if(!inst) return false;
+
+    info = get_gfx1151_decoded_instruction_info(inst->inst);
+    cache.emplace(key, info);
+    return true;
+}
+
+inline void
+apply_gfx1151_decoded_instruction(rocprofiler_pc_sampling_record_stochastic_v0_t& pc_sample,
+                                  const gfx1151_decoded_instruction_info_t&       instruction_info)
+{
+    if(instruction_info.is_waitcnt)
+    {
+        pc_sample.wave_issued                = false;
+        pc_sample.inst_type                  = ROCPROFILER_PC_SAMPLING_INSTRUCTION_TYPE_NO_INST;
+        pc_sample.snapshot.reason_not_issued =
+            ROCPROFILER_PC_SAMPLING_INSTRUCTION_NOT_ISSUED_REASON_WAITCNT;
+        return;
+    }
+
+    if(pc_sample.wave_issued)
+    {
+        if(instruction_info.is_conditional_branch && is_gfx1151_branch_outcome(pc_sample.inst_type))
+            return;
+
+        pc_sample.inst_type = instruction_info.classified_instruction;
+    }
+}
+
+inline void
+apply_gfx1151_decoded_instruction(rocprofiler_pc_sampling_record_stochastic_v0_t& pc_sample,
+                                  std::string_view                               instruction)
+{
+    apply_gfx1151_decoded_instruction(pc_sample,
+                                      get_gfx1151_decoded_instruction_info(instruction));
+}
+
+template <>
+inline void
+post_process_pc_sample<GFX1151, rocprofiler_pc_sampling_record_stochastic_v0_t>(
+    rocprofiler_pc_sampling_record_stochastic_v0_t& pc_sample)
+{
+    auto key = gfx1151_decoded_instruction_key_t{pc_sample.pc.code_object_id,
+                                                 pc_sample.pc.code_object_offset};
+    auto instruction_info = gfx1151_decoded_instruction_info_t{};
+    if(!get_cached_gfx1151_decoded_instruction_info(key, instruction_info)) return;
+
+    apply_gfx1151_decoded_instruction(pc_sample, instruction_info);
+}
+
+template <typename GFXIP, typename PcSamplingRecordT>
 inline pcsample_status_t
 add_upcoming_samples(const device_handle     device,
                      const generic_sample_t* buffer,
@@ -253,6 +417,7 @@ add_upcoming_samples(const device_handle     device,
 
         pc_sample.pc.code_object_id     = cache_addr_range.id;
         pc_sample.pc.code_object_offset = pc_address.value - cache_addr_range.addr;
+        post_process_pc_sample<GFXIP>(pc_sample);
 
         try
         {
@@ -384,7 +549,14 @@ pcsample_status_t inline parse_buffer(generic_sample_t*                  buffer,
     }
     else if(gfxip_major == 11)
     {
-        parseSample_func = _parse_buffer<GFX11, PcSamplingRecordT>;
+        if(gfxip_minor == 5)
+        {
+            parseSample_func = _parse_buffer<GFX1151, PcSamplingRecordT>;
+        }
+        else
+        {
+            parseSample_func = _parse_buffer<GFX11, PcSamplingRecordT>;
+        }
     }
     else if(gfxip_major == 12)
     {

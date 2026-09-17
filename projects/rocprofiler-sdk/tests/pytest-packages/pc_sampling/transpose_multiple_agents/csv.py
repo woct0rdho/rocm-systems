@@ -43,6 +43,7 @@ def validate_all_agents_are_sampled(
             lambda name: name == "gfx90a"
             or name.startswith("gfx94")
             or name.startswith("gfx95")
+            or name.startswith("gfx115")
             or name.startswith("gfx12")
         )
     ]

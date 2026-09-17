@@ -32,6 +32,7 @@
 
 #include <gtest/gtest.h>
 #include <cstddef>
+#include <limits>
 
 namespace
 {
@@ -264,9 +265,8 @@ test_fail_because_of_unsupported_configuration(
     rocprofiler_agent_id_t                         agent_id,
     const rocprofiler_pc_sampling_configuration_t* pcs_config)
 {
-    auto less_than_min_interval    = pcs_config->min_interval - 1;
-    auto greater_than_max_interval = pcs_config->max_interval + 1;
-    auto wrong_method              = ROCPROFILER_PC_SAMPLING_METHOD_LAST;
+    auto less_than_min_interval = pcs_config->min_interval - 1;
+    auto wrong_method            = ROCPROFILER_PC_SAMPLING_METHOD_LAST;
     auto wrong_unit                = ROCPROFILER_PC_SAMPLING_UNIT_NONE;
 
     EXPECT_NE(rocprofiler_configure_pc_sampling_service(cb_data->client_ctx,
@@ -278,14 +278,20 @@ test_fail_because_of_unsupported_configuration(
                                                         0),
               ROCPROFILER_STATUS_SUCCESS);
 
-    EXPECT_NE(rocprofiler_configure_pc_sampling_service(cb_data->client_ctx,
-                                                        agent_id,
-                                                        pcs_config->method,
-                                                        pcs_config->unit,
-                                                        greater_than_max_interval,
-                                                        cb_data->client_buffer,
-                                                        0),
-              ROCPROFILER_STATUS_SUCCESS);
+    // The reported stochastic maximum is lower than the interval range accepted by some KFD
+    // versions. Use the largest uint64_t interval so this probe cannot create a live session.
+    if(pcs_config->max_interval < std::numeric_limits<uint64_t>::max())
+    {
+        constexpr auto greater_than_max_interval = std::numeric_limits<uint64_t>::max();
+        EXPECT_NE(rocprofiler_configure_pc_sampling_service(cb_data->client_ctx,
+                                                            agent_id,
+                                                            pcs_config->method,
+                                                            pcs_config->unit,
+                                                            greater_than_max_interval,
+                                                            cb_data->client_buffer,
+                                                            0),
+                  ROCPROFILER_STATUS_SUCCESS);
+    }
 
     EXPECT_NE(rocprofiler_configure_pc_sampling_service(cb_data->client_ctx,
                                                         agent_id,
@@ -428,7 +434,9 @@ TEST(pc_sampling, rocprofiler_configure_pc_sampling_service)
             test_fail_because_of_wrong_buffer(cb_data, agent_id, &pcs_config);
             test_fail_because_of_unsupported_configuration(cb_data, agent_id, &pcs_config);
 
-            size_t interval = pcs_config.max_interval;
+            // The reported maximum can be informationally unbounded for time-based sampling;
+            // configure at the minimum valid interval instead.
+            size_t interval = pcs_config.min_interval;
 
             // This calls succeeds
             ROCPROFILER_CALL(rocprofiler_configure_pc_sampling_service(cb_data->client_ctx,

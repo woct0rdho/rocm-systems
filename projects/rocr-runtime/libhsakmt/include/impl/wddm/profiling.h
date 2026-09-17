@@ -45,6 +45,10 @@ constexpr uint8_t kExtendedDispatchFormat = 3;
 constexpr uint32_t kManifestRequiredFlags = 0x3;
 constexpr uint32_t kMaximumPm4Dwords =
     (kQualifiedFrameBytes - kFrameTrailerReserveBytes) / sizeof(uint32_t);
+// IT_INDIRECT_BUFFER encodes the stream length in a 20-bit field. Profile packets are inlined
+// into one frame, so they stay bounded by the frame budget above; runtime packets that do not fit
+// a frame get their own command buffer, so only the hardware field bounds them.
+constexpr uint32_t kMaximumIbDwords = 0xfffffu;
 
 struct Capability {
   bool supported = false;
@@ -343,7 +347,7 @@ ValidationResult ValidateRuntimePacket(const Capability& capability,
   if (!IsVendorPacketHeader(packet.header) || packet.format != kAqlProfileIbFormat ||
       packet.dwords_remaining != 10 || packet.reserved[0] != kRuntimeManifestMagic ||
       packet.reserved[1] != kRuntimeManifestVersion || packet.reserved[2] == 0 ||
-      packet.reserved[2] > capability.max_pm4_dwords || packet.reserved[4] != 0 ||
+      packet.reserved[2] > kMaximumIbDwords || packet.reserved[4] != 0 ||
       packet.reserved[5] != 0 || packet.reserved[6] != 0 || packet.reserved[7] != 0) {
     result.status = ValidationStatus::kInvalidManifest;
     return result;

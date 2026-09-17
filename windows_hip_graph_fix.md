@@ -209,12 +209,58 @@ No thunk rejection, no GPU hang, and no queue abort appeared in the fixed run. T
 
 The fixed `amdhip64_7.dll` was installed over `C:\venv_torch\Lib\site-packages\_rocm_sdk_devel\bin\amdhip64_7.dll`; the previous file is kept at `C:\rocm-systems\build\runtime-backup\amdhip64_7.dll` for rollback.
 
-### Attempted: referencing the stream instead of inlining it
+### Referencing the stream does not work, a variable-size command buffer does
 
-A command stream that does not fit a frame was submitted as the packet's own indirect buffer instead of being copied (`VendorSpecificAqlToPm4` emitted a 4-dword `IT_INDIRECT_BUFFER` jump and the trailing packets that order completion behind the stream). Two encodings were tried: the packet's jump words, and a canonical jump rebuilt from the validated address and dword count. The validator accepted both, the submission returned no error, and then the queue stalled: `hipGraphLaunch` reported success and `hipStreamSynchronize` never returned, while the same packet inlined into a frame completed normally.
+A command stream that does not fit a frame was first submitted as the packet's own indirect buffer
+instead of being copied (`VendorSpecificAqlToPm4` emitted a 4-dword `IT_INDIRECT_BUFFER` jump and
+the trailing packets that order completion behind the stream). Two encodings were tried: the
+packet's jump words, and a canonical jump rebuilt from the validated address and dword count. The
+validator accepted both, the submission returned no error, and then the queue stalled:
+`hipGraphLaunch` reported success and `hipStreamSynchronize` never returned, while the same packet
+inlined into a frame completed normally.
 
-The submission contract explains why. `D3DKMTSubmitCommandToHwQueue` receives exactly one command buffer address and length through `Wkmi::FillinSubmitPrivData`, which carries no allocation or residency list, and the thunk never emits an indirect-buffer jump for any vendor stream: profile packets are inlined too, even though Linux hands the same packets to the hardware as indirect buffers. Only the command buffer passed to the submit call is therefore fetchable, and a jump into a separate allocation stalls the command processor.
+The submission contract explains why. `D3DKMTSubmitCommandToHwQueue` receives exactly one command
+buffer address and length through `Wkmi::FillinSubmitPrivData`, which carries no allocation or
+residency list, and the thunk never emits an indirect-buffer jump for any vendor stream: profile
+packets are inlined too, even though Linux hands the same packets to the hardware as indirect
+buffers. Only the command buffer passed to the submit call is fetchable, and a jump into a
+separate allocation stalls the command processor.
 
-Enabling these graphs on Windows needs a thunk or KMD change: either declare the referenced allocation for the submission, or submit a variable-size command buffer that holds the whole stream plus the trailer.
+The working design keeps that contract and removes the size limit instead. `VendorSpecificAqlToPm4`
+still inlines a stream that fits a frame; a larger stream is built in a dedicated command buffer,
+sized to the stream plus trailer, grown on demand, and submitted as one self-contained command
+buffer through the same submit path (`Submit` takes it when `large_packet_pending_` is set). The
+buffer is reused only after the fence of its submission retired, so the command processor cannot
+read it while the CPU writes it, and a pending frame is flushed first so submission order is
+preserved. `ValidateRuntimePacket` bounds runtime packets by the 20-bit indirect-buffer size field
+instead of the frame budget, and `hsa_ven_amd_graph_command_list_create` no longer rejects lists
+that exceed the frame.
 
-Measured in the current fixed state, `DEBUG_HIP_GRAPH_PM4=1` and `=0` give pp512 122.57 +- 3.74 / tg128 15.22 +- 0.06 and pp512 122.23 +- 4.31 / tg128 14.96 +- 0.10 t/s for this model, because the graph is declined and both arms run the AQL batch path.
+Measured with `llama-bench`, DeepSeek-V4-Flash-IQ2XXS fully on the GPU, pp512/tg128, three
+repetitions, two interleaved rounds:
+
+```text
+                         pp512 t/s            tg128 t/s
+DEBUG_HIP_GRAPH_PM4=1    120.33 +- 3.13        15.95 +- 0.03
+                         115.00 +- 2.77        15.65 +- 0.05
+DEBUG_HIP_GRAPH_PM4=0    114.78 +- 2.92        14.85 +- 0.08
+                         115.06 +- 3.18        14.69 +- 0.12
+```
+
+Averages: tg128 15.80 vs 14.77 t/s (+7.0%), pp512 117.67 vs 114.92 t/s (+2.4%). The graphs are
+now retained instead of declined (`retained 5547 dispatches in 164096 dwords` for prefill and
+`retained 4666 dispatches in 134123 dwords` for decode, with no fallback line), and output is
+unchanged (`completion: " Paris, which is"`). Graph checks with 600 dispatches (10823 dwords) and
+4096 dispatches (73751 dwords) produce the exact expected values.
+
+Windows still gains less than the Linux result because the thunk copies the whole stream into its
+command buffer on every submission, where Linux submits one small packet and the hardware fetches
+the graph buffer directly; the manifest checksum over the stream is also per submission.
+
+### Build trees here do not track header dependencies
+
+`ninja -t deps` reports `#deps 0` for the objects in these build directories, so editing a header
+does not rebuild the translation units that include it. A header change that alters a class layout
+(for example adding a member to `ComputeQueue`) then links objects built against two different
+layouts, which shows up as heap corruption at queue creation. Rebuild the affected targets from
+scratch after a header edit, for example by deleting their object directories first.

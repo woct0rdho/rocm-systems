@@ -1293,6 +1293,13 @@ For attachment profiling of running processes:
         help="Collect occupancy data without instruction-level detail.",
     )
 
+    add_parser_bool_argument(
+        att_options,
+        "--att-triple-buffer",
+        default=False,
+        help="Use device-mode ATT triple buffering for detailed traces. Limited to one shader engine.",
+    )
+
     return (parser.parse_args(rocp_args), app_args)
 
 
@@ -1911,7 +1918,7 @@ def run(app_args, args, **kwargs):
         trace_count += 1 if val else 0
         trace_opts += ["--{}".format(opt.replace("_", "-"))]
 
-    for opt in ["advanced_thread_trace", "pmc", "pc_sampling_beta_enabled"]:
+    for opt in ["advanced_thread_trace", "pmc"]:
         if not hasattr(args, f"{opt}"):
             continue
         val = getattr(args, f"{opt}")
@@ -1920,6 +1927,14 @@ def run(app_args, args, **kwargs):
 
     if args.pmc_groups:
         trace_count += 1
+
+    if args.pc_sampling_unit or args.pc_sampling_method or args.pc_sampling_interval:
+        trace_count += 1
+        trace_opts += [
+            "--pc-sampling-unit",
+            "--pc-sampling-method",
+            "--pc-sampling-interval",
+        ]
 
     # if marker tracing was requested, LD_PRELOAD the rocprofiler-sdk-roctx library
     # to override the roctx symbols of an app linked to the old roctracer roctx
@@ -2421,6 +2436,12 @@ def run(app_args, args, **kwargs):
             update_env(
                 "ROCPROF_ATT_PARAM_NO_DETAIL",
                 args.att_no_detail,
+                overwrite=True,
+            )
+        if args.att_triple_buffer:
+            update_env(
+                "ROCPROF_ATT_PARAM_TRIPLE_BUFFER",
+                args.att_triple_buffer,
                 overwrite=True,
             )
         if args.att_gpu_index:

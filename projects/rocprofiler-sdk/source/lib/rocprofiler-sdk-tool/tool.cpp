@@ -352,7 +352,15 @@ auto  counter_collection_ctx = rocprofiler_context_id_t{0};
 auto  att_device_context     = rocprofiler_context_id_t{0};
 auto  att_device_trace_id =
     std::atomic<rocprofiler_dispatch_id_t>{std::numeric_limits<uint64_t>::max()};
+struct att_shader_file_state_t
+{
+    uint64_t                              next_chunk_index = 0;
+    bool                                  created          = false;
+    std::map<uint64_t, std::vector<char>> pending_chunks  = {};
+};
+
 std::mutex att_shader_data;
+auto att_shader_file_states = std::unordered_map<std::string, att_shader_file_state_t>{};
 
 thread_local auto thread_dispatch_rename      = as_pointer<kernel_rename_stack_t>();
 thread_local auto thread_dispatch_rename_dtor = common::scope_destructor{[]() {
@@ -1901,12 +1909,59 @@ att_shader_data_callback(rocprofiler_thread_trace_shader_data_t shader_data,
     if(dispatch_id == 0) dispatch_id = att_device_trace_id.load();
     filename << fmt::format("{}_shader_engine_{}_{}", agent.handle, se_id, dispatch_id);
 
-    auto        output_stream   = get_output_stream(tool::get_config(), filename.str(), ".att");
-    std::string output_filename = get_output_filename(tool::get_config(), filename.str(), ".att");
+    if(shader_data.read_offset > shader_data.data_size)
+    {
+        ROCP_CI_LOG(WARNING) << fmt::format(
+            "Ignoring ATT chunk {} for shader engine {}: read offset {} exceeds data size {}",
+            shader_data.chunk_index,
+            se_id,
+            shader_data.read_offset,
+            shader_data.data_size);
+        return;
+    }
 
-    output_stream.stream->write(reinterpret_cast<char*>(shader_data.data), shader_data.data_size);
-    auto key = tool::att_dispatch_agent_key_t{dispatch_id, agent.handle};
-    tool_metadata->att_filenames[key].emplace_back(output_filename);
+    auto key             = tool::att_dispatch_agent_key_t{dispatch_id, agent.handle};
+    auto output_filename = get_output_filename(tool::get_config(), filename.str(), ".att");
+    auto& file_state     = att_shader_file_states[output_filename];
+
+    // A device context may be started more than once with the same output name.
+    // A lower chunk index begins a new monotonic sequence and appends another trace segment.
+    if(shader_data.chunk_index < file_state.next_chunk_index && file_state.pending_chunks.empty())
+        file_state.next_chunk_index = 0;
+
+    auto chunk = std::vector<char>{};
+    if(shader_data.data_size > shader_data.read_offset)
+    {
+        ROCP_FATAL_IF(shader_data.data == nullptr) << "ATT callback returned a null data buffer";
+        const auto* begin = static_cast<const char*>(shader_data.data) + shader_data.read_offset;
+        chunk.assign(begin, begin + (shader_data.data_size - shader_data.read_offset));
+    }
+
+    auto [_, inserted] =
+        file_state.pending_chunks.emplace(shader_data.chunk_index, std::move(chunk));
+    ROCP_WARNING_IF(!inserted) << fmt::format(
+        "Ignoring duplicate ATT chunk {} for shader engine {}", shader_data.chunk_index, se_id);
+
+    // Multi-buffer callbacks can arrive out of order. Drain only the contiguous
+    // prefix so the .att file remains in GPU emission order.
+    while(auto itr = file_state.pending_chunks.find(file_state.next_chunk_index);
+          itr != file_state.pending_chunks.end())
+    {
+        auto mode = std::ios::binary | std::ios::out |
+                    (file_state.created ? std::ios::app : std::ios::trunc);
+        auto output_stream = get_output_stream(tool::get_config(), filename.str(), ".att", mode);
+        if(!itr->second.empty())
+            output_stream.stream->write(itr->second.data(), itr->second.size());
+
+        if(!file_state.created)
+        {
+            tool_metadata->att_filenames[key].emplace_back(output_filename);
+            file_state.created = true;
+        }
+
+        file_state.pending_chunks.erase(itr);
+        ++file_state.next_chunk_index;
+    }
 }
 
 rocprofiler_thread_trace_control_flags_t
@@ -1946,7 +2001,7 @@ att_dispatch_consecutive_kernel_callback(rocprofiler_callback_tracing_record_t r
     const auto consecutive_kernels = *static_cast<uint64_t*>(CHECK_NOTNULL(userdata));
 
     static std::atomic<bool> isprofiling{false};
-    static bool              stop_profiling{false};
+    static std::atomic<bool> stop_profiling{false};
     static size_t            num_consecutive_kernels{0};
     static capture_ids_set_t captured_ids{};
 
@@ -1978,8 +2033,11 @@ att_dispatch_consecutive_kernel_callback(rocprofiler_callback_tracing_record_t r
                     // Store lowest dispatch id for shader callback function
                     if(att_device_trace_id.load() > _dispatch_id)
                         att_device_trace_id.store(_dispatch_id);
+                    if(local_count + 1 >= _consecutive_kernels)
+                        stop_profiling.store(true, std::memory_order_relaxed);
                 }
-                if(local_count >= _consecutive_kernels) stop_profiling = true;
+                else if(local_count >= _consecutive_kernels)
+                    stop_profiling.store(true, std::memory_order_relaxed);
             },
             dispatch_id,
             is_target,
@@ -1998,13 +2056,13 @@ att_dispatch_consecutive_kernel_callback(rocprofiler_callback_tracing_record_t r
         [](std::unordered_set<rocprofiler_dispatch_id_t>& _data,
            rocprofiler_dispatch_id_t                      _dispatch_id) {
             _data.erase(_dispatch_id);
-            if(!_data.empty() || !stop_profiling) return;
+            if(!_data.empty() || !stop_profiling.load(std::memory_order_relaxed)) return;
 
             bool _exp = true;
             if(!isprofiling.compare_exchange_strong(_exp, false, std::memory_order_relaxed)) return;
 
             ROCPROFILER_CALL(rocprofiler_stop_context(att_device_context), "context stop");
-            stop_profiling = false;
+            stop_profiling.store(false, std::memory_order_relaxed);
             att_device_trace_id.store(std::numeric_limits<uint64_t>::max());
         },
         dispatch_id);
@@ -3244,6 +3302,7 @@ tool_init(rocprofiler_client_finalize_t fini_func, void* tool_data)
         bool     att_serialize_all = tool::get_config().att_serialize_all;
         bool     att_no_detail     = tool::get_config().att_no_detail;
         bool     att_no_intercept  = tool::get_config().att_no_intercept;
+        bool     att_triple_buffer = tool::get_config().att_triple_buffer;
 
         global_parameters.push_back({ROCPROFILER_THREAD_TRACE_PARAMETER_TARGET_CU, {target_cu}});
         global_parameters.push_back(
@@ -3257,6 +3316,8 @@ tool_init(rocprofiler_client_finalize_t fini_func, void* tool_data)
             global_parameters.push_back({ROCPROFILER_THREAD_TRACE_PARAMETER_NO_DETAIL, {1}});
         if(att_no_intercept)
             global_parameters.push_back({ROCPROFILER_THREAD_TRACE_PARAMETER_NUM_BUFFERS, {6}});
+        else if(att_triple_buffer)
+            global_parameters.push_back({ROCPROFILER_THREAD_TRACE_PARAMETER_NUM_BUFFERS, {3}});
 
         if(exclude_nontarget)
         {
@@ -3292,9 +3353,13 @@ tool_init(rocprofiler_client_finalize_t fini_func, void* tool_data)
 
         const auto selecting_by_gpuid = !gpu_idx_set.empty();
 
-        // Use device_thread_trace_service when handling consecutive kernels or marker trace
+        // Use device_thread_trace_service when handling consecutive kernels or marker trace.
+        const auto handle_marker_trace = tool::get_config().selected_regions;
+        if(att_triple_buffer && !att_no_intercept && !handle_marker_trace &&
+           tool::get_config().att_consecutive_kernels == 0)
+            tool::get_config().att_consecutive_kernels = 1;
+
         const auto handle_consecutive_kernels = tool::get_config().att_consecutive_kernels >= 1;
-        const auto handle_marker_trace        = tool::get_config().selected_regions;
         rocprofiler_user_data_t user{.value = 0};
 
         if(att_no_intercept && handle_marker_trace)

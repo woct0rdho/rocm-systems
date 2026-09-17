@@ -33,6 +33,10 @@
 #include "core/inc/runtime.h"
 #include "inc/hsa_ext_amd.h"
 
+#if defined(_WIN32)
+#include "impl/wddm/profiling.h"
+#endif
+
 namespace rocr {
 namespace AMD {
 hsa_status_t handleException();
@@ -354,6 +358,20 @@ hsa_status_t Create(hsa_agent_t hsa_agent,
     return HSA_STATUS_ERROR_INVALID_ARGUMENT;
   }
 
+#if defined(_WIN32)
+  // WDDM translates an AQL PM4 indirect-buffer packet by copying the whole stream into one
+  // fixed-size PM4 frame, so only lists within the validated budget can be submitted. Report
+  // the limit here so HIP falls back to the AQL batch path instead of submitting a packet the
+  // thunk has to reject.
+  HsaWddmAqlProfileCapability platform_capability{};
+  if (HSAKMT_CALL(hsaKmtGetWddmAqlProfileCapability(gpu_agent->node_id(), &platform_capability)) !=
+          HSAKMT_STATUS_SUCCESS ||
+      platform_capability.Version == 0 ||
+      words.size() > platform_capability.MaxPm4Dwords) {
+    return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
+  }
+#endif
+
   const size_t bytes = words.size() * sizeof(uint32_t);
   void* ib = gpu_agent->system_allocator()(bytes, 4096, core::MemoryRegion::AllocateExecutable);
   if (ib == nullptr) {
@@ -480,6 +498,16 @@ hsa_status_t Materialize(hsa_ven_amd_graph_command_list_t handle, hsa_queue_t* q
   packet.indirect_buffer[2] = static_cast<uint32_t>(address >> 32);
   packet.indirect_buffer[3] = command_list->dwords() | kIbValid | kIbTemporalLu;
   packet.dword_count_remaining = 10;
+#if defined(_WIN32)
+  // WDDM accepts an AQL PM4 indirect buffer only with the runtime manifest that names and
+  // checksums the stream the thunk translates, matching AqlQueue::ExecutePM4.
+  const uint32_t command_dwords = command_list->dwords();
+  packet.reserved[0] = wsl::thunk::profiling::kRuntimeManifestMagic;
+  packet.reserved[1] = wsl::thunk::profiling::kRuntimeManifestVersion;
+  packet.reserved[2] = command_dwords;
+  packet.reserved[3] =
+      wsl::thunk::profiling::CommandChecksum(static_cast<const uint32_t*>(ib), command_dwords);
+#endif
   packet.completion_signal = completion_signal;
 
   std::memset(output, 0, sizeof(*output));

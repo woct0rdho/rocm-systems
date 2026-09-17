@@ -74,3 +74,5 @@ rocprofiler-sdk-rocpd:
 # - SPM location dimensions not provided for a counter are stored as NULL.
 #   instance is always set on a location row
 # - spm_counters view reads those fields from rocpd_info_pmc
+# - Added rocpd_pc_sampling table for host-trap and stochastic PC sampling records
+#   with a required method discriminator and stochastic-only metadata columns

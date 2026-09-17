@@ -112,6 +112,7 @@ struct triple_buffer_producer_data_t
     std::unique_ptr<hsa::SQTTBufferingPackets>   buffer_packet{};
 
     std::function<bool(std::unique_ptr<hsa::TraceControlAQLPacket>&)> restart_trace{};
+    bool                                         gfx11_workarounds{false};
 };
 
 // The destructor state is terminal and prevents a stopped trace from being re-enabled.

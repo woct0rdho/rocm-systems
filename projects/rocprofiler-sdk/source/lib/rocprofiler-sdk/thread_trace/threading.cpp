@@ -136,7 +136,10 @@ producer_loop(
     const size_t num_buffers = parameters.shared->num_buffers;
     const auto   sqtt_bandwidth =
         std::max(1.0, common::get_env("ROCPROFILER_SQTT_BANDWIDTH", SQTT_BANDWIDTH_DEFAULT));
-    const auto interval_microseconds = static_cast<size_t>(1E6 * buffer_size / sqtt_bandwidth);
+    const auto estimated_fill_us = static_cast<size_t>(1E6 * buffer_size / sqtt_bandwidth);
+    const auto polling_interval_us = parameters.gfx11_workarounds
+                                         ? std::max<size_t>(1, estimated_fill_us / 2)
+                                         : estimated_fill_us;
 
     auto& buffer_packet = *CHECK_NOTNULL(parameters.buffer_packet);
 
@@ -144,11 +147,15 @@ producer_loop(
 
     auto     start_t0 = std::chrono::system_clock::now();
     bool     do_sleep{false};
+    bool     saw_buffer_swap{false};
+    bool     startup_retry_performed{false};
     uint64_t next_chunk_index = 0;
 
     auto sleep_fn = [&]() {
         sched_yield();
-        std::this_thread::sleep_for(std::chrono::microseconds(interval_microseconds));
+        // Sub-millisecond sleeps routinely overshoot the buffer-fill window on Linux.
+        if(!parameters.gfx11_workarounds || polling_interval_us >= 1000)
+            std::this_thread::sleep_for(std::chrono::microseconds(polling_interval_us));
     };
 
     // Linear scan for any free (unfilled) slot. Returns num_buffers if none.
@@ -183,10 +190,16 @@ producer_loop(
         buffer.chunk_index = next_chunk_index++;
         buffer.read_offset = read_offset;
 
-        if(!isHeader)
-            parameters.copy_data_fn(queue, buffer.memory, src, size);
-        else
-            std::memcpy(buffer.memory, src, size);
+        // Preserve zero-length END callbacks as indexed segment boundaries, but
+        // do not submit a zero-byte copy: that operation may never signal
+        // completion and would deadlock producer shutdown.
+        if(size > 0)
+        {
+            if(!isHeader)
+                parameters.copy_data_fn(queue, buffer.memory, src, size);
+            else
+                std::memcpy(buffer.memory, src, size);
+        }
 
         auto copy_time = (std::chrono::system_clock::now() - t0).count() * 1E-9f;
         ROCP_TRACE << "Copy: " << copy_time << " s. BW: " << size / copy_time;
@@ -265,9 +278,19 @@ producer_loop(
         ROCP_INFO << "Total trace time: " << (end_t0 - start_t0).count() * 1E-9f << " s.";
     }};
 
+    auto startup_poll_deadline  = std::chrono::steady_clock::now() + std::chrono::milliseconds(5);
+    auto startup_retry_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+
     while(worker_flag.load() == WORKER_FLAG_RUNNING)
     {
-        if(do_sleep) sleep_fn();
+        if(do_sleep)
+        {
+            if(!parameters.gfx11_workarounds || saw_buffer_swap ||
+               std::chrono::steady_clock::now() >= startup_poll_deadline)
+                sleep_fn();
+            else
+                sched_yield();
+        }
         do_sleep = true;  // Reset value
 
         // PHASE 1: Poll SQTT buffer status
@@ -276,20 +299,57 @@ producer_loop(
 
         if(auto status = buffer_packet.query_buffer_status())
         {
+            saw_buffer_swap = true;
             if(status->gpu_full)
             {
-                auto submit_lock = std::unique_lock{queue.submit_mutex};
-                queue.submit_fn  = nullptr;
+                // gfx11 fills its per-CU trace window faster than a KFD re-arm round
+                // trip, so the engine can hit its internal write-buffer limit and switch
+                // the trace off before the producer has staged the retired buffer. Keep
+                // the capture alive on that architecture: stage what the engine wrote,
+                // then stop, drain and re-arm the trace.
+                if(!parameters.gfx11_workarounds)
+                {
+                    auto submit_lock = std::unique_lock{queue.submit_mutex};
+                    queue.submit_fn  = nullptr;
 
-                // Leave SQTT untouched after overflow: no swap, stop, restart,
-                // or later code-object markers on this queue.
-                ROCP_ERROR << "GPU buffer overflow: ATT tracing disabled for agent "
-                           << queue.agent_id.handle
-                           << ". Discarding GPU-resident trace data and rejecting ALL further "
-                              "packets on this queue, including stop/restart. Tracing will not "
-                              "resume on this queue; already-copied CPU data will still be "
-                              "delivered.";
-                return;
+                    // Leave SQTT untouched after overflow: no swap, stop, restart,
+                    // or later code-object markers on this queue.
+                    ROCP_ERROR << "GPU buffer overflow: ATT tracing disabled for agent "
+                               << queue.agent_id.handle
+                               << ". Discarding GPU-resident trace data and rejecting ALL "
+                                  "further packets on this queue, including stop/restart. "
+                                  "Tracing will not resume on this queue; already-copied CPU "
+                                  "data will still be delivered.";
+                    return;
+                }
+
+                ROCP_WARNING << "SQTT buffer overflow for agent " << queue.agent_id.handle
+                             << "; staging the retired buffer and restarting the trace";
+
+                int    flags    = ROCPROFILER_THREAD_TRACE_SHADER_DATA_FLAGS_GPU_BUFFER_FULL;
+                size_t slot_idx = try_claim_slot();
+                if(slot_idx == num_buffers)
+                {
+                    flags |= ROCPROFILER_THREAD_TRACE_SHADER_DATA_FLAGS_CPU_BUFFER_FULL;
+                    slot_idx = wait_for_free_slot();
+                }
+
+                send_to_consumer(
+                    status->data, status->size, flags, slot_idx, false, status->read_offset);
+
+                // The engine cleared CTRL.MODE when it lost packets, so take the final
+                // status snapshot, drain it, and re-arm the trace for the dispatches
+                // that are still to come.
+                if(!stop_trace()) return;
+                iterate_trace();
+                send_header();
+                // The trace restarts from the first buffer again, so the SDK's view of
+                // the swap sequence has to follow it.
+                buffer_packet.reset_current_buffer();
+                if(!parameters.restart_trace(parameters.control_packet)) return;
+
+                do_sleep = false;
+                continue;
             }
 
             ROCP_TRACE << "Sending buffer swap";
@@ -300,7 +360,8 @@ producer_loop(
             if(!att_queue_submit(queue, &status->packet, &submit_signal)) return;
             signal_wait(submit_signal);
 
-            ROCP_FATAL_IF(status->size != buffer_size)
+            // A reduced architecture-adjusted capacity is valid; reject only a true overflow.
+            ROCP_FATAL_IF(status->size > buffer_size)
                 << "GPU buffer overflow: " << status->size << " vs " << buffer_size;
 
             // Try to claim a free CPU slot. If none free, the consumers haven't
@@ -317,7 +378,7 @@ producer_loop(
             }
 
             send_to_consumer(
-                status->data, buffer_size, flags, slot_idx, false, status->read_offset);
+                status->data, status->size, flags, slot_idx, false, status->read_offset);
 
             if(cpu_full)
             {
@@ -329,6 +390,20 @@ producer_loop(
             // The status_query test verifies we immediately poll again after consuming a
             // buffer, so skip the backoff when a flip just occurred.
             do_sleep = false;
+        }
+        else if(parameters.gfx11_workarounds && !saw_buffer_swap && !startup_retry_performed &&
+                std::chrono::steady_clock::now() >= startup_retry_deadline)
+        {
+            // A rare gfx11 start can complete without the SQTT block ever producing data.
+            // Reinitialize once while the producer is already active.
+            if(!stop_trace()) break;
+            iterate_trace();
+            send_header();
+            if(!parameters.restart_trace(parameters.control_packet)) break;
+
+            startup_retry_performed = true;
+            startup_poll_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5);
+            do_sleep              = false;
         }
     }
 

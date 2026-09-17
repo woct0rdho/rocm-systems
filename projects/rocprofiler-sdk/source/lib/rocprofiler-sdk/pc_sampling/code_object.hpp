@@ -28,6 +28,9 @@
 
 #include <hsa/hsa_api_trace.h>
 #include <rocprofiler-sdk/callback_tracing.h>
+#include <rocprofiler-sdk/cxx/codeobj/code_printing.hpp>
+
+#include <memory>
 #include <mutex>
 #include <rocprofiler-sdk/cxx/codeobj/segment.hpp>
 #include <shared_mutex>
@@ -40,6 +43,49 @@ namespace code_object
 {
 using address_range_t        = rocprofiler::sdk::codeobj::segment::address_range_t;
 using CodeobjTableTranslator = rocprofiler::sdk::codeobj::segment::CodeobjTableTranslator;
+using instruction_t          = rocprofiler::sdk::codeobj::disassembly::Instruction;
+
+class CodeobjDecoderSynchronized
+{
+public:
+    void addDecoder(const char* filepath, uint64_t id, uint64_t load_addr, uint64_t memsize)
+    {
+        auto lock = std::unique_lock{mut};
+        decoder.addDecoder(filepath, id, load_addr, memsize);
+    }
+
+    void addDecoder(const void* data,
+                    size_t      memory_size,
+                    uint64_t    id,
+                    uint64_t    load_addr,
+                    uint64_t    memsize)
+    {
+        auto lock = std::unique_lock{mut};
+        decoder.addDecoder(data, memory_size, id, load_addr, memsize);
+    }
+
+    void removeDecoder(uint64_t id)
+    {
+        auto lock = std::unique_lock{mut};
+        decoder.removeDecoder(id);
+    }
+
+    std::unique_ptr<instruction_t> decodeInstruction(uint64_t code_object_id, uint64_t code_offset)
+    {
+        auto lock = std::unique_lock{mut};
+        return decoder.get(code_object_id, code_offset);
+    }
+
+    static CodeobjDecoderSynchronized* Get()
+    {
+        static auto*& _v = common::static_object<CodeobjDecoderSynchronized>::construct();
+        return _v;
+    }
+
+private:
+    std::mutex                                                  mut{};
+    rocprofiler::sdk::codeobj::disassembly::CodeobjAddressTranslate decoder{};
+};
 
 class CodeobjTableTranslatorSynchronized : public CodeobjTableTranslator
 {
@@ -126,6 +172,9 @@ initialize(RocAttachDispatchTable* table);
 
 void
 finalize();
+
+std::unique_ptr<instruction_t>
+decode_instruction(uint64_t code_object_id, uint64_t code_offset);
 
 #endif
 

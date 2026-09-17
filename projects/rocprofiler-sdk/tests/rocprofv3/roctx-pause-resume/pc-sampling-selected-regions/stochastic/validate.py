@@ -48,12 +48,22 @@ ALLOWED_V_MOV_B32_STALL_REASONS = {
 }
 
 
-def _has_gfx12_agent(json_data):
-    # Architecture-specific arbiter checks are not implemented for gfx12.
+def _gpu_agent_gfx_target(json_data):
     agents = pcs_json.get_tool(json_data)["agents"]
     gpu_agents = [agent for agent in agents if agent["type"] == 2]
     assert gpu_agents, "No GPU agents found"
-    return any(agent["gfx_target_version"] // 10000 == 12 for agent in gpu_agents)
+    return gpu_agents[0]["gfx_target_version"] // 10000
+
+
+def _wave_count_available(json_data):
+    # gfx11 ROCr cannot read SQ_PERF_SNAPSHOT_DATA1 from its trap handler, so
+    # Wave_Count is emitted as zero and carries no information on gfx11.
+    return _gpu_agent_gfx_target(json_data) != 11
+
+
+def _has_gfx12_agent(json_data):
+    # Architecture-specific arbiter checks are not implemented for gfx12.
+    return _gpu_agent_gfx_target(json_data) == 12
 
 
 def _validate_v_mov_b32_semantics(json_data):
@@ -111,10 +121,11 @@ def test_validate_pc_sampling_selected_regions_json(pc_csv, json_data, request):
         pcs_json.validate_selected_regions_gating(json_data, METHOD)
 
 
-def test_validate_pc_sampling_stochastic_specific_csv(pc_csv):
+def test_validate_pc_sampling_stochastic_specific_csv(pc_csv, json_data):
     # Validate fields emitted only by stochastic sampling.
     assert pc_csv["Wave_Issued_Instruction"].isin([0, 1]).all()
-    assert (pc_csv["Wave_Count"] > 0).all()
+    if _wave_count_available(json_data):
+        assert (pc_csv["Wave_Count"] > 0).all()
     assert pc_csv["Instruction_Type"].str.startswith(INSTRUCTION_TYPE_PREFIX).all()
     assert pc_csv["Stall_Reason"].str.startswith(STALL_REASON_PREFIX).all()
 
@@ -124,7 +135,8 @@ def test_validate_pc_sampling_stochastic_specific_json(json_data):
     for rec in pcs_json.get_records(json_data, METHOD):
         r = rec["record"]
         assert r["wave_issued"] in (0, 1)
-        assert r["wave_cnt"] > 0
+        if _wave_count_available(json_data):
+            assert r["wave_cnt"] > 0
         assert r["inst_type"].startswith(INSTRUCTION_TYPE_PREFIX)
         assert r["snapshot"]["stall_reason"].startswith(STALL_REASON_PREFIX)
 
@@ -132,6 +144,11 @@ def test_validate_pc_sampling_stochastic_specific_json(json_data):
 def test_validate_pc_sampling_stochastic_v_mov_b32_semantics(json_data):
     if _has_gfx12_agent(json_data):
         pytest.skip("v_mov_b32 arbiter semantic checks are not implemented for GFX12")
+    # The v_mov_b32 checks read the arbiter issue/stall state from the gfx9
+    # snapshot layout; on gfx11 that state lives in SQ_PERF_SNAPSHOT_DATA1,
+    # which ROCr cannot read, so the SDK reports it as zero.
+    if not _wave_count_available(json_data):
+        pytest.skip("v_mov_b32 arbiter semantic checks need SQ_PERF_SNAPSHOT_DATA1")
 
     _validate_v_mov_b32_semantics(json_data)
 

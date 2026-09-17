@@ -22,11 +22,18 @@ string(REPLACE "LD_PRELOAD=" "ROCPROF_PRELOAD=" PRELOAD_ENV
 set(TRANSPOSE_NUM_THREADS 16)
 set(TRANSPOSE_NUM_ITERATIONS 100)
 
+# gfx1151 honours the requested host-trap interval exactly, so upstream's 1us
+# setting emits tens of millions of samples (tens of GB of CSV) over this
+# workload. 1ms still samples every agent and resolves the transpose kernel,
+# which is all this fixture asserts, without the volume.
+set(TRANSPOSE_PCS_INTERVAL_US 1024)
+
 rocprofiler_add_integration_execute_test(
     rocprofv3-test-pc-sampling-host-trap-transpose-multiple-agents-input-cmd
     COMMAND
         $<TARGET_FILE:rocprofiler-sdk::rocprofv3> --kernel-trace --pc-sampling-unit time
-        --pc-sampling-method host_trap --pc-sampling-interval 1 --agent-index absolute -d
+        --pc-sampling-method host_trap --pc-sampling-interval ${TRANSPOSE_PCS_INTERVAL_US}
+        --agent-index absolute -d
         ${CMAKE_CURRENT_BINARY_DIR}/pc_sampling_cmd_input -o out --output-format csv --
         $<TARGET_FILE:transpose> ${TRANSPOSE_NUM_THREADS} ${TRANSPOSE_NUM_ITERATIONS}
     DEPENDS transpose

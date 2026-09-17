@@ -32,14 +32,17 @@ def validate_all_agents_are_sampled(
     input_kernel_trace_csv: pd.DataFrame,
     input_agent_info_csv: pd.DataFrame,
 ):
-    transpose_kernel_source_line_start = 181
-    transpose_kernel_source_line_end = 189
+    # Line range of the transpose kernel in
+    # tests/bin/transpose/transpose.cpp (`__global__ void transpose`).
+    transpose_kernel_source_line_start = 192
+    transpose_kernel_source_line_end = 202
 
     gfx9_gfx12_agents_df = input_agent_info_csv[
         input_agent_info_csv["Name"].apply(
             lambda name: name == "gfx90a"
             or name.startswith("gfx94")
             or name.startswith("gfx95")
+            or name.startswith("gfx115")
             or name.startswith("gfx12")
         )
     ]

@@ -57,12 +57,15 @@ public:
     CodeFile(Fspath dir, std::shared_ptr<AddressTable> table);
     ~CodeFile();
     void addCodeobj(uint64_t id);
+    void addFallbackPC(pcinfo_t pc);
+    void addZeroHitDisassembly();
 
     const Fspath                                  dir{};
     std::unordered_map<pcinfo_t, int>             line_numbers{};
     std::map<pcinfo_t, std::unique_ptr<CodeLine>> isa_map{};
     std::map<pcinfo_t, KernelName>                kernel_names{};
     std::vector<uint64_t>                         codeobj_ids{};
+    std::vector<pcinfo_t>                         fallback_pcs{};
 
     std::shared_ptr<AddressTable> table;
 };

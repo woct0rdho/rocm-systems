@@ -700,6 +700,30 @@ class gfx11_cntx_prim {
   }
 };
 
+class gfx115x_sqtt_prim : public gfx11_cntx_prim {
+ public:
+  static constexpr Register SQ_THREAD_TRACE_BUF1_BASE_LO_ADDR =
+      REG_32B_ADDR(GC, 0, regSQ_THREAD_TRACE_BUF1_BASE);
+  static constexpr Register SQ_THREAD_TRACE_BUF1_SIZE_ADDR =
+      REG_32B_ADDR(GC, 0, regSQ_THREAD_TRACE_BUF1_SIZE);
+  static constexpr Register SQ_THREAD_TRACE_STATUS2_ADDR =
+      REG_32B_ADDR(GC, 0, regSQ_THREAD_TRACE_STATUS2);
+
+  static constexpr uint32_t TT_CONTROL_UTC_ERR_MASK = gfx11_cntx_prim::TT_CONTROL_UTC_ERR_MASK;
+  static constexpr uint32_t TT_CONTROL_FULL_MASK = SQ_THREAD_TRACE_STATUS2__BUF0_FULL_MASK |
+                                                  SQ_THREAD_TRACE_STATUS2__BUF1_FULL_MASK |
+                                                  SQ_THREAD_TRACE_STATUS2__WRITE_BUF_FULL_MASK;
+  static constexpr uint32_t TT_WRITE_PTR_MASK = gfx11_cntx_prim::TT_WRITE_PTR_MASK;
+  static constexpr uint32_t TT_LOCKDOWN_FAIL =
+      SQ_THREAD_TRACE_STATUS2__PACKET_LOST_BUF_NO_LOCKDOWN_MASK;
+
+  static uint32_t sqtt_ctrl_value(bool on, bool double_buffer) {
+    uint32_t value = gfx11_cntx_prim::sqtt_ctrl_value(on, false);
+    if (double_buffer) value |= SQ_THREAD_TRACE_CTRL__DOUBLE_BUFFER_MASK;
+    return value;
+  }
+};
+
 }  // namespace gfx11
 }  // namespace gfxip
 

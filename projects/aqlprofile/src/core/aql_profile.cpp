@@ -738,9 +738,15 @@ hsa_ven_amd_aqlprofile_iterate_data(const hsa_ven_amd_aqlprofile_profile_t* prof
           if (control_ptr[se_index].status & sqttbuilder->GetUTCErrorMask()) {
             ERR_LOGGING << "SQTT memory error received, SE(" << se_index << ")";
             status = HSA_STATUS_ERROR_EXCEPTION;
-          } else if (control_ptr[se_index].status & sqttbuilder->GetBufferFullMask()) {
-            ERR2_LOGGING << "SQTT data buffer full, SE(" << se_index << ")";
-            if (status == HSA_STATUS_SUCCESS) status = HSA_STATUS_ERROR_OUT_OF_RESOURCES;
+          } else {
+            const bool has_status2 = pm4_factory->IsGFX11() ||
+                                     (pm4_factory->GetGpuId() >= aql_profile::GFX12_GPU_ID);
+            auto status2_value =
+                has_status2 ? control_ptr[se_index].status2 : control_ptr[se_index].status;
+            if (status2_value & sqttbuilder->GetBufferFullMask()) {
+              ERR2_LOGGING << "SQTT data buffer full, SE(" << se_index << ")";
+              if (status == HSA_STATUS_SUCCESS) status = HSA_STATUS_ERROR_OUT_OF_RESOURCES;
+            }
           }
         }
 

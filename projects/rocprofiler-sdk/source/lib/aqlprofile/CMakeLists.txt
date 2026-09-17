@@ -33,6 +33,7 @@ target_link_libraries(
             $<BUILD_INTERFACE:rocprofiler-sdk::rocprofiler-sdk-abseil>
             $<BUILD_INTERFACE:rocprofiler-sdk::rocprofiler-sdk-fmt>
             $<BUILD_INTERFACE:rocprofiler-sdk::rocprofiler-sdk-dl>
+            $<BUILD_INTERFACE:rocprofiler-sdk::rocprofiler-sdk-drm>
             $<BUILD_INTERFACE:rocprofiler-sdk::rocprofiler-sdk-hsa-runtime-nolink>)
 set_target_properties(rocprofiler-sdk-aqlprofile PROPERTIES POSITION_INDEPENDENT_CODE ON)
 

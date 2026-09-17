@@ -89,6 +89,7 @@ struct QuickToken
 // the number written. Single-threaded, no exceptions.
 #if ROCPROF_TRACE_DECODER_QUICK_SCAN_HAS_SIMD
 size_t scan_gfx9(const uint8_t* buf, size_t size, QuickToken* __restrict__ out, size_t out_cap);
+size_t scan_gfx11(const uint8_t* buf, size_t size, QuickToken* __restrict__ out, size_t out_cap);
 size_t scan_gfx12(const uint8_t* buf, size_t size, QuickToken* __restrict__ out, size_t out_cap);
 size_t scan_mi400(const uint8_t* buf, size_t size, QuickToken* __restrict__ out, size_t out_cap);
 #endif

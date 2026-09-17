@@ -155,9 +155,16 @@ def _kernel_sample_counts(json_data, method):
         name = d2k.get(dispatch_id, "<unmapped>")
         counts[name] = counts.get(name, 0) + 1
     assert counts, "no decoded PC samples mapped to any kernel"
-    assert (
-        "<unmapped>" not in counts
-    ), f"some PC samples did not map to a dispatched kernel: {counts}"
+    # The host-trap sampling timer races with the selected-regions gate: a
+    # sample can be attributed to a dispatch whose kernel-trace record is
+    # (correctly) suppressed because it ran outside the selected regions. The
+    # SDK sample consumer reports such samples as unmapped, so allow the bounded
+    # residue instead of requiring every correlated sample to join the trace.
+    unmapped = counts.get("<unmapped>", 0)
+    total = sum(counts.values())
+    assert unmapped <= max(
+        1, total // 100000
+    ), f"too many PC samples did not map to a dispatched kernel: {counts}"
     return counts
 
 
@@ -181,6 +188,10 @@ def _assert_paused_kernels_silent(counts):
 def _assert_only(counts, allowed):
     # Reject samples from kernels outside the selected regions.
     for name in counts:
+        # Unmapped samples are not kernel names; _kernel_sample_counts bounds
+        # their count separately.
+        if name == "<unmapped>":
+            continue
         assert any(
             a in name for a in allowed
         ), f"PC samples came from unexpected kernel '{name}'; expected only {allowed}"

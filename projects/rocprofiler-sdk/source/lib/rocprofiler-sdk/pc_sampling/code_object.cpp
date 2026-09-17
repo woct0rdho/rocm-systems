@@ -107,6 +107,29 @@ executable_freeze_internal(hsa_executable_t executable)
                     address_range_t{code_object_rocp.load_base,
                                     code_object_rocp.load_size,
                                     code_object_rocp.code_object_id});
+
+                if(code_object_rocp.storage_type == ROCPROFILER_CODE_OBJECT_STORAGE_TYPE_FILE &&
+                   code_object_rocp.uri != nullptr)
+                {
+                    CodeobjDecoderSynchronized::Get()->addDecoder(code_object_rocp.uri,
+                                                                  code_object_rocp.code_object_id,
+                                                                  code_object_rocp.load_delta,
+                                                                  code_object_rocp.load_size);
+                }
+                else if(code_object_rocp.storage_type ==
+                            ROCPROFILER_CODE_OBJECT_STORAGE_TYPE_MEMORY &&
+                        code_object_rocp.memory_base != 0 && code_object_rocp.memory_size != 0)
+                {
+                    // NOLINTBEGIN(performance-no-int-to-ptr)
+                    CodeobjDecoderSynchronized::Get()->addDecoder(
+                        reinterpret_cast<const void*>(code_object_rocp.memory_base),
+                        code_object_rocp.memory_size,
+                        code_object_rocp.code_object_id,
+                        code_object_rocp.load_delta,
+                        code_object_rocp.load_size);
+                    // NOLINTEND(performance-no-int-to-ptr)
+                }
+
                 flush_pc_sampling_buffers(code_object);
             }
         });
@@ -139,6 +162,7 @@ executable_destroy_internal(hsa_executable_t executable)
                     address_range_t{code_object_rocp.load_base,
                                     code_object_rocp.load_size,
                                     code_object_rocp.code_object_id});
+                CodeobjDecoderSynchronized::Get()->removeDecoder(code_object_rocp.code_object_id);
             }
         });
 }
@@ -219,6 +243,18 @@ finalize()
         [&](const rocprofiler::code_object::hsa::code_object& code_object) {
             flush_pc_sampling_buffers(code_object);
         });
+}
+
+std::unique_ptr<instruction_t>
+decode_instruction(uint64_t code_object_id, uint64_t code_offset)
+{
+    try
+    {
+        return CodeobjDecoderSynchronized::Get()->decodeInstruction(code_object_id, code_offset);
+    } catch(...)
+    {
+        return nullptr;
+    }
 }
 
 }  // namespace code_object

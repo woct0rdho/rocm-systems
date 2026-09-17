@@ -364,6 +364,33 @@ service_fini()
     flush_all_agents_buffers();
 }
 
+void
+stop_sampling_threads()
+{
+    if(!is_hsa_initialized().load()) return;
+
+    std::unordered_set<context::pc_sampling_service*> services_to_stop;
+    get_global_pc_sampling_sessions().rlock([&services_to_stop](const auto& sessions) {
+        for(const auto& [_, agent_session] : sessions)
+        {
+            auto* ctx = rocprofiler::context::get_registered_context(agent_session->context_id);
+            if(ctx && ctx->pc_sampler)
+            {
+                services_to_stop.insert(ctx->pc_sampler.get());
+            }
+        }
+    });
+
+    for(auto* service : services_to_stop)
+    {
+        bool expected = true;
+        if(service->enabled.compare_exchange_strong(expected, false))
+        {
+            hsa::pc_sampling_service_stop(service);
+        }
+    }
+}
+
 }  // namespace pc_sampling
 }  // namespace rocprofiler
 

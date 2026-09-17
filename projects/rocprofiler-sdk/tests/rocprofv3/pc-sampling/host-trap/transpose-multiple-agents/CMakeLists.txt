@@ -51,7 +51,12 @@ rocprofiler_add_integration_validate_test(
          ${CMAKE_CURRENT_BINARY_DIR}/pc_sampling_cmd_input/out_kernel_trace.csv
          --input-agent-info-csv
          ${CMAKE_CURRENT_BINARY_DIR}/pc_sampling_cmd_input/out_agent_info.csv
-    TIMEOUT 60
+    # gfx1151 host-trap sampling injects traps from a driver kthread at the
+    # requested interval, so a 1us interval over this workload emits tens of
+    # millions of samples (tens of GB of CSV). Reading that fixture costs far
+    # more than the upstream gfx9 periodic-trap budget this timeout was sized
+    # for, so allow the validator to finish.
+    TIMEOUT 600
     LABELS "integration-tests;pc-sampling"
     FIXTURES_REQUIRED
         rocprofv3-test-pc-sampling-host-trap-transpose-multiple-agents-input-cmd
@@ -87,7 +92,12 @@ rocprofiler_add_integration_validate_test(
          ${CMAKE_CURRENT_BINARY_DIR}/pc_sampling_json_input/out_kernel_trace.csv
          --input-agent-info-csv
          ${CMAKE_CURRENT_BINARY_DIR}/pc_sampling_json_input/out_agent_info.csv
-    TIMEOUT 60
+    # gfx1151 host-trap sampling injects traps from a driver kthread at the
+    # requested interval, so a 1us interval over this workload emits tens of
+    # millions of samples (tens of GB of CSV). Reading that fixture costs far
+    # more than the upstream gfx9 periodic-trap budget this timeout was sized
+    # for, so allow the validator to finish.
+    TIMEOUT 600
     LABELS "integration-tests;pc-sampling"
     FIXTURES_REQUIRED
         rocprofv3-test-pc-sampling-host-trap-transpose-multiple-agents-input-json
@@ -122,7 +132,12 @@ rocprofiler_add_integration_validate_test(
          ${CMAKE_CURRENT_BINARY_DIR}/pc_sampling_yaml_input/out_kernel_trace.csv
          --input-agent-info-csv
          ${CMAKE_CURRENT_BINARY_DIR}/pc_sampling_yaml_input/out_agent_info.csv
-    TIMEOUT 60
+    # gfx1151 host-trap sampling injects traps from a driver kthread at the
+    # requested interval, so a 1us interval over this workload emits tens of
+    # millions of samples (tens of GB of CSV). Reading that fixture costs far
+    # more than the upstream gfx9 periodic-trap budget this timeout was sized
+    # for, so allow the validator to finish.
+    TIMEOUT 600
     LABELS "integration-tests;pc-sampling"
     FIXTURES_REQUIRED
         rocprofv3-test-pc-sampling-host-trap-transpose-multiple-agents-input-yaml

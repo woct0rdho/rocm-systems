@@ -149,6 +149,25 @@ copyHwId<GFX9, rocprofiler_pc_sampling_hw_id_v0_t>(rocprofiler_pc_sampling_hw_id
 
 template <>
 inline void
+copyHwId<GFX1151, rocprofiler_pc_sampling_hw_id_v0_t>(
+    rocprofiler_pc_sampling_hw_id_v0_t& hw_id,
+    const uint32_t                      hw_id_reg)
+{
+    // HW_ID1 layout used by gfx1151 stochastic/host-trap records.
+    // 4:0 -> wave_id
+    hw_id.wave_id = EXTRACT_BITS(hw_id_reg, 4, 0);
+    // 9:8 -> simd_id
+    hw_id.simd_id = EXTRACT_BITS(hw_id_reg, 9, 8);
+    // 13:10 -> wgp_id
+    hw_id.cu_or_wgp_id = EXTRACT_BITS(hw_id_reg, 13, 10);
+    // 16 -> sa_id
+    hw_id.shader_array_id = EXTRACT_BITS(hw_id_reg, 16, 16);
+    // 20:18 -> se_id
+    hw_id.shader_engine_id = EXTRACT_BITS(hw_id_reg, 20, 18);
+}
+
+template <>
+inline void
 copyHwId<GFX12, rocprofiler_pc_sampling_hw_id_v0_t>(rocprofiler_pc_sampling_hw_id_v0_t& hw_id,
                                                     const uint32_t                      hw_id_reg)
 {
@@ -309,7 +328,19 @@ copySample<GFX11, rocprofiler_pc_sampling_record_host_trap_v0_t>(const void* sam
     return ret;
 }
 
-// TODO: implement stochastic for GFX11
+template <>
+inline rocprofiler_pc_sampling_record_host_trap_v0_t
+copySample<GFX1151, rocprofiler_pc_sampling_record_host_trap_v0_t>(const void* sample)
+{
+    const auto& sample_ = *static_cast<const perf_sample_host_trap_v1*>(sample);
+    auto        ret     = copySampleHeader<rocprofiler_pc_sampling_record_host_trap_v0_t>(sample_);
+
+    copyChipletId<GFX1151>(ret, sample_);
+    copyHwId<GFX1151>(ret.hw_id, sample_.hw_id);
+
+    return ret;
+}
+
 template <>
 inline rocprofiler_pc_sampling_record_stochastic_v0_t
 copySample<GFX11, rocprofiler_pc_sampling_record_stochastic_v0_t>(const void* sample)
@@ -319,6 +350,58 @@ copySample<GFX11, rocprofiler_pc_sampling_record_stochastic_v0_t>(const void* sa
     // TODO: decode other fields
     // TODO: implement logic for manipulating stochastic related fields
     // ret.wave_count      = sample_.perf_snapshot_data1 & 0x3F;
+    return ret;
+}
+
+template <>
+inline rocprofiler_pc_sampling_record_stochastic_v0_t
+copySample<GFX1151, rocprofiler_pc_sampling_record_stochastic_v0_t>(const void* sample)
+{
+    const auto& sample_ = *static_cast<const perf_sample_snapshot_v1*>(sample);
+
+    auto perf_snapshot_data = sample_.perf_snapshot_data;
+    auto valid              = static_cast<bool>(EXTRACT_BITS(perf_snapshot_data, 0, 0));
+    if(!valid)
+    {
+        rocprofiler_pc_sampling_record_stochastic_v0_t invalid{};
+        invalid.size = 0;
+        return invalid;
+    }
+
+    auto ret = copySampleHeader<rocprofiler_pc_sampling_record_stochastic_v0_t>(sample_);
+
+    copyChipletId<GFX1151>(ret, sample_);
+    copyHwId<GFX1151>(ret.hw_id, sample_.hw_id);
+
+    ret.wave_issued = EXTRACT_BITS(perf_snapshot_data, 1, 1);
+    ret.inst_type   = ret.wave_issued
+                          ? translate_inst<GFX1151>(EXTRACT_BITS(perf_snapshot_data, 5, 2))
+                          : ROCPROFILER_PC_SAMPLING_INSTRUCTION_TYPE_NO_INST;
+    ret.snapshot.reason_not_issued =
+        translate_reason<GFX1151>(EXTRACT_BITS(perf_snapshot_data, 8, 6));
+    ret.snapshot.sampling_lock_error = EXTRACT_BITS(perf_snapshot_data, 14, 14);
+
+    auto     perf_snapshot_data1 = sample_.perf_snapshot_data1;
+    uint16_t arb_state           = EXTRACT_BITS(perf_snapshot_data1, 24, 9);
+    ret.snapshot.arb_state_issue_brmsg      = EXTRACT_BITS(arb_state, 0, 0);
+    ret.snapshot.arb_state_issue_exp        = EXTRACT_BITS(arb_state, 1, 1);
+    ret.snapshot.arb_state_issue_lds_direct = EXTRACT_BITS(arb_state, 2, 2);
+    ret.snapshot.arb_state_issue_lds        = EXTRACT_BITS(arb_state, 3, 3);
+    ret.snapshot.arb_state_issue_vmem_tex   = EXTRACT_BITS(arb_state, 4, 4);
+    ret.snapshot.arb_state_issue_scalar     = EXTRACT_BITS(arb_state, 5, 5);
+    ret.snapshot.arb_state_issue_valu       = EXTRACT_BITS(arb_state, 6, 6);
+
+    ret.snapshot.arb_state_stall_brmsg      = EXTRACT_BITS(arb_state, 8, 8);
+    ret.snapshot.arb_state_stall_exp        = EXTRACT_BITS(arb_state, 9, 9);
+    ret.snapshot.arb_state_stall_lds_direct = EXTRACT_BITS(arb_state, 10, 10);
+    ret.snapshot.arb_state_stall_lds        = EXTRACT_BITS(arb_state, 11, 11);
+    ret.snapshot.arb_state_stall_vmem_tex   = EXTRACT_BITS(arb_state, 12, 12);
+    ret.snapshot.arb_state_stall_scalar     = EXTRACT_BITS(arb_state, 13, 13);
+    ret.snapshot.arb_state_stall_valu       = EXTRACT_BITS(arb_state, 14, 14);
+
+    ret.wave_count               = EXTRACT_BITS(perf_snapshot_data1, 5, 0);
+    ret.flags.has_memory_counter = false;
+
     return ret;
 }
 

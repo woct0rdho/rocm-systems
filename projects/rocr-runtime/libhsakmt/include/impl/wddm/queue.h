@@ -209,6 +209,9 @@ public:
   uint64_t CalcDispatchWavesPerGroup(hsa_kernel_dispatch_packet_t *packet, bool wave32);
 
   hsa_status_t VendorSpecificAqlToPm4(char *cpu, profiling::AqlProfilePacket *packet);
+  uint32_t BuildVendorTrailer(char* dst, profiling::AqlProfilePacket* packet);
+  char* AcquireLargeCommandBuffer(size_t size);
+  bool WaitForLargeCommandBuffer(void);
   hsa_status_t SwitchAql2PM4(uint16_t packet_header);
   void ReleaseCompletedProfileReferences(bool wait_for_all);
   void ReleaseProfileResources(std::vector<GpuMemory*>* references, void** signal_reference);
@@ -230,6 +233,15 @@ public:
 
   uint64_t cmdbuf_aql_frame_write_index;
   uint32_t cmdbuf_aql_frame_size;
+
+  // Vendor stream that does not fit a frame, built in its own variable-size command buffer.
+  // The buffer is reused once |large_packet_fence_| retires.
+  GpuMemoryHandle large_cmdbuf_ = 0;
+  char* large_cmdbuf_addr_ = nullptr;
+  size_t large_cmdbuf_size_ = 0;
+  uint64_t large_packet_fence_ = 0;
+  uint32_t large_packet_size_ = 0;
+  bool large_packet_pending_ = false;
 
   uint64_t  *signal_addr_;
   bool platform_atomic_support_;

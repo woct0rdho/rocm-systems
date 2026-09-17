@@ -355,6 +355,12 @@ ComputeQueue::~ComputeQueue() {
 
   auto amd_queue_gpu_mem = GpuMemory::Convert(amd_queue_mem_);
   delete amd_queue_gpu_mem;
+
+  if (large_cmdbuf_ != 0) {
+    auto* large_gpu_mem = GpuMemory::Convert(large_cmdbuf_);
+    delete large_gpu_mem;
+    large_cmdbuf_ = 0;
+  }
 }
 
 void ComputeQueue::InitScratchSRD() {
@@ -682,9 +688,20 @@ hsa_status_t ComputeQueue::Submit(void) {
   hsa_status_t ret = PreSubmit();
   if (ret) return HSA_STATUS_ERROR;
 
-  ret = use_hws ? HwsSubmit(ib_start_addr, ib_size, cmdbuf_aql_frame_write_index)
-                : SwsSubmit(ib_start_addr, ib_size, cmdbuf_aql_frame_write_index);
-  if (ret) return HSA_STATUS_ERROR;
+  if (large_packet_pending_) {
+    ret = use_hws ? HwsSubmit(reinterpret_cast<uint64_t>(large_cmdbuf_addr_), large_packet_size_,
+                              cmdbuf_aql_frame_write_index)
+                  : SwsSubmit(reinterpret_cast<uint64_t>(large_cmdbuf_addr_), large_packet_size_,
+                              cmdbuf_aql_frame_write_index);
+    if (ret) return HSA_STATUS_ERROR;
+
+    large_packet_fence_ = cmdbuf_aql_frame_write_index;
+    large_packet_pending_ = false;
+  } else {
+    ret = use_hws ? HwsSubmit(ib_start_addr, ib_size, cmdbuf_aql_frame_write_index)
+                  : SwsSubmit(ib_start_addr, ib_size, cmdbuf_aql_frame_write_index);
+    if (ret) return HSA_STATUS_ERROR;
+  }
 
   ret = EndSubmit();
   if (ret) return HSA_STATUS_ERROR;
@@ -1146,71 +1163,141 @@ hsa_status_t ComputeQueue::VendorSpecificAqlToPm4(char* cpu,
   pr_debug("queue %p process VENDOR_SPECIFIC pkt pm4_addr %p pm4_size %#x cs=%" PRIx64 "\n",
            ring, pm4_addr, validation.command_dwords, packet->completion_signal);
 
-  size_t required_size = static_cast<size_t>(validation.command_dwords) * sizeof(uint32_t);
-  required_size += platform_atomic_support_ ? sizeof(AtomicTemplate) : sizeof(WriteDataTemplate);
+  const size_t command_bytes = static_cast<size_t>(validation.command_dwords) * sizeof(uint32_t);
+  size_t trailer_bytes =
+      platform_atomic_support_ ? sizeof(AtomicTemplate) : sizeof(WriteDataTemplate);
   if (packet->completion_signal != 0) {
-    required_size += sizeof(BarrierTemplate);
-    required_size += device->Major() == 9 ? sizeof(gfx9::AcquireMemTemplate)
+    trailer_bytes += sizeof(BarrierTemplate);
+    trailer_bytes += device->Major() == 9 ? sizeof(gfx9::AcquireMemTemplate)
                                           : sizeof(gfx10::AcquireMemTemplate);
-    if (EnableProfiling()) required_size += 2 * sizeof(PM4MEC_COPY_DATA);
-    if (platform_atomic_support_) required_size += sizeof(AtomicTemplate);
-  }
-  if (required_size > cmdbuf_aql_frame_size) {
-    ReleaseProfileResources(&references, &signal_reference);
-    pr_err("PM4 command buffer overflow in VendorSpecific: required %zu bytes, limit %u bytes\n",
-           required_size, cmdbuf_aql_frame_size);
-    return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
+    if (EnableProfiling()) trailer_bytes += 2 * sizeof(PM4MEC_COPY_DATA);
+    if (platform_atomic_support_) trailer_bytes += sizeof(AtomicTemplate);
   }
 
+  // A stream that fits a frame is inlined into the frame being filled. A larger stream is built in
+  // a dedicated variable-size command buffer and submitted as one self-contained command buffer,
+  // because WDDM only makes the submitted command buffer fetchable to the command processor.
+  const bool inline_commands = command_bytes + trailer_bytes <= cmdbuf_aql_frame_size;
+
+  if (!inline_commands && ib_size != 0) {
+    // Flush packets already buffered so submission order is preserved.
+    const hsa_status_t flush_status = Submit();
+    if (flush_status != HSA_STATUS_SUCCESS) {
+      ReleaseProfileResources(&references, &signal_reference);
+      return flush_status;
+    }
+  }
+
+  char* dst = cpu;
   uint32_t i = static_cast<uint32_t>(ib_size);
-  const int major = device->Major();
-  memcpy(cpu + i, pm4_addr, validation.command_dwords * sizeof(uint32_t));
-  i += validation.command_dwords * sizeof(uint32_t);
-
-  if (packet->completion_signal != 0) {
-    auto* signal = reinterpret_cast<amd_signal_t*>(packet->completion_signal);
-    uint64_t* signal_addr =
-        reinterpret_cast<uint64_t*>(const_cast<int64_t*>(&signal->value));
-    pr_debug("signal value=%" PRIx64 "\n", signal->value);
-
-    const auto timestamp_targets = profiling::SelectDispatchTimestampTargets(
-        EnableProfiling(), &signal->start_ts, &signal->end_ts);
-    if (timestamp_targets.start) i += cmd_util.BuildCopyData(timestamp_targets.start, cpu + i);
-    i += cmd_util.BuildBarrier(cpu + i);
-    if (timestamp_targets.end) i += cmd_util.BuildCopyData(timestamp_targets.end, cpu + i);
-    i += cmd_util.BuildAcquireMem(major, cpu + i);
-
-    if (platform_atomic_support_)
-      i += cmd_util.BuildAtomicMem(signal_addr, TC_OP_ATOMIC_ADD_RTN_64, cpu + i,
-                                   cache_policy__mec_atomic_mem__bypass, -1);
-    else
-      signal_addr_ = signal_addr;
+  if (!inline_commands) {
+    dst = AcquireLargeCommandBuffer(command_bytes + trailer_bytes);
+    if (dst == nullptr) {
+      ReleaseProfileResources(&references, &signal_reference);
+      pr_err("PM4 command buffer allocation failed in VendorSpecific: required %zu bytes\n",
+             command_bytes + trailer_bytes);
+      return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
+    }
+    i = 0;
   }
 
-  if (platform_atomic_support_)
-    i += cmd_util.BuildAtomicMem((uint64_t*)ring_rptr, TC_OP_ATOMIC_ADD_RTN_64, cpu + i);
-  else
-    i += cmd_util.BuildWriteData64Command(cpu + i, (uint64_t*)ring_rptr,
-                                          cmdbuf_aql_frame_write_index + 1);
-
-  if ((i - ib_size) > cmdbuf_aql_frame_size) {
-    ReleaseProfileResources(&references, &signal_reference);
-    pr_err("PM4 command buffer overflow in VendorSpecific: used %" PRIu64 " bytes, limit %u bytes\n",
-           i - ib_size, cmdbuf_aql_frame_size);
-    return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
-  }
+  memcpy(dst + i, pm4_addr, command_bytes);
+  i += static_cast<uint32_t>(command_bytes);
+  i += BuildVendorTrailer(dst + i, packet);
 
   profiling_submission_state_ = next_submission_state;
   profile_references_for_submit_ = std::move(references);
   profile_signal_for_submit_ = signal_reference;
   signal_reference = nullptr;
-  ib_size = i;
+  if (inline_commands) {
+    ib_size = i;
+  } else {
+    large_packet_size_ = i;
+    large_packet_pending_ = true;
+    ib_size = 0;
+  }
   cmdbuf_aql_frame_write_index++;
   // Clear the vendor format before publishing the recycled slot as invalid.
   packet->format = 0;
   rocr::atomic::Store(&packet->header, static_cast<uint16_t>(HSA_PACKET_TYPE_INVALID),
                       std::memory_order_release);
   return HSA_STATUS_SUCCESS;
+}
+
+// Append the packets that order completion behind a vendor stream: optional timestamp copies, the
+// completion barrier, the cache flush, the signal update, and the AQL read-pointer update.
+uint32_t ComputeQueue::BuildVendorTrailer(char* dst, profiling::AqlProfilePacket* packet) {
+  uint32_t i = 0;
+  const int major = device->Major();
+
+  if (packet->completion_signal != 0) {
+    auto* signal = reinterpret_cast<amd_signal_t*>(packet->completion_signal);
+    uint64_t* signal_addr = reinterpret_cast<uint64_t*>(const_cast<int64_t*>(&signal->value));
+    pr_debug("signal value=%" PRIx64 "\n", signal->value);
+
+    const auto timestamp_targets = profiling::SelectDispatchTimestampTargets(
+        EnableProfiling(), &signal->start_ts, &signal->end_ts);
+    if (timestamp_targets.start) i += cmd_util.BuildCopyData(timestamp_targets.start, dst + i);
+    i += cmd_util.BuildBarrier(dst + i);
+    if (timestamp_targets.end) i += cmd_util.BuildCopyData(timestamp_targets.end, dst + i);
+    i += cmd_util.BuildAcquireMem(major, dst + i);
+
+    if (platform_atomic_support_)
+      i += cmd_util.BuildAtomicMem(signal_addr, TC_OP_ATOMIC_ADD_RTN_64, dst + i,
+                                   cache_policy__mec_atomic_mem__bypass, -1);
+    else
+      signal_addr_ = signal_addr;
+  }
+
+  if (platform_atomic_support_)
+    i += cmd_util.BuildAtomicMem((uint64_t*)ring_rptr, TC_OP_ATOMIC_ADD_RTN_64, dst + i);
+  else
+    i += cmd_util.BuildWriteData64Command(dst + i, (uint64_t*)ring_rptr,
+                                          cmdbuf_aql_frame_write_index + 1);
+  return i;
+}
+
+// Return the command buffer dedicated to streams that do not fit a frame, growing it when a larger
+// stream arrives. The buffer is reused only after the submission that used it retired, so the
+// command processor cannot read it while the CPU writes it.
+char* ComputeQueue::AcquireLargeCommandBuffer(size_t size) {
+  if (large_cmdbuf_ != 0 && large_cmdbuf_size_ < size) {
+    if (!WaitForLargeCommandBuffer()) return nullptr;
+    auto* large_gpu_mem = GpuMemory::Convert(large_cmdbuf_);
+    delete large_gpu_mem;
+    large_cmdbuf_ = 0;
+    large_cmdbuf_addr_ = nullptr;
+    large_cmdbuf_size_ = 0;
+  }
+
+  if (large_cmdbuf_ == 0) {
+    GpuMemoryCreateInfo create_info{};
+    create_info.size = size;
+    create_info.domain = Wkmi::kSystem;
+    GpuMemory* gpu_mem = nullptr;
+    if (device->CreateGpuMemory(create_info, &gpu_mem) != ErrorCode::Success) return nullptr;
+    large_cmdbuf_ = gpu_mem->GetGpuMemoryHandle();
+    large_cmdbuf_addr_ = reinterpret_cast<char*>(gpu_mem->GpuAddress());
+    large_cmdbuf_size_ = size;
+    large_packet_fence_ = 0;
+    return large_cmdbuf_addr_;
+  }
+
+  if (!WaitForLargeCommandBuffer()) return nullptr;
+  return large_cmdbuf_addr_;
+}
+
+bool ComputeQueue::WaitForLargeCommandBuffer(void) {
+  if (large_packet_fence_ == 0) return true;
+
+  // The trailing packet of the buffer updates the AQL read pointer and the queue fence advances to
+  // the same value, so a retired fence means the command processor consumed the buffer.
+  if (*sync_addr < large_packet_fence_) {
+    uint64_t value = large_packet_fence_;
+    if (!device->CpuWait(&syncobj, &value, 1, false)) return false;
+  }
+  large_packet_fence_ = 0;
+  return true;
 }
 
 hsa_status_t ComputeQueue::SwitchAql2PM4(uint16_t packet_header) {

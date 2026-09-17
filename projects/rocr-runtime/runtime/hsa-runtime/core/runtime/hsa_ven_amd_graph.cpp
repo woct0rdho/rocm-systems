@@ -358,20 +358,6 @@ hsa_status_t Create(hsa_agent_t hsa_agent,
     return HSA_STATUS_ERROR_INVALID_ARGUMENT;
   }
 
-#if defined(_WIN32)
-  // WDDM translates an AQL PM4 indirect-buffer packet by copying the whole stream into one
-  // fixed-size PM4 frame, so only lists within the validated budget can be submitted. Report
-  // the limit here so HIP falls back to the AQL batch path instead of submitting a packet the
-  // thunk has to reject.
-  HsaWddmAqlProfileCapability platform_capability{};
-  if (HSAKMT_CALL(hsaKmtGetWddmAqlProfileCapability(gpu_agent->node_id(), &platform_capability)) !=
-          HSAKMT_STATUS_SUCCESS ||
-      platform_capability.Version == 0 ||
-      words.size() > platform_capability.MaxPm4Dwords) {
-    return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
-  }
-#endif
-
   const size_t bytes = words.size() * sizeof(uint32_t);
   void* ib = gpu_agent->system_allocator()(bytes, 4096, core::MemoryRegion::AllocateExecutable);
   if (ib == nullptr) {

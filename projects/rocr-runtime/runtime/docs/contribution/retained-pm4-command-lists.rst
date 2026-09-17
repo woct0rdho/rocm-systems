@@ -29,16 +29,15 @@ has not completed qualification additionally requires
 does not add an ASIC to the default qualification allowlist. GFX12 is outside
 this port and reports no retained-PM4 capability.
 
-On Windows the WDDM thunk translates an AQL PM4 indirect-buffer packet by
-copying the whole command stream into one fixed-size PM4 frame, and it accepts
-the packet only with the runtime manifest described below. ROCR therefore
-rejects a command list that does not fit the frame budget the thunk validated
-(``HSA_STATUS_ERROR_OUT_OF_RESOURCES`` from
-``hsa_ven_amd_graph_command_list_create``), and HIP falls back to the ordinary
-AQL batch path for that graph. The manifest (magic ``WRTM``, command-buffer
-dword count, and FNV checksum) is emitted by ROCR in the vendor packet and
-checked by the thunk before any PM4 is submitted, which keeps the file
-unqualified for large graphs on Windows.
+On Windows the WDDM thunk translates an AQL PM4 indirect-buffer packet into PM4 and submits it
+as one self-contained WDDM command buffer, and it accepts the packet only with the runtime
+manifest described below. A stream that fits the per-slot frame is inlined into that frame; a
+larger stream (a graph command list is typically hundreds of kilobytes) is built in a dedicated
+variable-size command buffer, grown on demand and reused once its submission has retired. Only
+the command buffer passed to the submit call is fetchable to the command processor, so a stream
+cannot instead be referenced from the frame with an indirect-buffer jump. The manifest (magic
+``WRTM``, command-buffer dword count, and FNV checksum) is emitted by ROCR in the vendor packet
+and checked by the thunk before any PM4 is submitted.
 
 Reference snapshot
 ------------------

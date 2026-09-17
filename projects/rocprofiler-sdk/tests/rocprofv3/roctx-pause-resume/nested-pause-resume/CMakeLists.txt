@@ -82,7 +82,7 @@ rocprofiler_add_integration_validate_test(
     COPY conftest.py
     CONFIG pytest.ini
     ARGS --json-input
-         ${CMAKE_CURRENT_BINARY_DIR}/roctx-pause-resume-nested-trace/out_results.json
+         ${CMAKE_CURRENT_BINARY_DIR}/roctx-pause-resume-selected-kernel/out_results.json
     TIMEOUT 45
     LABELS "integration-tests;pause-resume;selected-regions"
     FIXTURES_REQUIRED rocprofv3-test-selected-regions-kernel-only

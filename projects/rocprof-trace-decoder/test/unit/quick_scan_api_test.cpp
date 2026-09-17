@@ -159,6 +159,14 @@ nop_isa(char*, uint64_t* memory_size, uint64_t* size, rocprofiler_thread_trace_d
     return ROCPROFILER_THREAD_TRACE_DECODER_STATUS_SUCCESS;
 }
 
+void append_gfx11_header(BitStreamBuilder& builder)
+{
+    header_type header{};
+    header.header = 0b0010001;
+    header.version = 3;
+    builder.writeBits(header.raw, 64);
+}
+
 void append_gfx12_header(BitStreamBuilder& builder)
 {
     header_type header{};
@@ -379,6 +387,25 @@ struct DispatchTrace
     uint64_t event_offset = 0;
     uint64_t dispatch_offset = 0;
 };
+
+DispatchTrace make_gfx11_dispatch_trace()
+{
+    BitStreamBuilder builder;
+    append_gfx11_header(builder);
+    append_dispatch_registers(builder);
+
+    DispatchTrace trace{};
+    trace.cut_offset = builder.byteSize();
+
+    append_bop_event(builder);
+    trace.event_offset = trace.cut_offset;
+
+    append_dispatch(builder);
+    trace.dispatch_offset = trace.event_offset + 3;
+
+    trace.data = builder.finish();
+    return trace;
+}
 
 DispatchTrace make_dispatch_trace()
 {
@@ -706,6 +733,50 @@ void expect_gfx9_scanner_captures_dispatch_context(Gfx9ScannerForTest scanner)
 }
 #endif
 } // namespace
+
+TEST(QuickScanApiTest, ReportsDispatchAndEventRecordsFromGfx11Trace)
+{
+    if (!quick_scan::avx512_available()) GTEST_SKIP() << "quick_scan requires AVX-512";
+
+    const auto trace = make_gfx11_dispatch_trace();
+
+    HandleGuard handle;
+    ASSERT_EQ(rocprof_trace_decoder_create_handle(&handle.value), ROCPROFILER_THREAD_TRACE_DECODER_STATUS_SUCCESS);
+
+    RecordSink sink;
+    ASSERT_EQ(
+        rocprof_trace_decoder_quick_scan(handle.value, 0, trace.data.data(), trace.data.size(), collect_records, &sink),
+        ROCPROFILER_THREAD_TRACE_DECODER_STATUS_SUCCESS
+    );
+
+    ASSERT_EQ(sink.events.size(), 1u);
+    const auto& event = sink.events.front();
+    EXPECT_EQ(event.type, ROCPROF_TRACE_DECODER_EVENT_BOTTOM_OF_PIPE_TS);
+    EXPECT_EQ(event.me_id, kMe);
+    EXPECT_EQ(event.pipe_id, kPipe);
+    EXPECT_EQ(event.byte_offset, trace.event_offset);
+
+    ASSERT_EQ(sink.dispatches.size(), 1u);
+    expect_gfx12_dispatch_payload(sink.dispatches.front());
+    EXPECT_EQ(sink.dispatches.front().byte_offset, trace.dispatch_offset);
+
+    uint64_t standalone_size = trace.data.size() + 512;
+    std::vector<uint8_t> standalone(standalone_size);
+    ASSERT_EQ(
+        rocprof_trace_decoder_build_standalone(
+            handle.value,
+            0,
+            trace.data.data(),
+            trace.data.size(),
+            trace.cut_offset,
+            trace.data.size(),
+            standalone.data(),
+            &standalone_size
+        ),
+        ROCPROFILER_THREAD_TRACE_DECODER_STATUS_SUCCESS
+    );
+    ASSERT_GT(standalone_size, trace.data.size() - trace.cut_offset + sizeof(uint64_t));
+}
 
 TEST(QuickScanApiTest, ReportsDispatchAndEventRecordsFromGfx12Trace)
 {

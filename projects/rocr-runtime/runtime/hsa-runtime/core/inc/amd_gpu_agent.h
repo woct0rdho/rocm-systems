@@ -932,6 +932,8 @@ class GpuAgent : public GpuAgentInt {
   std::function<void(void*)> coarsegrain_deallocator_;
 
   void* trap_handler_tma_region_;
+  uint64_t trap_handler_tma_gpu_va_;
+  bool trap_handler_tma_resident_;
 
   /* PC Sampling fields - begin */
   /* 2nd level Trap handler code is based on the offsets within this structure.

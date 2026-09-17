@@ -423,3 +423,21 @@ CREATE TABLE IF NOT EXISTS
         FOREIGN KEY (queue_id) REFERENCES `rocpd_info_queue{{uuid}}` (id) ON UPDATE CASCADE,
         FOREIGN KEY (event_id) REFERENCES `rocpd_event{{uuid}}` (id) ON UPDATE CASCADE
     );
+
+-- PC sampling records (host_trap and stochastic)
+CREATE TABLE IF NOT EXISTS
+    `rocpd_pc_sampling{{uuid}}` (
+        "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+        "guid" TEXT DEFAULT "{{guid}}" NOT NULL,
+        "method" TEXT NOT NULL CHECK ("method" IN ('host_trap', 'stochastic')),
+        "timestamp" BIGINT NOT NULL,
+        "exec_mask" BIGINT NOT NULL,
+        "dispatch_id" BIGINT NOT NULL,
+        "instruction" TEXT,
+        "instruction_comment" TEXT,
+        "correlation_id" BIGINT NOT NULL,
+        "wave_issued_instruction" INTEGER CHECK ("wave_issued_instruction" IN (0, 1)),
+        "instruction_type" TEXT,
+        "stall_reason" TEXT,
+        "wave_count" INTEGER
+    );

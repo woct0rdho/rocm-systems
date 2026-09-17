@@ -151,3 +151,10 @@ SELECT
     *
 FROM
     `rocpd_graph_launch{{uuid}}`;
+
+CREATE VIEW IF NOT EXISTS
+    `rocpd_pc_sampling` AS
+SELECT
+    *
+FROM
+    `rocpd_pc_sampling{{uuid}}`;

@@ -33,6 +33,7 @@
 #include "lib/rocprofiler-sdk/agent.hpp"
 #include "lib/rocprofiler-sdk/buffer.hpp"
 #include "lib/rocprofiler-sdk/context/context.hpp"
+#include "lib/rocprofiler-sdk/counters/device_counting.hpp"
 #include "lib/rocprofiler-sdk/hsa/queue.hpp"
 #include "lib/rocprofiler-sdk/hsa/queue_controller.hpp"
 #include "lib/rocprofiler-sdk/internal_threading.hpp"
@@ -72,6 +73,12 @@ namespace thread_trace
 {
 constexpr uint64_t MIN_BUFFER_SIZE = 1 << 20;  // 1MB minimum to give the GPU room before copies
 
+bool
+needs_application_queue_sqtt_control(std::string_view agent_name)
+{
+    return agent_name.compare(0, 5, "gfx10") == 0 || agent_name.compare(0, 5, "gfx11") == 0;
+}
+
 struct cbdata_t
 {
     rocprofiler_agent_id_t                          agent      = {.handle = 0};
@@ -91,6 +98,15 @@ hsa_inited()
 {
     static std::atomic<bool> inited{false};
     return inited;
+}
+
+// Set before final shutdown starts. Device contexts must not submit new SQTT
+// start packets after stop-and-drain has begun.
+std::atomic<bool>&
+shutting_down()
+{
+    static std::atomic<bool> value{false};
+    return value;
 }
 
 hsa_status_t
@@ -172,12 +188,22 @@ ThreadTracerAgent::ThreadTracerAgent(thread_trace_parameter_pack _params,
         }
     }
 #endif
+    application_queue_control =
+        needs_application_queue_sqtt_control(CHECK_NOTNULL(agent::get_agent(agent_id))->name);
 
     queue = make_att_queue(agent_id, params.buffer_size, staging_n, memory);
     if(!queue) throw std::runtime_error{"Could not create thread-trace queue"};
     factory = std::make_unique<aql::ThreadTraceAQLPacketFactory>(
         agent_id, params, memory, queue->kfd_copy_queue);
     control_packet = factory->construct_control_packet();
+
+#if ROCPROFILER_EXTERNAL_AQLPROFILE == 0
+    auto queue_packet_status = aqlprofile_att_get_queue_control_packet(
+        &queue_enable_packet, control_packet->GetHandle(), 1);
+    queue_enable_packet_valid = queue_packet_status == HSA_STATUS_SUCCESS;
+    ROCP_WARNING_IF(!queue_enable_packet_valid)
+        << "Could not create queue-local ATT enable packet: " << queue_packet_status;
+#endif
 
     codeobj_reg = std::make_unique<code_object::CodeobjCallbackRegistry>(
         [this](rocprofiler_agent_id_t _agent, uint64_t codeobj_id, uint64_t addr, uint64_t size) {
@@ -233,6 +259,13 @@ ThreadTracerAgent::get_start_packet()
     return get_control(true);
 }
 
+std::unique_ptr<hsa::TraceControlAQLPacket>
+ThreadTracerAgent::get_queue_start_packet()
+{
+    auto lock = std::unique_lock{trace_resources_mut};
+    return get_control(false);
+}
+
 void
 ThreadTracerAgent::iterate_data(aqlprofile_handle_t handle, rocprofiler_user_data_t data)
 {
@@ -265,6 +298,38 @@ ThreadTracerAgent::iterate_data()
     iterate_data(control_packet->GetHandle(), params.callback_userdata);
 }
 
+std::unique_ptr<hsa::QueueThreadTraceEnableAQLPacket>
+ThreadTracerAgent::get_queue_enable_packet() const
+{
+    if(!queue_enable_packet_valid) return nullptr;
+    return std::make_unique<hsa::QueueThreadTraceEnableAQLPacket>(queue->hsa_agent,
+                                                                  queue_enable_packet);
+}
+
+signal_ptr_t
+ThreadTracerAgent::activate_application_queue(hsa_queue_t* application_queue) const
+{
+    if(application_queue == nullptr) return nullptr;
+
+    auto packet = get_queue_enable_packet();
+    if(packet == nullptr || packet->before_krn_pkt.empty()) return nullptr;
+
+    auto signal = make_signal(*queue);
+    if(!signal) return nullptr;
+
+    // The KFD signal ABI is the same frozen layout the AQL completion field uses, so the
+    // application queue can signal it directly.
+    signal->reset();
+    packet->before_krn_pkt.back().completion_signal = signal->handle();
+
+    auto packet_ptrs = std::vector<const void*>{};
+    packet_ptrs.reserve(packet->before_krn_pkt.size());
+    for(auto& entry : packet->before_krn_pkt)
+        packet_ptrs.emplace_back(&entry);
+    counters::submitPackets(application_queue, packet_ptrs.data(), packet_ptrs.size());
+    return signal;
+}
+
 void
 ThreadTracerAgent::load_codeobj(code_object_id_t id, uint64_t addr, uint64_t size)
 {
@@ -294,6 +359,14 @@ ThreadTracerAgent::unload_codeobj(code_object_id_t id)
     auto packet = factory->construct_unload_marker_packet(id);
     auto sig    = att_queue_submit(*queue, &packet->packet, true);
     if(sig) signal_wait(*sig);
+}
+
+void
+ThreadTracerAgent::prepare_queue_thread_trace(std::shared_ptr<std::atomic<int>> _flag)
+{
+    auto lock   = std::unique_lock{trace_resources_mut};
+    worker_flag = std::move(_flag);
+    active_traces.fetch_add(1);
 }
 
 signal_ptr_t
@@ -396,6 +469,34 @@ ThreadTracerAgent::start_thread_trace(std::shared_ptr<std::atomic<int>> _flag)
         }
     }
     return start_signal;
+}
+
+signal_ptr_t
+ThreadTracerAgent::stop_thread_trace(hsa_queue_t* application_queue)
+{
+    ROCP_TRACE << "Stopping thread trace on application queue for agent " << agent_id.handle;
+    auto lock = std::unique_lock{trace_resources_mut};
+
+    if(active_traces.load() == 0 || application_queue == nullptr || params.num_buffers > 1)
+        return nullptr;
+
+    auto control_packet_copy = get_control(false);
+    control_packet_copy->clear();
+    control_packet_copy->populate_after();
+    if(control_packet_copy->after_krn_pkt.empty()) return nullptr;
+
+    auto signal = make_signal(*queue);
+    if(!signal) return nullptr;
+
+    signal->reset();
+    control_packet_copy->after_krn_pkt.back().completion_signal = signal->handle();
+
+    auto packet_ptrs = std::vector<const void*>{};
+    packet_ptrs.reserve(control_packet_copy->after_krn_pkt.size());
+    for(auto& packet : control_packet_copy->after_krn_pkt)
+        packet_ptrs.emplace_back(&packet);
+    counters::submitPackets(application_queue, packet_ptrs.data(), packet_ptrs.size());
+    return signal;
 }
 
 signal_ptr_t
@@ -608,9 +709,101 @@ DispatchThreadTracer::stop_context()  // NOLINT(readability-convert-member-funct
     if(auto* controller = hsa::get_queue_controller()) controller->disable_serialization();
 }
 
+bool
+DeviceThreadTracer::requires_queue_intercept()
+{
+    auto lock = std::unique_lock{agent_mut};
+    for(const auto& [agent_id, pack] : params)
+    {
+        if(pack.perfcounter_ctrl != 0 && !pack.perfcounters.empty()) return true;
+
+        if(const auto* rocp_agent = rocprofiler::agent::get_agent(agent_id);
+           pack.num_buffers <= 1 && rocp_agent != nullptr &&
+           needs_application_queue_sqtt_control(rocp_agent->name))
+            return true;
+    }
+    return false;
+}
+
 DeviceThreadTracer::DeviceThreadTracer()
 {
     worker_flag = std::make_shared<std::atomic<int>>(WORKER_FLAG_STOP);
+}
+
+hsa::write_packet_t
+DeviceThreadTracer::pre_kernel_call(const hsa::Queue& queue)
+{
+    if(!queue_activation_enabled.load(std::memory_order_acquire)) return {nullptr, false};
+
+    auto lock = std::unique_lock{agent_mut};
+    if(!queue_activation_enabled.load(std::memory_order_relaxed)) return {nullptr, false};
+
+    auto* rocp_agent = queue.get_agent().get_rocp_agent();
+    if(rocp_agent == nullptr) return {nullptr, false};
+
+    auto itr = agents.find(rocp_agent->id);
+    if(itr == agents.end() || itr->second == nullptr || !itr->second->uses_single_buffer() ||
+       !itr->second->requires_application_queue_control())
+        return {nullptr, false};
+
+    application_queue_ids[rocp_agent->id] = queue.intercept_queue()->id;
+
+    if(application_queue_start_pending.erase(rocp_agent->id) > 0)
+    {
+        ROCP_TRACE << fmt::format(
+            "Starting device thread trace on application queue for agent {}",
+            rocp_agent->id.handle);
+        auto packet = itr->second->get_queue_start_packet();
+        packet->populate_before();
+        return {std::move(packet), true};
+    }
+
+    ROCP_TRACE << fmt::format("Injecting queue-local thread-trace enable packet for agent {}",
+                              rocp_agent->id.handle);
+    return {itr->second->get_queue_enable_packet(), false};
+}
+
+void
+DeviceThreadTracer::register_queue_callback()
+{
+    auto* controller = hsa::get_queue_controller();
+    if(controller == nullptr) return;
+
+    auto lock = std::unique_lock{agent_mut};
+    if(queue_callback_id) return;
+
+    using corr_id_map_t = hsa::queue_info_session_t::external_corr_id_map_t;
+    auto callbacks      = hsa::queue_callbacks_t{
+        .batch_packets = []() { return false; },
+        .write_interceptor =
+            [this](const hsa::Queue& q,
+                   const hsa::rocprofiler_packet& /* kern_pkt */,
+                   rocprofiler_kernel_id_t /* kernel_id */,
+                   rocprofiler_dispatch_id_t /* dispatch_id */,
+                   rocprofiler_user_data_t* /* user_data */,
+                   const corr_id_map_t& /* extern_corr_ids */,
+                   const context::correlation_id* /* corr_id */) {
+                return this->pre_kernel_call(q);
+            },
+        .signal_completion = [](auto&&...) {}};
+
+    queue_callback_id = controller->add_callback(std::nullopt, std::move(callbacks));
+    ROCP_TRACE << fmt::format("Registered device thread-trace queue callback {}",
+                              *queue_callback_id);
+}
+
+void
+DeviceThreadTracer::remove_queue_callback()
+{
+    auto* controller = hsa::get_queue_controller();
+    if(controller == nullptr) return;
+
+    auto callback_id = std::optional<int64_t>{};
+    {
+        auto lock = std::unique_lock{agent_mut};
+        callback_id.swap(queue_callback_id);
+    }
+    if(callback_id) controller->remove_callback(*callback_id);
 }
 
 void
@@ -634,19 +827,37 @@ DeviceThreadTracer::resource_init()
 
         agents[it->first] = std::make_unique<ThreadTracerAgent>(it->second, rocp_agent->id);
     }
+
+    lk.unlock();
+    register_queue_callback();
 }
 
 void
 DeviceThreadTracer::resource_deinit()
 {
+    queue_activation_enabled.store(false, std::memory_order_release);
+
+    // Never use ThreadTracerAgent destruction as the normal hardware-stop path.
+    // stop_context() waits for stop packets and performs final data iteration.
+    stop_context();
+    remove_queue_callback();
+
     ROCP_TRACE << "Clearing agents";
     std::unique_lock<std::mutex> lk(agent_mut);
+    application_queue_start_pending.clear();
+    application_queue_ids.clear();
     agents.clear();
 }
 
 void
 DeviceThreadTracer::start_context()
 {
+    if(shutting_down().load(std::memory_order_acquire))
+    {
+        ROCP_INFO << "Ignoring device thread trace start during shutdown";
+        return;
+    }
+
     // Per-agent resources don't exist until HSA is registered; the request is
     // cached in the active-context array and replayed by start_active_contexts().
     if(!hsa_inited().load())
@@ -657,6 +868,7 @@ DeviceThreadTracer::start_context()
 
     ROCP_INFO << "Start device thread trace context";
     CHECK_NOTNULL(worker_flag);
+    register_queue_callback();
     std::unique_lock<std::mutex> lk(agent_mut);
 
     if(agents.empty())
@@ -670,19 +882,57 @@ DeviceThreadTracer::start_context()
         ROCP_CI_LOG(ERROR) << "Unable to start thread trace worker thread";
         return;
     }
-    auto wait_list = std::vector<signal_ptr_t>{};
+    queue_activation_enabled.store(true, std::memory_order_release);
+    auto activation_wait_list = std::vector<signal_ptr_t>{};
+    auto internal_tracers     = std::vector<ThreadTracerAgent*>{};
+    auto* controller          = hsa::get_queue_controller();
 
-    for(auto& [_, tracer] : agents)
-        wait_list.emplace_back(tracer->start_thread_trace(worker_flag));
+    for(auto& [agent_id, tracer] : agents)
+    {
+        if(tracer->uses_single_buffer() && tracer->requires_application_queue_control())
+        {
+            tracer->prepare_queue_thread_trace(worker_flag);
+            application_queue_start_pending.emplace(agent_id);
+            continue;
+        }
 
-    for(auto& sig : wait_list)
+        internal_tracers.emplace_back(tracer.get());
+        if(!tracer->requires_application_queue_control() || controller == nullptr) continue;
+
+        const auto current_agent_id = agent_id;
+        auto*      current_tracer   = tracer.get();
+        controller->iterate_queues([&activation_wait_list,
+                                    current_agent_id,
+                                    current_tracer](const hsa::Queue* application_queue) {
+            if(application_queue == nullptr) return;
+            const auto* queue_agent = application_queue->get_agent().get_rocp_agent();
+            if(queue_agent == nullptr || queue_agent->id != current_agent_id) return;
+
+            auto signal = current_tracer->activate_application_queue(
+                const_cast<hsa_queue_t*>(application_queue->intercept_queue()));
+            if(signal) activation_wait_list.emplace_back(std::move(signal));
+        });
+    }
+
+    // Queue context state must complete before global SQTT state is programmed
+    // on the internal control queue.
+    for(auto& sig : activation_wait_list)
+        if(sig) signal_wait(*sig);
+
+    auto start_wait_list = std::vector<signal_ptr_t>{};
+    for(auto* tracer : internal_tracers)
+        start_wait_list.emplace_back(tracer->start_thread_trace(worker_flag));
+
+    for(auto& sig : start_wait_list)
         if(sig) signal_wait(*sig);
 }
 
 void
 DeviceThreadTracer::stop_context()
 {
+    queue_activation_enabled.store(false, std::memory_order_release);
     auto lock = std::unique_lock{agent_mut};
+    application_queue_start_pending.clear();
 
     if(agents.empty()) return;
 
@@ -692,9 +942,28 @@ DeviceThreadTracer::stop_context()
     if(auto flag = worker_flag) flag->compare_exchange_strong(expected, WORKER_FLAG_STOP);
 
     auto wait_list = std::vector<signal_ptr_t>{};
+    auto* controller = hsa::get_queue_controller();
 
-    for(auto& [_, tracer] : agents)
-        wait_list.emplace_back(tracer->stop_thread_trace());
+    for(auto& [agent_id, tracer] : agents)
+    {
+        auto* application_queue = static_cast<hsa_queue_t*>(nullptr);
+        if(controller != nullptr)
+        {
+            if(auto itr = application_queue_ids.find(agent_id);
+               itr != application_queue_ids.end())
+            {
+                if(const auto* tracked_queue = controller->get_queue(itr->second))
+                    application_queue =
+                        const_cast<hsa_queue_t*>(tracked_queue->intercept_queue());
+            }
+        }
+
+        if(tracer->uses_single_buffer() && tracer->requires_application_queue_control() &&
+           application_queue != nullptr)
+            wait_list.emplace_back(tracer->stop_thread_trace(application_queue));
+        else
+            wait_list.emplace_back(tracer->stop_thread_trace());
+    }
 
     // Wait on every agent's after-packets explicitly so iterate_data only runs
     // once the GPU has drained the trace; mirrors start_context's parallel wait.
@@ -732,7 +1001,8 @@ void
 start_active_contexts()
 {
     // HSA resources now exist; allow start_context() to program the hardware.
-    hsa_inited().store(true);
+    shutting_down().store(false, std::memory_order_release);
+    hsa_inited().store(true, std::memory_order_release);
 
     // Replay device contexts started before hsa_init() (their start_context()
     // returned early). Must run after the queue infrastructure is initialized
@@ -747,6 +1017,8 @@ void
 finalize()
 {
     ROCP_TRACE << "Finalize called";
+    shutting_down().store(true, std::memory_order_release);
+    hsa_inited().store(false, std::memory_order_release);
     for(auto& ctx : context::get_registered_contexts())
     {
         if(ctx->device_thread_trace) ctx->device_thread_trace->resource_deinit();

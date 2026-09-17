@@ -4,6 +4,8 @@
 #include <gtest/gtest.h>
 #include <cstdint>
 #include <vector>
+#include "def/gpu_block_info.h"
+#include "def/gfx11_def.h"
 #include "../trace_config.h"
 
 namespace pm4_builder {
@@ -19,6 +21,17 @@ enum hsa_status_t {
   HSA_STATUS_SUCCESS = 0x0,
 };
 
+struct TraceControl
+{
+  uint32_t status{0};
+  uint32_t cntr{0};
+  uint32_t wptr{0};
+  uint32_t status2{0};
+  uint64_t gpu_clock_cnt_start{0};
+  uint64_t gpu_clock_cnt_end{0};
+  uint32_t status_double_buffer{0};
+};
+
 // Minimal primitives for testing
 struct TestPrimitives {
   static constexpr uint32_t GFXIP_LEVEL = 9;
@@ -27,6 +40,7 @@ struct TestPrimitives {
   static constexpr uint32_t TT_CONTROL_FULL_MASK = 0x2;
   static constexpr uint32_t TT_WRITE_PTR_MASK = 0x4;
   static constexpr uint32_t SQ_THREAD_TRACE_USERDATA_2 = 0x1000;
+  static constexpr Register SQ_THREAD_TRACE_STATUS2_ADDR{};
   
   static uint32_t grbm_broadcast_value() { return 0xFFFFFFFF; }
   static uint32_t sqtt_mode_off_value() { return 0; }
@@ -34,6 +48,31 @@ struct TestPrimitives {
   static uint32_t sqtt_buffer_size_value(uint64_t size, uint32_t) {
     return static_cast<uint32_t>(size >> TT_BUFF_ALIGN_SHIFT);
   }
+};
+
+struct TestGfx115xPrimitives {
+  static constexpr uint32_t GFXIP_LEVEL = 11;
+  static constexpr uint32_t TT_BUFF_ALIGN_SHIFT = 12;
+  static constexpr uint32_t TT_CONTROL_UTC_ERR_MASK = 0x10;
+  static constexpr uint32_t TT_CONTROL_FULL_MASK = 0x21;
+  static constexpr uint32_t TT_WRITE_PTR_MASK = 0x3fffffff;
+  static constexpr Register SQ_THREAD_TRACE_STATUS_ADDR = Register(0x1000);
+  static constexpr Register SQ_THREAD_TRACE_STATUS2_ADDR = Register(0x2000);
+  static constexpr Register SQ_THREAD_TRACE_CNTR_ADDR = Register(0x3000);
+  static constexpr Register SQ_THREAD_TRACE_WPTR_ADDR = Register(0x4000);
+  static constexpr Register GRBM_GFX_INDEX_ADDR = Register(0x5000);
+  static constexpr uint32_t COPY_DATA_SEL_COUNT_1DW_PRM = 1;
+
+  static uint32_t grbm_broadcast_value() { return 0xffffffff; }
+  static uint32_t grbm_se_sh_index_value(const uint32_t& se_index, const uint32_t&) {
+    return se_index;
+  }
+};
+
+struct CopyRegCall {
+  Register reg;
+  const void* dst;
+  bool wait;
 };
 
 // Minimal command buffer for testing
@@ -60,6 +99,25 @@ public:
   void BuildWriteWaitIdlePacket(CmdBuffer*) {}
   void BuildCacheFlushPacket(CmdBuffer*, size_t, size_t) {}
 };
+
+class TestGfx115xBuilder {
+public:
+  TestGfx115xBuilder(const AgentInfo*) { calls.clear(); }
+
+  void BuildCopyRegDataPacket(CmdBuffer*, const Register& reg, const void* dst, uint32_t,
+                              bool wait) {
+    calls.push_back({reg, dst, wait});
+  }
+
+  void BuildWriteUConfigRegPacket(CmdBuffer*, const Register&, uint32_t) {}
+  void BuildPredExecPacket(CmdBuffer*, uint32_t, uint32_t) {}
+  void BuildWriteWaitIdlePacket(CmdBuffer*) {}
+  void BuildCacheFlushPacket(CmdBuffer*, size_t, size_t) {}
+
+  static std::vector<CopyRegCall> calls;
+};
+
+std::vector<CopyRegCall> TestGfx115xBuilder::calls;
 
 // Actual GpuSqttBuilder implementation for testing
 template <typename Builder, typename Primitives>
@@ -91,6 +149,31 @@ public:
     int64_t num_disabled = (64 - num_enabled) << Primitives::TT_BUFF_ALIGN_SHIFT;
     int64_t buffer_per_se = std::max<int64_t>(0, buffersize - num_disabled) / num_enabled;
     return uint64_t(buffer_per_se) & ~((1ULL << Primitives::TT_BUFF_ALIGN_SHIFT) - 1);
+  }
+
+  void ReadValues(CmdBuffer* cmd_buffer, const TraceConfig* config, size_t se_index) {
+    auto& control = reinterpret_cast<TraceControl*>(config->control_buffer_ptr)[se_index];
+
+    builder_.BuildCopyRegDataPacket(cmd_buffer, Primitives::SQ_THREAD_TRACE_STATUS_ADDR,
+                                    &control.status, Primitives::COPY_DATA_SEL_COUNT_1DW_PRM,
+                                    true);
+    builder_.BuildCopyRegDataPacket(cmd_buffer, Primitives::SQ_THREAD_TRACE_CNTR_ADDR,
+                                    &control.cntr, Primitives::COPY_DATA_SEL_COUNT_1DW_PRM, true);
+    builder_.BuildCopyRegDataPacket(cmd_buffer, Primitives::SQ_THREAD_TRACE_WPTR_ADDR,
+                                    &control.wptr, Primitives::COPY_DATA_SEL_COUNT_1DW_PRM, true);
+    if (!(Primitives::SQ_THREAD_TRACE_STATUS2_ADDR == Register{})) {
+      builder_.BuildCopyRegDataPacket(cmd_buffer, Primitives::SQ_THREAD_TRACE_STATUS2_ADDR,
+                                      &control.status2, Primitives::COPY_DATA_SEL_COUNT_1DW_PRM,
+                                      true);
+    }
+  }
+
+  void GetStatusPacket(CmdBuffer* cmd_buffer, TraceConfig*, TraceControl& control, int) {
+    auto status_addr = (!(Primitives::SQ_THREAD_TRACE_STATUS2_ADDR == Register{}))
+                           ? Primitives::SQ_THREAD_TRACE_STATUS2_ADDR
+                           : Primitives::SQ_THREAD_TRACE_STATUS_ADDR;
+    builder_.BuildCopyRegDataPacket(cmd_buffer, status_addr, &control.status_double_buffer,
+                                    Primitives::COPY_DATA_SEL_COUNT_1DW_PRM, false);
   }
 
 private:
@@ -181,6 +264,63 @@ TEST_F(SqttBuilderTest, BufferAlignmentAndBlockSize) {
 
   // Test write pointer block size
   EXPECT_EQ(builder.GetWritePtrBlk(), 32);  // 32-byte blocks
+}
+
+TEST_F(SqttBuilderTest, Gfx115xPrimitivesUseStatus2AndDoubleBufferBits) {
+  using gfxip::gfx11::gfx115x_sqtt_prim;
+
+  EXPECT_FALSE(gfx115x_sqtt_prim::SQ_THREAD_TRACE_STATUS2_ADDR ==
+               gfx115x_sqtt_prim::SQ_THREAD_TRACE_STATUS_ADDR);
+  EXPECT_EQ(gfx115x_sqtt_prim::TT_CONTROL_FULL_MASK,
+            SQ_THREAD_TRACE_STATUS2__BUF0_FULL_MASK |
+                SQ_THREAD_TRACE_STATUS2__BUF1_FULL_MASK |
+                SQ_THREAD_TRACE_STATUS2__WRITE_BUF_FULL_MASK);
+  EXPECT_EQ(gfx115x_sqtt_prim::TT_LOCKDOWN_FAIL,
+            SQ_THREAD_TRACE_STATUS2__PACKET_LOST_BUF_NO_LOCKDOWN_MASK);
+  EXPECT_FALSE(gfx115x_sqtt_prim::SQ_THREAD_TRACE_BUF1_BASE_LO_ADDR == Register{});
+  EXPECT_FALSE(gfx115x_sqtt_prim::SQ_THREAD_TRACE_BUF1_SIZE_ADDR == Register{});
+  EXPECT_TRUE(gfx115x_sqtt_prim::SQ_THREAD_TRACE_BUF1_BASE_HI_ADDR == Register{});
+
+  EXPECT_EQ(gfx115x_sqtt_prim::sqtt_ctrl_value(true, true) &
+                SQ_THREAD_TRACE_CTRL__DOUBLE_BUFFER_MASK,
+            SQ_THREAD_TRACE_CTRL__DOUBLE_BUFFER_MASK);
+  EXPECT_EQ(gfx115x_sqtt_prim::sqtt_ctrl_value(true, false) &
+                SQ_THREAD_TRACE_CTRL__DOUBLE_BUFFER_MASK,
+            0u);
+
+  EXPECT_TRUE(gfxip::gfx11::gfx11_cntx_prim::SQ_THREAD_TRACE_STATUS2_ADDR == Register{});
+  EXPECT_EQ(gfxip::gfx11::gfx11_cntx_prim::TT_CONTROL_FULL_MASK, 0u);
+}
+
+TEST_F(SqttBuilderTest, Gfx115xBuilderCopiesStatus2AndQueriesStatus2) {
+  GpuSqttBuilder<TestGfx115xBuilder, TestGfx115xPrimitives> builder(&agent_info);
+  TraceControl control{};
+  CmdBuffer cmd_buffer;
+  TraceConfig config;
+  config.se_number = agent_info.se_num;
+  config.xcc_number = agent_info.xcc_num;
+  config.control_buffer_ptr = &control;
+
+  TestGfx115xBuilder::calls.clear();
+  builder.ReadValues(&cmd_buffer, &config, 0);
+  ASSERT_EQ(TestGfx115xBuilder::calls.size(), 4u);
+  EXPECT_EQ(TestGfx115xBuilder::calls[0].reg,
+            TestGfx115xPrimitives::SQ_THREAD_TRACE_STATUS_ADDR);
+  EXPECT_EQ(TestGfx115xBuilder::calls[0].dst, &control.status);
+  EXPECT_EQ(TestGfx115xBuilder::calls[1].reg,
+            TestGfx115xPrimitives::SQ_THREAD_TRACE_CNTR_ADDR);
+  EXPECT_EQ(TestGfx115xBuilder::calls[2].reg,
+            TestGfx115xPrimitives::SQ_THREAD_TRACE_WPTR_ADDR);
+  EXPECT_EQ(TestGfx115xBuilder::calls[3].reg,
+            TestGfx115xPrimitives::SQ_THREAD_TRACE_STATUS2_ADDR);
+  EXPECT_EQ(TestGfx115xBuilder::calls[3].dst, &control.status2);
+
+  TestGfx115xBuilder::calls.clear();
+  builder.GetStatusPacket(&cmd_buffer, &config, control, 0);
+  ASSERT_EQ(TestGfx115xBuilder::calls.size(), 1u);
+  EXPECT_EQ(TestGfx115xBuilder::calls[0].reg,
+            TestGfx115xPrimitives::SQ_THREAD_TRACE_STATUS2_ADDR);
+  EXPECT_EQ(TestGfx115xBuilder::calls[0].dst, &control.status_double_buffer);
 }
 
 } // namespace pm4_builder

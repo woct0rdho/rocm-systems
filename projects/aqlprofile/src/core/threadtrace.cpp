@@ -85,7 +85,9 @@ hsa_status_t _internal_aqlprofile_att_iterate_data(aqlprofile_handle_t handle,
       ERR_LOGGING << "SQTT memory error received, SE(" << se_index << ")";
       status = HSA_STATUS_ERROR_EXCEPTION;
     }
-    auto status2_value = (pm4_factory->GetGpuId() >= aql_profile::GFX12_GPU_ID) ? control_ptr[se_index].status2 : control_ptr[se_index].status;
+    const bool has_status2 = pm4_factory->IsGFX11() ||
+                             (pm4_factory->GetGpuId() >= aql_profile::GFX12_GPU_ID);
+    auto status2_value = has_status2 ? control_ptr[se_index].status2 : control_ptr[se_index].status;
     if (status2_value & sqttbuilder->GetBufferFullMask()) {
       ERR2_LOGGING << "SQTT data buffer full, SE(" << se_index << ")";
       if (status == HSA_STATUS_SUCCESS) status = HSA_STATUS_ERROR_OUT_OF_RESOURCES;
@@ -94,12 +96,24 @@ hsa_status_t _internal_aqlprofile_att_iterate_data(aqlprofile_handle_t handle,
     uint64_t sample_capacity = memorymgr->config.GetCapacity(se_index);
     void* sample_ptr = reinterpret_cast<void*>(memorymgr->config.GetSEBaseAddr(se_index));
 
+    if (memorymgr->isDoubleBuffer())
+    {
+      size_t buf_num = memorymgr->config.buffer_data.at(se_index).size();
+      sample_ptr = memorymgr->config.buffer_data.at(se_index)[(memorymgr->buffer_swaps + buf_num - 1) % buf_num];
+    }
+
     // WPTR specifies the index in thread trace buffer where next token will be
     // written by hardware. The index is incremented by size of 32 bytes.
     size_t wptr_mask = sqttbuilder->GetWritePtrMask();
-    size_t sample_size = (control_ptr[se_index].wptr & wptr_mask) * sqttbuilder->GetWritePtrBlk();
+    const auto raw_wptr = control_ptr[se_index].wptr & wptr_mask;
+    size_t sample_size = raw_wptr * sqttbuilder->GetWritePtrBlk();
 
-    if (pm4_factory->GetGpuId() == aql_profile::GFX11_GPU_ID) {
+    const bool empty_double_buffer_final = memorymgr->isDoubleBuffer() && raw_wptr == 0 &&
+                                           memorymgr->buffer_swaps == 0;
+
+    if (!empty_double_buffer_final &&
+        (pm4_factory->GetGpuId() == aql_profile::GFX11_GPU_ID ||
+         pm4_factory->GetGpuId() == aql_profile::GFX115X_GPU_ID)) {
       sample_size = sample_size - reinterpret_cast<uint64_t>(sample_ptr);
       sample_size &= (1ull << 29) - 1;
     }
@@ -116,8 +130,6 @@ hsa_status_t _internal_aqlprofile_att_iterate_data(aqlprofile_handle_t handle,
 
     if (memorymgr->isDoubleBuffer())
     {
-      size_t buf_num = memorymgr->config.buffer_data.at(se_index).size();
-      sample_ptr = memorymgr->config.buffer_data.at(se_index)[(memorymgr->buffer_swaps + buf_num - 1) % buf_num];
       callback(se_index, sample_ptr, sample_size, userdata);
       // Reset swaps for next thread trace start
       memorymgr->buffer_swaps = 0;

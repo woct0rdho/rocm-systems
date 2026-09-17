@@ -22,14 +22,26 @@
 
 #include "lib/aqlprofile/core/gfx11_factory.h"
 #include "lib/aqlprofile/def/gfx11_def.h"
+#include "lib/aqlprofile/pm4/gfx11_cmd_builder.h"
+#include "lib/aqlprofile/pm4/sqtt_builder.h"
 
 namespace aql_profile
 {
 // Gfx11.5 factory class
-const GpuBlockInfo* Gfx115xFactory::block_table_[AQLPROFILE_BLOCKS_NUMBER] = {};
+
+const GpuBlockInfo**
+Gfx115xFactory::CreateBlockTable()
+{
+    return new const GpuBlockInfo*[AQLPROFILE_BLOCKS_NUMBER]{};
+}
 
 Gfx115xFactory::Gfx115xFactory(const AgentInfo* agent_info)
-: Gfx11Factory(block_table_, sizeof(block_table_), agent_info)
+: Gfx115xFactory(agent_info, CreateBlockTable())
+{}
+
+Gfx115xFactory::Gfx115xFactory(const AgentInfo* agent_info, const GpuBlockInfo** block_table)
+: Gfx11Factory(block_table, AQLPROFILE_BLOCKS_NUMBER * sizeof(const GpuBlockInfo*), agent_info)
+, block_table_(block_table)
 {
     for(unsigned i = 0; i < AQLPROFILE_BLOCKS_NUMBER; ++i)
     {
@@ -51,6 +63,12 @@ Gfx115xFactory::Gfx115xFactory(const AgentInfo* agent_info)
             default: break;
         }
     }
+
+    delete sqtt_builder_;
+    sqtt_builder_ = new pm4_builder::GpuSqttBuilder<pm4_builder::Gfx11CmdBuilder,
+                                                     gfx115x_sqtt_prim>(agent_info);
+    if(sqtt_builder_ == NULL)
+        throw aql_profile_exc_msg("Gfx115x SqttBuilder allocation failed");
 }
 
 Gfx115xFactory::~Gfx115xFactory()
@@ -63,6 +81,7 @@ Gfx115xFactory::~Gfx115xFactory()
             block_table_[i] = NULL;
         }
     }
+    delete[] block_table_;
 }
 
 Pm4Factory*

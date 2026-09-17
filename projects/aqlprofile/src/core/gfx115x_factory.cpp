@@ -22,6 +22,8 @@
 
 #include "core/gfx11_factory.h"
 #include "def/gfx11_def.h"
+#include "pm4/gfx11_cmd_builder.h"
+#include "pm4/sqtt_builder.h"
 
 namespace aql_profile {
 
@@ -63,6 +65,11 @@ Gfx115xFactory::Gfx115xFactory(const AgentInfo* agent_info)
         break;
     }
   }
+
+  delete sqtt_builder_;
+  sqtt_builder_ = new pm4_builder::GpuSqttBuilder<pm4_builder::Gfx11CmdBuilder,
+                                                  gfx115x_sqtt_prim>(agent_info);
+  if (sqtt_builder_ == NULL) throw aql_profile_exc_msg("Gfx115x SqttBuilder allocation failed");
 }
 
 Gfx115xFactory::~Gfx115xFactory() {

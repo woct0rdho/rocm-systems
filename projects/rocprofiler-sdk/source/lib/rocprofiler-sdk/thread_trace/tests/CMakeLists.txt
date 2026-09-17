@@ -53,10 +53,9 @@ target_link_libraries(
             GTest::gtest_main
             rocprofiler-sdk::counter-test-constants)
 
-# The producer/consumer harness exercises the AQL profile thread-trace path with triple
-# buffering enabled, which is not supported by aqlprofile on GFX11
-# (aqlprofile_att_create_packets() throws "Not supported"). Reuse the shared SQTT
-# triple-buffer architecture gate to skip this suite on unsupported GPUs.
+# The producer/consumer harness exercises the AQL profile multi-buffer thread-trace path.
+# Reuse the shared SQTT architecture gate to skip this suite on unsupported GPUs; gfx115x
+# is supported by its generation-specific STATUS2/BUF1 implementation.
 include(rocprofiler-sdk-utilities)
 rocprofiler_sdk_sqtt_triple_buffer_disabled(THREAD_TRACE_PC_TEST_DISABLED)
 

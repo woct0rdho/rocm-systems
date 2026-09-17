@@ -20,3 +20,10 @@ __pycache__
 /projects/cuid/_build
 build/
 .worktrees/
+/install/
+
+*.o
+/pc_sampling_test
+/logs/
+/unsloth_compiled_cache/
+/*out/

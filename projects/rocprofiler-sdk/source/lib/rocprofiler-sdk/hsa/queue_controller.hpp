@@ -90,6 +90,7 @@ public:
     agent_cache_map_t& get_supported_agents();
 
     const Queue* get_queue(const hsa_queue_t&) const;
+    const Queue* get_queue(uint64_t hsa_queue_id) const;
 
     void iterate_queues(const queue_iterator_cb_t&) const;
     void set_queue_state(queue_state state, hsa_queue_t* hsa_queue);

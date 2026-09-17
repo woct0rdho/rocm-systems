@@ -1188,11 +1188,16 @@ finalize()
         // No-op in a process that never brought the dispatch log up.
         kfd::signal_less_teardown();
 
+        // Device thread trace stop packets, final status reads, producer/consumer
+        // joins, and shader callbacks all require live HSA signals, async-copy
+        // support, and queue infrastructure. Drain them before tearing down any
+        // of those dependencies or destroying ThreadTracerAgent resources.
+        thread_trace::finalize();
+
         hsa::async_copy_fini();
         counters::device_counting_service_finalize();
         SPM::spm_device_counting_service_finalize();
         hsa::queue_controller_fini();
-        thread_trace::finalize();
         ompt::finalize_ompt();
         kfd::finalize();
 #if ROCPROFILER_SDK_HSA_PC_SAMPLING > 0

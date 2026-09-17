@@ -28,7 +28,14 @@ if(PkgConfig_FOUND)
     set(ENV{PKG_CONFIG_SYSTEM_INCLUDE_PATH} "")
     pkg_check_modules(ELF libelf)
 
-    if(ELF_FOUND
+    set(libelf_PKGCONFIG_VALID ${ELF_FOUND})
+    foreach(_DIR ${ELF_INCLUDE_DIRS} ${ELF_LIBRARY_DIRS})
+        if(_DIR AND NOT EXISTS "${_DIR}")
+            set(libelf_PKGCONFIG_VALID OFF)
+        endif()
+    endforeach()
+
+    if(libelf_PKGCONFIG_VALID
        AND ELF_INCLUDE_DIRS
        AND ELF_LIBRARIES)
         set(libelf_INCLUDE_DIR
@@ -72,7 +79,7 @@ if(libelf_FOUND)
         add_library(libelf::libelf INTERFACE IMPORTED)
     endif()
 
-    if(TARGET PkgConfig::ELF AND ELF_FOUND)
+    if(TARGET PkgConfig::ELF AND libelf_PKGCONFIG_VALID)
         target_link_libraries(libelf::libelf INTERFACE PkgConfig::ELF)
     else()
         target_link_libraries(libelf::libelf INTERFACE ${libelf_LIBRARY})

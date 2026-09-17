@@ -187,6 +187,8 @@ platforms:
       - rocrtstFunc.GL2_PersistingCache_SetAndReadBack
       - rocrtstFunc.GL2_PersistingCache_NegativeInvalidSize
       - rocrtstFunc.GL2_PersistingCache_NegativeCPUAgent
+      - rocrtstFunc.PC_Sampling_Extension_Config_Test
+      - rocrtstFunc.PC_Sampling_Lifecycle_Test
       - rocrtstPerf.Memory_Async_Copy_On_Engine
       - rocrtstNeg.Memory_Negative_Tests
       - rocrtstNeg.Queue_Validation_InvalidDimension

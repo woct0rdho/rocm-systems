@@ -446,10 +446,22 @@ fetch_overlapping_requests(scan_context_t& context, uint64_t chunk_index)
 
     std::vector<uint8_t> data_retrieved{};
     {
-        auto lock = std::unique_lock{state.data_mutex};
-        state.data_cv.wait(lock, [&]() {
+        auto lock    = std::unique_lock{state.data_mutex};
+        auto timeout = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        auto ready   = state.data_cv.wait_until(lock, timeout, [&]() {
             return state.chunk_failed || chunk_data.find(chunk_index) != chunk_data.end();
         });
+
+        if(!ready)
+        {
+            // The producer never delivers this chunk when the trace was disabled
+            // mid-run (e.g. after a GPU buffer overflow). Bound the wait so the
+            // capture still terminates and reports the data it did receive.
+            state.chunk_failed = true;
+            ROCP_CI_LOG(ERROR) << "Timed out after 5 seconds waiting for ATT chunk " << chunk_index;
+            state.data_cv.notify_all();
+            return data_retrieved;
+        }
 
         data_retrieved = std::move(chunk_data[chunk_index]);
         chunk_data.erase(chunk_index);

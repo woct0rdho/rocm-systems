@@ -89,6 +89,7 @@
 #include "suites/functional/metadata_prefetch.h"
 #include "suites/functional/aql_barrier_bit.h"
 #include "suites/functional/signal_kernel.h"
+#include "suites/functional/pc_sampling.h"
 #include "suites/functional/cu_masking.h"
 #include "suites/functional/filter_devices.h"
 #include "suites/functional/fp_exception_shutdown.h"
@@ -497,6 +498,21 @@ TEST(rocrtstFunc, GL2_PersistingCache_NegativeCPUAgent) {
     gl2.NegativeCPUAgent();
     RunCustomTestEpilog(&gl2);
 }
+
+TEST(rocrtstFunc, PC_Sampling_Extension_Config_Test) {
+    PcSamplingTest pcs;
+    if (!RunCustomTestProlog(&pcs)) return;
+    pcs.ExtensionAndConfigTest();
+    RunCustomTestEpilog(&pcs);
+}
+
+TEST(rocrtstFunc, PC_Sampling_Lifecycle_Test) {
+    PcSamplingTest pcs;
+    if (!RunCustomTestProlog(&pcs)) return;
+    pcs.LifecycleTest();
+    RunCustomTestEpilog(&pcs);
+}
+
 
 TEST(rocrtstFunc, Memory_Atomic_Add_Test) {
     MemoryAtomic ma(ADD);

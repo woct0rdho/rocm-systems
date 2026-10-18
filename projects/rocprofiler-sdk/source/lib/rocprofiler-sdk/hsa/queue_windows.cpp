@@ -24,6 +24,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -60,6 +62,33 @@ pending_completions_mutex()
     return *value;
 }
 
+std::condition_variable&
+pending_completions_cv()
+{
+    static auto* value = new std::condition_variable{};
+    return *value;
+}
+
+std::atomic<bool>& completion_waiter_stop()
+{
+    static auto* value = new std::atomic<bool>{false};
+    return *value;
+}
+
+std::thread&
+completion_waiter()
+{
+    static auto* value = new std::thread{};
+    return *value;
+}
+
+std::once_flag&
+completion_waiter_once()
+{
+    static auto* value = new std::once_flag{};
+    return *value;
+}
+
 // Timeout used by the completion waiter thread for a single poll of one pending signal.
 constexpr auto kCompletionPollSliceNs = uint64_t{100000};
 
@@ -73,8 +102,11 @@ pending_completions()
 void
 register_pending_completion(hsa_signal_t signal, void* data)
 {
-    auto lock = std::lock_guard<std::mutex>{pending_completions_mutex()};
-    pending_completions().push_back(pending_completion{signal, data});
+    {
+        auto lock = std::lock_guard<std::mutex>{pending_completions_mutex()};
+        pending_completions().push_back(pending_completion{signal, data});
+    }
+    pending_completions_cv().notify_one();
 }
 
 // Removes the registration for |data| and reports whether the caller now owns it. Exactly one
@@ -245,17 +277,41 @@ poll_pending_completions(const CoreApiTable& core)
 void
 completion_waiter_thread(CoreApiTable core)
 {
+    std::unique_lock<std::mutex> lock{pending_completions_mutex()};
     for(;;)
     {
-        poll_pending_completions(core);
-
-        auto has_pending = false;
+        if(completion_waiter_stop().load(std::memory_order_acquire)) break;
+        if(pending_completions().empty())
         {
-            auto lock   = std::lock_guard<std::mutex>{pending_completions_mutex()};
-            has_pending = !pending_completions().empty();
+            pending_completions_cv().wait(lock);
+            continue;
         }
-        if(!has_pending) std::this_thread::yield();
+
+        lock.unlock();
+        poll_pending_completions(core);
+        lock.lock();
+
+        // A pending signal may need more than one poll slice. Wait for a new
+        // registration or for the next slice, but never spin on yield().
+        if(!completion_waiter_stop().load(std::memory_order_acquire) &&
+           !pending_completions().empty())
+            pending_completions_cv().wait_for(lock, std::chrono::microseconds{100});
     }
+}
+
+// Stop and join the completion thread. queue_controller_sync() must have drained
+// the queues before this is called so there are no registrations whose signal
+// will never be retired.
+void
+stop_completion_waiter_impl()
+{
+    {
+        auto lock = std::lock_guard<std::mutex>{pending_completions_mutex()};
+        completion_waiter_stop().store(true, std::memory_order_release);
+    }
+    pending_completions_cv().notify_all();
+    auto& thread = completion_waiter();
+    if(thread.joinable() && thread.get_id() != std::this_thread::get_id()) thread.join();
 }
 
 uint16_t
@@ -425,15 +481,6 @@ write_interceptor(const void* packets,
         if(inserted_before) kernel.header |= 1u << HSA_PACKET_HEADER_BARRIER;
         transformed.emplace_back(packet.kernel_packet);
 
-        if(original_done.handle != 0)
-        {
-            auto barrier              = hsa_barrier_and_packet_t{};
-            barrier.header            = HSA_PACKET_TYPE_BARRIER_AND << HSA_PACKET_HEADER_TYPE;
-            barrier.header |= 1u << HSA_PACKET_HEADER_BARRIER;
-            barrier.completion_signal = original_done;
-            transformed.emplace_back(barrier);
-        }
-
         auto inserted_after = false;
         for(const auto& instrumentation : packet.instrumentation_packets)
         {
@@ -448,8 +495,16 @@ write_interceptor(const void* packets,
         {
             queue.create_signal(0, &packet.interrupt_signal, false);
             packet.completion_signal = packet.interrupt_signal;
-            transformed.back().kernel_dispatch.completion_signal = packet.interrupt_signal;
+            // The trailing profiling packet is the last packet in
+            // transformed, so set its completion signal through the vendor
+            // layout. The field is at the ABI completion-signal offset shared
+            // by all AQL packet types, but using the actual member keeps the
+            // intent explicit.
+            transformed.back().ext_amd_aql_pm4.completion_signal = packet.interrupt_signal;
 
+            // Retire the profiler's own completion before the application's
+            // completion barrier. The SDK waiter must be able to observe the
+            // counter window before the app can exit or tear the queue down.
             auto completion_barrier              = hsa_barrier_and_packet_t{};
             completion_barrier.header = HSA_PACKET_TYPE_BARRIER_AND << HSA_PACKET_HEADER_TYPE;
             completion_barrier.header |= 1u << HSA_PACKET_HEADER_BARRIER;
@@ -460,6 +515,20 @@ write_interceptor(const void* packets,
         else
         {
             get_core_table()->hsa_signal_store_screlease_fn(packet.completion_signal, 0);
+        }
+
+        // Release the application's completion signal only after the trailing
+        // profiling packets and the profiler completion barrier executed. A
+        // queued successor dispatch cannot then start its own profiling window
+        // while this dispatch's counters are still being read and stopped, and
+        // the application cannot observe completion before the SDK can.
+        if(original_done.handle != 0)
+        {
+            auto barrier              = hsa_barrier_and_packet_t{};
+            barrier.header            = HSA_PACKET_TYPE_BARRIER_AND << HSA_PACKET_HEADER_TYPE;
+            barrier.header |= 1u << HSA_PACKET_HEADER_BARRIER;
+            barrier.completion_signal = original_done;
+            transformed.emplace_back(barrier);
         }
 
         session->packet_data.emplace_back(std::move(packet));
@@ -483,6 +552,12 @@ write_interceptor(const void* packets,
     writer(transformed.data(), transformed.size());
 }
 }  // namespace
+
+void
+stop_completion_waiter()
+{
+    stop_completion_waiter_impl();
+}
 
 namespace windows
 {
@@ -614,12 +689,9 @@ Queue::signal_async_handler(pooled_signal_t* signal, hsa_signal_t raw_signal, vo
     // Start the per-process completion waiter on first use. It delivers completions with
     // microsecond-scale latency instead of waiting for ROCr's backoff-polled async-events
     // thread, which the application can outrun when it exits right after its last dispatch.
-    static auto* waiter_started = new std::atomic<bool>{false};
-    if(!waiter_started->exchange(true, std::memory_order_acq_rel))
-    {
-        auto core_table = _core_api;
-        std::thread([core_table]() { completion_waiter_thread(core_table); }).detach();
-    }
+    std::call_once(completion_waiter_once(), [core_table = _core_api]() {
+        completion_waiter() = std::thread([core_table]() { completion_waiter_thread(core_table); });
+    });
 
     common::consume_args(signal);
 }
@@ -662,15 +734,15 @@ bool
 Queue::sync() const
 {
     if(_active_kernels.handle == 0 || !_core_api.hsa_signal_wait_relaxed_fn) return true;
-    constexpr auto timeout =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::seconds{5});
-    const auto _value = _core_api.hsa_signal_wait_relaxed_fn(_active_kernels,
-                                                            HSA_SIGNAL_CONDITION_EQ,
-                                                            0,
-                                                            timeout.count(),
-                                                            HSA_WAIT_STATE_BLOCKED);
-    ROCP_WARNING_IF(_value != 0) << fmt::format(
-        "Timeout while waiting for queue sync: {} kernels still active", _value);
+    // Completion is an event: wait for the active-kernel reference count to
+    // reach zero. Do not turn a slow or lost dispatch into a fixed 5 s teardown
+    // deadline; the completion handler is the only writer of this signal.
+    const auto _value = _core_api.hsa_signal_wait_relaxed_fn(
+        _active_kernels,
+        HSA_SIGNAL_CONDITION_EQ,
+        0,
+        std::numeric_limits<uint64_t>::max(),
+        HSA_WAIT_STATE_BLOCKED);
     return _value == 0;
 }
 

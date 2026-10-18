@@ -560,6 +560,9 @@ finalize()
     for(auto* client : pending)
         ::rocprofiler::context::stop_client_contexts(client->internal_id);
     ::rocprofiler::hsa::queue_controller_sync();
+#if defined(_WIN32)
+    ::rocprofiler::hsa::stop_completion_waiter();
+#endif
     for(auto* client : pending)
     {
         invoke_client_finalizer(*client);

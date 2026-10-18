@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -251,6 +252,7 @@ struct tool_state
     std::mutex mutex = {};
     std::mutex control_mutex = {};
     std::mutex result_mutex = {};
+    std::condition_variable record_cv = {};
     std::unordered_map<uint64_t, rocprofiler_counter_config_id_t> profiles = {};
     std::unordered_map<uint64_t, std::string> counter_names = {};
     std::vector<counter_metadata> counter_info = {};
@@ -293,6 +295,7 @@ check(rocprofiler_status_t status, const char* operation, tool_state* state)
         state->failed.store(true, std::memory_order_release);
         auto lock = std::lock_guard<std::mutex>{state->result_mutex};
         if(state->failure_detail.empty()) state->failure_detail = detail;
+        state->record_cv.notify_all();
     }
     rocprofiler::windows::result::write("profiler_failure", detail);
     return false;
@@ -313,6 +316,7 @@ set_failure(tool_state& state, std::string status, std::string detail)
         state.failure_status = std::move(status);
         state.failure_detail = std::move(detail);
     }
+    state.record_cv.notify_all();
 }
 
 rocprofiler_counter_config_id_t
@@ -461,7 +465,9 @@ record_callback(rocprofiler_dispatch_counting_service_data_t data,
                  &state))
             output.records.emplace_back(counter_value{counter_id, records[index].counter_value});
     }
-    if(output.records.empty()) return;
+    // Keep the record even when no counter value was produced. The dispatch was
+    // selected, so the finalizer's record count must advance to its completion
+    // point; otherwise the event wait would never be satisfied.
 
     auto lock = std::lock_guard<std::mutex>{state.mutex};
     if(auto metadata = state.kernel_info.find(data.dispatch_info.kernel_id);
@@ -473,6 +479,7 @@ record_callback(rocprofiler_dispatch_counting_service_data_t data,
             metadata->second.private_segment_size;
     }
     state.records.emplace_back(std::move(output));
+    state.record_cv.notify_all();
 }
 
 void
@@ -1097,6 +1104,18 @@ tool_finalize(void* data)
 {
     auto& state = *static_cast<tool_state*>(data);
     check(rocprofiler_get_timestamp(&state.fini_time), "rocprofiler_get_timestamp", &state);
+
+    // The SDK stops the counting contexts and drains the Windows completion
+    // waiter before invoking this finalizer. Wait on the record event rather
+    // than a fixed delay: the count can only advance when record_callback has
+    // published the corresponding record.
+    {
+        auto lock = std::unique_lock<std::mutex>{state.mutex};
+        state.record_cv.wait(lock, [&state] {
+            return state.records.size() >= state.selected_dispatches ||
+                   state.failed.load(std::memory_order_acquire);
+        });
+    }
 
     auto published = std::vector<fs::path>{};
     auto status    = std::string{"success_no_dispatch"};

@@ -236,5 +236,10 @@ queue_init();
 
 void
 queue_fini();
+
+#if defined(_WIN32)
+void
+stop_completion_waiter();
+#endif
 }  // namespace hsa
 }  // namespace rocprofiler

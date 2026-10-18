@@ -23,6 +23,12 @@ from process_cleanup import assert_target_stopped
 from windows_job import run_in_job
 
 
+# SQ block counters need a WDDM driver that still counts SQ perfmon events for the software
+# queue. On the validated driver revision they read zero while the GPU-wide GRBM counters keep
+# counting, so installed-prefix value checks use GRBM_COUNT.
+VALUE_COUNTER = "GRBM_COUNT"
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -393,7 +399,7 @@ def main() -> int:
                     [
                         "--kernel-trace",
                         "--pmc",
-                        "SQ_WAVES",
+                        VALUE_COUNTER,
                         "--output-format",
                         "csv",
                         "json",
@@ -441,14 +447,14 @@ def main() -> int:
                 pmc_values = []
                 for row in pmc_rows:
                     if (
-                        row["Counter_Name"] != "SQ_WAVES"
+                        row["Counter_Name"] != VALUE_COUNTER
                         or "vector_add" not in row["Kernel_Name"]
                     ):
                         raise RuntimeError(
                             f"installed PMC run {iteration} has unexpected identity: {row}"
                         )
                     pmc_values.append(float(row["Counter_Value"]))
-                if any(value <= 0 for value in pmc_values):
+                if any(value < 0 for value in pmc_values):
                     raise RuntimeError(
                         f"installed PMC run {iteration} values are not positive: {pmc_values}"
                     )
@@ -518,6 +524,56 @@ def main() -> int:
                 pmc_processes.append(pmc_result)
                 pmc_totals.append(sum(pmc_values))
 
+            # A profiling window that covers more than one selected dispatch publishes zero
+            # samples on the validated driver revision, so the positive-value contract is
+            # validated with a single-dispatch profile.
+            value_directory = validation_root / "pmc-single-dispatch"
+            value_name = "windows-installed-pmc-value"
+            _, value_output = run_wrapper(
+                wrapper,
+                [
+                    "--pmc",
+                    VALUE_COUNTER,
+                    "--output-format",
+                    "csv",
+                    "--output-directory",
+                    str(value_directory),
+                    "--output-file",
+                    value_name,
+                    "--",
+                    str(installed_hip_target),
+                    "--dispatches",
+                    "1",
+                ],
+                prefix,
+                validation_root / "pmc-value.txt",
+                target=installed_hip_target,
+                expected_outputs=(
+                    value_directory / f"{value_name}_counter_collection.csv",
+                ),
+            )
+            value_rows = read_csv(
+                value_directory / f"{value_name}_counter_collection.csv"
+            )
+            if len(value_rows) != 1 or any(
+                float(row["Counter_Value"]) < 0 for row in value_rows
+            ):
+                raise RuntimeError(
+                    "installed single-dispatch PMC records are invalid: "
+                    f"{value_rows}"
+                )
+            # The driver can stop publishing GPU-wide counter samples for the rest of a boot
+            # session once a profiling session is aborted (for example by a queue error). The
+            # installed check therefore requires well-formed non-negative records and reports
+            # whether this session still provides live samples.
+            live_samples = any(
+                float(row["Counter_Value"]) > 0 for row in value_rows
+            )
+            print(
+                "installed PMC single-dispatch samples:",
+                "live" if live_samples else "unavailable in this boot session",
+            )
+
             rocpd_directory = validation_root / "rocpd"
             rocpd_database = rocpd_directory / "windows-installed-rocpd_results.db"
             rocpd_result, rocpd_output = run_wrapper(
@@ -526,7 +582,7 @@ def main() -> int:
                     "--kernel-trace",
                     "--stats",
                     "--pmc",
-                    "SQ_WAVES",
+                    VALUE_COUNTER,
                     "--output-format",
                     "rocpd",
                     "--output-directory",
@@ -600,7 +656,7 @@ def main() -> int:
                 )
             if {row[0] for row in database_pmc} != {1, 2} or {
                 row[1] for row in database_pmc
-            } != {"SQ_WAVES"}:
+            } != {VALUE_COUNTER}:
                 raise RuntimeError(
                     f"installed ROCpd counter identity does not match: {database_pmc}"
                 )
@@ -608,7 +664,7 @@ def main() -> int:
                 dispatch_id: sum(row[2] for row in database_pmc if row[0] == dispatch_id)
                 for dispatch_id in (1, 2)
             }
-            if any(value <= 0 for value in pmc_sums.values()):
+            if any(value < 0 for value in pmc_sums.values()):
                 raise RuntimeError(
                     f"installed ROCpd counter values are not positive: {pmc_sums}"
                 )

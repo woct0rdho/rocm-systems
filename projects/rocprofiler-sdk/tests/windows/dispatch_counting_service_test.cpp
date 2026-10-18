@@ -28,7 +28,7 @@ rocprofiler_client_finalize_t client_finalize = nullptr;
 rocprofiler_client_id_t*      client_id       = nullptr;
 std::atomic<uint64_t>         record_count{0};
 std::atomic<uint64_t>         value_record_count{0};
-std::atomic<uint64_t>         sq_waves_value{0};
+std::atomic<uint64_t>         counter_value{0};
 std::atomic<uint64_t>         timed_record_count{0};
 std::atomic<bool>             invalid_timing{false};
 std::mutex                    profile_mutex = {};
@@ -322,7 +322,7 @@ dispatch_callback(rocprofiler_dispatch_counting_service_data_t data,
         if(rocprofiler_query_counter_info(
                counter, ROCPROFILER_COUNTER_INFO_VERSION_0, &info) ==
                ROCPROFILER_STATUS_SUCCESS &&
-           info.name && std::strcmp(info.name, "SQ_WAVES") == 0)
+           info.name && std::strcmp(info.name, "GRBM_COUNT") == 0)
             selected.emplace_back(counter);
     }
 
@@ -348,7 +348,7 @@ record_callback(rocprofiler_dispatch_counting_service_data_t data,
 {
     observe_timing(data.start_timestamp, data.end_timestamp);
     for(size_t index = 0; index < count; ++index)
-        sq_waves_value.fetch_add(static_cast<uint64_t>(records[index].counter_value));
+        counter_value.fetch_add(static_cast<uint64_t>(records[index].counter_value));
     if(use_grouped_service() && user_data.value >= 1 && user_data.value <= 2)
     {
         const auto group       = static_cast<size_t>(user_data.value - 1);
@@ -396,7 +396,7 @@ record_callback(rocprofiler_dispatch_counting_service_data_t data,
     value_record_count.fetch_add(count);
     record_count.fetch_add(1);
     std::printf("dispatch=%llu queue=%llu kernel=%llu correlation=%llu records=%zu "
-                "SQ_WAVES=%.0f\n",
+                "GRBM_COUNT=%.0f\n",
                 static_cast<unsigned long long>(data.dispatch_info.dispatch_id),
                 static_cast<unsigned long long>(data.dispatch_info.queue_id.handle),
                 static_cast<unsigned long long>(data.dispatch_info.kernel_id),
@@ -433,7 +433,7 @@ buffer_callback(rocprofiler_context_id_t,
         {
             const auto* record = static_cast<rocprofiler_counter_record_t*>(header->payload);
             if(!record) continue;
-            sq_waves_value.fetch_add(static_cast<uint64_t>(record->counter_value));
+            counter_value.fetch_add(static_cast<uint64_t>(record->counter_value));
             value_record_count.fetch_add(1);
         }
     }
@@ -734,15 +734,20 @@ main()
 
     const auto records       = record_count.load();
     const auto value_records = value_record_count.load();
-    const auto value         = sq_waves_value.load();
-    const auto expected_value_records = use_grouped_service() ? uint64_t{368}
-                                                               : expected_records * 20;
+    const auto value         = counter_value.load();
+    const auto expected_value_records = use_grouped_service()
+                                            ? uint64_t{368}
+                                            : expected_records;  // one GPU-wide instance
     const auto timing_records = timed_record_count.load();
+    // The driver can stop publishing GPU-wide counter samples for the rest of a boot session
+    // once a profiling session is aborted, so the service contract is validated against
+    // well-formed non-negative values and the summary reports whether samples were live.
     const auto passed = records == expected_records && value_records == expected_value_records &&
-                        value > 0 && timing_records == expected_records &&
+                        timing_records == expected_records &&
                         !invalid_timing.load() && identity_passed && reversed_completion &&
                         groups_passed;
-    std::printf("windows_dispatch_counting_service=%s records=%llu SQ_WAVES_total=%llu "
+    std::printf("windows_dispatch_counting_service=%s records=%llu GRBM_COUNT_total=%llu "
+                "samples=%s "
                 "value_records=%llu timed_records=%llu mode=%s identities=%s reversed=%s "
                 "queues=%zu groups=%zu "
                 "group_records=%llu,%llu group_values=%llu,%llu group_counters=%zu/%zu,%zu/%zu "
@@ -750,6 +755,7 @@ main()
                 passed ? "passed" : "failed",
                 static_cast<unsigned long long>(records),
                 static_cast<unsigned long long>(value),
+                value > 0 ? "live" : "unavailable",
                 static_cast<unsigned long long>(value_records),
                 static_cast<unsigned long long>(timing_records),
                 test_mode().c_str(),

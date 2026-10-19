@@ -45,6 +45,7 @@
 #include <cinttypes>
 #include <condition_variable>
 #include <iostream>
+#include <memory>
 #include <queue>
 #include <utility>
 #include "impl/wddm/types.h"
@@ -61,6 +62,7 @@ namespace thunk {
 
 class Queue;
 class WDDMDevice;
+struct LargeCommandBufferState;
 
 class WDDMQueue {
 public:
@@ -211,6 +213,10 @@ public:
       hsa_signal_t completion_signal;
   };
   hsa_status_t VendorSpecificAqlToPm4(char *cpu, amd_aql_pm4_ib *packet);
+  uint32_t BuildVendorTrailer(char *dst, amd_aql_pm4_ib *packet);
+  char* AcquireLargeCommandBuffer(size_t size);
+  bool WaitForLargeCommandBuffer(void);
+  void ReleaseLargeCommandBuffers(void);
   hsa_status_t SwitchAql2PM4(void);
 
   hsa_status_t PreSubmit(void);
@@ -285,6 +291,11 @@ private:
 
   std::vector<int> scratch_base_offset_array_;
   bool native_aql_ = false;  //!< Queue submits AQL packets directly without PM4 translation
+
+  // Owns the variable-size command buffers used for retained PM4 streams that
+  // do not fit one frame. Kept behind a pointer so the layout of the queue does
+  // not track the buffer pool's implementation.
+  std::unique_ptr<LargeCommandBufferState> large_cmdbuf_state_;
 };
 
 class SDMAQueue : public WDDMQueue {

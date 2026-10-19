@@ -359,10 +359,11 @@ hsa_status_t Create(hsa_agent_t hsa_agent,
   }
 
 #if defined(_WIN32)
-  // WDDM translates an AQL PM4 indirect-buffer packet by copying the whole stream into one
-  // fixed-size PM4 frame, so only lists within the validated budget can be submitted. Report
-  // the limit here so HIP falls back to the AQL batch path instead of submitting a packet the
-  // thunk has to reject.
+  // The WDDM thunk can inline a stream that fits one PM4 frame. A version-2
+  // thunk can also submit a larger retained list from its own variable-size
+  // command buffer; older thunks only expose the inlined frame budget. Report
+  // the effective limit here so HIP falls back to the AQL batch path instead of
+  // submitting a packet the thunk has to reject.
   if (core::Runtime::runtime_singleton_->thunkLoader()
           ->pfn_hsaKmtGetWddmAqlProfileCapability == nullptr) {
     return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
@@ -370,8 +371,13 @@ hsa_status_t Create(hsa_agent_t hsa_agent,
   HsaWddmAqlProfileCapability platform_capability{};
   if (HSAKMT_CALL(hsaKmtGetWddmAqlProfileCapability(gpu_agent->node_id(), &platform_capability)) !=
           HSAKMT_STATUS_SUCCESS ||
-      platform_capability.Version == 0 ||
-      words.size() > platform_capability.MaxPm4Dwords) {
+      platform_capability.Version == 0) {
+    return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
+  }
+  const uint32_t max_command_dwords = platform_capability.Version >= 2
+                                          ? wsl::thunk::profiling::kMaximumIbDwords
+                                          : platform_capability.MaxPm4Dwords;
+  if (words.size() > max_command_dwords) {
     return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
   }
 #endif

@@ -140,6 +140,8 @@ typedef struct _HsaVersionInfo
 
 #if defined(_WIN32)
 // Validated Windows WDDM AQL Profile PM4 indirect-buffer capability.
+// Version 2 also advertises the variable-size retained-command-buffer path;
+// MaxPm4Dwords remains the inlined frame/profiling budget.
 typedef struct _HsaWddmAqlProfileCapability {
     HSAuint32 Version;
     HSAuint32 MaxPm4Dwords;

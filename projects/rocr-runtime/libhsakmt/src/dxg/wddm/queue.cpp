@@ -45,9 +45,11 @@
 #include <cinttypes>
 #include <cstddef>
 #include <atomic>
+#include <new>
 
 #include "util/atomic_helpers.h"
 #include "impl/wddm/cmdbuf_frame_ring.h"
+#include "impl/wddm/profiling.h"
 #include "impl/wddm/queue.h"
 #include "impl/registers.h"
 
@@ -86,6 +88,30 @@ static constexpr uint16_t AMD_AQL_FORMAT_PM4_IB = 0x1;
 static inline uint64_t LoadSyncValue(const uint64_t* sync_addr) {
   return rocr::atomic::Load(sync_addr, std::memory_order_acquire);
 }
+
+// The queue alternates between two large command buffers so a new graph
+// submission can be prepared while the previous one is still executing. A
+// buffer is reusable only after the KMD monitored fence for the submission
+// that consumed it has retired.
+struct LargeCommandBufferState {
+  enum { kSlotCount = 2 };
+
+  struct Slot {
+    GpuMemoryHandle memory = nullptr;
+    char* cpu_addr = nullptr;
+    size_t size = 0;
+    uint64_t fence = 0;
+  };
+
+  Slot slots[kSlotCount];
+  int pending_slot = -1;
+  size_t pending_bytes = 0;
+};
+
+// The IB field allows 0xfffff dwords. The trailer and the optional leading
+// barrier are tiny, so this is the stream bound plus one page of slack.
+constexpr size_t kMaximumLargeCommandBufferBytes =
+    static_cast<size_t>(profiling::kMaximumIbDwords) * sizeof(uint32_t) + 0x1000;
 
 hsa_status_t WDDMQueue::SwsInit(void) {
   if (!device->CreateSyncobj(&syncobj, &sync_addr)) return HSA_STATUS_ERROR;
@@ -347,6 +373,10 @@ ComputeQueue::~ComputeQueue() {
     thread_cond_.notify_one();
     aql_to_pm4_thread_.join();
   }
+
+  // The queue's monitored fence is still valid here; wait for any large
+  // command buffer the GPU may still be reading before destroying it.
+  ReleaseLargeCommandBuffers();
 
   device->DestroyQueue(this);
 
@@ -688,12 +718,27 @@ hsa_status_t ComputeQueue::Submit(void) {
   // written and the fence value that retires it cannot drift apart.
   const uint64_t fence_value = CmdbufFrameRing::NextFenceValue(sync_point);
 
-  pr_debug("submit %p ib=%" PRIx64 " size=%" PRIx64 " wi=%" PRIx64 " fence=%" PRIx64 "\n", ring,
-           (uint64_t)ib_start_addr, (uint64_t)ib_size, cmdbuf_aql_frame_write_index, fence_value);
+  uint64_t command_addr = ib_start_addr;
+  uint64_t command_size = ib_size;
+  LargeCommandBufferState::Slot* large_slot = nullptr;
+  if (large_cmdbuf_state_ && large_cmdbuf_state_->pending_slot >= 0) {
+    large_slot = &large_cmdbuf_state_->slots[large_cmdbuf_state_->pending_slot];
+    command_addr = reinterpret_cast<uint64_t>(large_slot->cpu_addr);
+    command_size = large_cmdbuf_state_->pending_bytes;
+  }
 
-  ret = use_hws ? HwsSubmit(ib_start_addr, ib_size, fence_value)
-                : SwsSubmit(ib_start_addr, ib_size, fence_value);
+  pr_debug("submit %p ib=%" PRIx64 " size=%" PRIx64 " wi=%" PRIx64 " fence=%" PRIx64 "\n", ring,
+           command_addr, command_size, cmdbuf_aql_frame_write_index, fence_value);
+
+  ret = use_hws ? HwsSubmit(command_addr, command_size, fence_value)
+                : SwsSubmit(command_addr, command_size, fence_value);
   if (ret) return HSA_STATUS_ERROR;
+
+  if (large_slot != nullptr) {
+    large_slot->fence = fence_value;
+    large_cmdbuf_state_->pending_slot = -1;
+    large_cmdbuf_state_->pending_bytes = 0;
+  }
 
   ret = EndSubmit();
   if (ret) return HSA_STATUS_ERROR;
@@ -963,16 +1008,17 @@ hsa_status_t ComputeQueue::VendorSpecificAqlToPm4(char* cpu, amd_aql_pm4_ib* pac
     }
   }
 
-  // The IB is inlined at ib_size, not at the frame base: SwitchAql2PM4() defers
-  // submission to merge consecutive dispatches, so earlier packets may already
-  // own part of this frame and only the remainder is available here.
-  //
-  // An oversized vendor packet must not be retired as if its work had run.
-  // Return the failure to the AQL->PM4 thread and leave the packet unretired.
-  if (process_packet && ib_size + required_size > cmdbuf_aql_frame_size) {
-    pr_err("PM4 command buffer overflow in VendorSpecific: required %zu bytes at offset %" PRIu64
-           ", limit %u bytes\n", required_size, ib_size, cmdbuf_aql_frame_size);
-    return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
+  // A stream that fits the remainder of this frame is inlined there, just as
+  // before. A larger stream gets a dedicated variable-size command buffer:
+  // WDDM only makes the submitted command buffer fetchable, so an indirect
+  // jump from the frame into a separate allocation is not an option.
+  const bool inline_commands =
+      !process_packet || ib_size + required_size <= cmdbuf_aql_frame_size;
+
+  if (process_packet && !inline_commands && ib_size != 0) {
+    // Flush packets already buffered so submission order is preserved.
+    const hsa_status_t flush_status = Submit();
+    if (flush_status != HSA_STATUS_SUCCESS) return flush_status;
   }
 
   pr_debug("queue %p %s VENDOR_SPECIFIC pkt pm4_addr %p pm4_size %#x cs=%" PRIx64 "\n", ring,
@@ -982,69 +1028,204 @@ hsa_status_t ComputeQueue::VendorSpecificAqlToPm4(char* cpu, amd_aql_pm4_ib* pac
     pr_debug("pm4_addr[%d]=%#x\n", i, pm4_addr[i]);
   }
 
+  char* dst = cpu;
   uint32_t i = ib_size;
 
+  if (process_packet && !inline_commands) {
+    dst = AcquireLargeCommandBuffer(required_size);
+    if (dst == nullptr) {
+      pr_err("PM4 command buffer overflow in VendorSpecific: required %zu bytes, "
+             "large-buffer limit %zu bytes\n",
+             required_size, kMaximumLargeCommandBufferBytes);
+      return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
+    }
+    i = 0;
+  }
+
   if (process_packet) {
-    int major = device->Major();
-    if (insert_barrier) i += cmd_util.BuildBarrier(cpu + i);
-    memcpy(cpu + i, pm4_addr, pm4_size * sizeof(uint32_t));
+    const int major = device->Major();
+    if (insert_barrier) i += cmd_util.BuildBarrier(dst + i);
+    memcpy(dst + i, pm4_addr, pm4_size * sizeof(uint32_t));
     i += pm4_size * sizeof(uint32_t);
     // The barrier above already ordered this packet against everything before it.
     if (insert_barrier) needs_barrier = false;
 
-    if (packet->completion_signal.handle != 0) {
-      amd_signal_t* signal = (amd_signal_t*)packet->completion_signal.handle;
-      assert(signal->kind == AMD_SIGNAL_KIND_USER);
-      uint64_t* signal_addr = (uint64_t*)&signal->value;
-      pr_debug("signal value=%" PRIx64 "\n", signal->value);
-
-      // Record start timestamp when enabling profiling
-      if (EnableProfiling()) i += cmd_util.BuildCopyData(&signal->start_ts, cpu + i);
-
-      // if (needs_barrier)
-      i += cmd_util.BuildBarrier(cpu + i);
-
-      // needs_barrier = false;
-
-      // Record end timestamp when enabling profiling
-      if (EnableProfiling()) i += cmd_util.BuildCopyData(&signal->end_ts, cpu + i);
-
-      // flush cache
-      i += cmd_util.BuildAcquireMem(major, cpu + i);
-
-      if (platform_atomic_support_)
-        i += cmd_util.BuildAtomicMem(signal_addr, TC_OP_ATOMIC_ADD_RTN_64, cpu + i,
-                                     cache_policy__mec_atomic_mem__bypass, -1);
-      else
-        signal_addr_ = signal_addr;
-    }
+    i += BuildVendorTrailer(dst + i, packet);
   } else {
     if (packet->completion_signal.handle != 0) {
       hsakmt_hsa_signal_store_screlease(packet->completion_signal, 0);
     }
-  }
 
-  // The ring_rptr is used to record pm4 queue rptr value,
-  // dispatch readptr position, this is used to share rptr with
-  // aql queue.
-  if (platform_atomic_support_)
-    i += cmd_util.BuildAtomicMem((uint64_t*)ring_rptr, TC_OP_ATOMIC_ADD_RTN_64, cpu + i);
-  else
-    i += cmd_util.BuildWriteData64Command(cpu + i, (uint64_t*)ring_rptr,
-                                          cmdbuf_aql_frame_write_index + 1);
+    // The ring_rptr is used to record pm4 queue rptr value,
+    // dispatch readptr position, this is used to share rptr with
+    // aql queue.
+    if (platform_atomic_support_)
+      i += cmd_util.BuildAtomicMem((uint64_t*)ring_rptr, TC_OP_ATOMIC_ADD_RTN_64, dst + i);
+    else
+      i += cmd_util.BuildWriteData64Command(dst + i, (uint64_t*)ring_rptr,
+                                            cmdbuf_aql_frame_write_index + 1);
+  }
 
   // Safety net: required_size above must stay in lockstep with the Build*
   // calls emitted in this function. Catch drift in debug builds if a new
   // Build* call is added without a matching required_size term.
-  assert(i <= cmdbuf_aql_frame_size);
-
-  ib_size = i;
+  if (process_packet && !inline_commands) {
+    assert(i <= required_size);
+    if (large_cmdbuf_state_ == nullptr || large_cmdbuf_state_->pending_slot < 0) {
+      return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
+    }
+    large_cmdbuf_state_->pending_bytes = i;
+    ib_size = 0;
+  } else {
+    assert(i <= cmdbuf_aql_frame_size);
+    ib_size = i;
+  }
   cmdbuf_aql_frame_write_index++;
   // Clear ven_hdr on consume so a recycled slot can't transiently read a stale
   // PM4-IB format before the next producer republishes its body.
   packet->ven_hdr = 0;
   packet->header = HSA_PACKET_TYPE_INVALID;
   return HSA_STATUS_SUCCESS;
+}
+
+// Append the packets that order completion behind a vendor stream: optional
+// timestamp copies, the completion barrier, the cache flush, the signal update,
+// and the AQL read-pointer update.
+uint32_t ComputeQueue::BuildVendorTrailer(char* dst, amd_aql_pm4_ib* packet) {
+  uint32_t i = 0;
+  const int major = device->Major();
+
+  if (packet->completion_signal.handle != 0) {
+    amd_signal_t* signal = (amd_signal_t*)packet->completion_signal.handle;
+    assert(signal->kind == AMD_SIGNAL_KIND_USER);
+    uint64_t* signal_addr = (uint64_t*)&signal->value;
+    pr_debug("signal value=%" PRIx64 "\n", signal->value);
+
+    // Record start timestamp when enabling profiling.
+    if (EnableProfiling()) i += cmd_util.BuildCopyData(&signal->start_ts, dst + i);
+
+    i += cmd_util.BuildBarrier(dst + i);
+
+    // Record end timestamp when enabling profiling.
+    if (EnableProfiling()) i += cmd_util.BuildCopyData(&signal->end_ts, dst + i);
+
+    // Flush cache.
+    i += cmd_util.BuildAcquireMem(major, dst + i);
+
+    if (platform_atomic_support_)
+      i += cmd_util.BuildAtomicMem(signal_addr, TC_OP_ATOMIC_ADD_RTN_64, dst + i,
+                                   cache_policy__mec_atomic_mem__bypass, -1);
+    else
+      signal_addr_ = signal_addr;
+  }
+
+  // The ring_rptr is used to record pm4 queue rptr value,
+  // dispatch readptr position, this is used to share rptr with
+  // aql queue.
+  if (platform_atomic_support_)
+    i += cmd_util.BuildAtomicMem((uint64_t*)ring_rptr, TC_OP_ATOMIC_ADD_RTN_64, dst + i);
+  else
+    i += cmd_util.BuildWriteData64Command(dst + i, (uint64_t*)ring_rptr,
+                                          cmdbuf_aql_frame_write_index + 1);
+
+  return i;
+}
+
+// Return a command buffer large enough for the stream. Buffers are reused only
+// after the monitored fence of the submission that consumed them has retired.
+// The queue alternates between two slots so the common case does not wait on the
+// previous graph submission.
+char* ComputeQueue::AcquireLargeCommandBuffer(size_t size) {
+  if (size > kMaximumLargeCommandBufferBytes) return nullptr;
+
+  if (large_cmdbuf_state_ == nullptr) {
+    large_cmdbuf_state_.reset(new (std::nothrow) LargeCommandBufferState());
+    if (large_cmdbuf_state_ == nullptr) return nullptr;
+  }
+  if (large_cmdbuf_state_->pending_slot >= 0) return nullptr;
+
+  auto retired = [this](const LargeCommandBufferState::Slot& slot) {
+    return slot.fence == 0 || (sync_addr != nullptr && LoadSyncValue(sync_addr) >= slot.fence);
+  };
+
+  auto allocate = [this, size](int index) -> bool {
+    auto& slot = large_cmdbuf_state_->slots[index];
+    if (slot.memory != nullptr) {
+      delete GpuMemory::Convert(slot.memory);
+      slot = LargeCommandBufferState::Slot{};
+    }
+
+    GpuMemoryCreateInfo create_info{};
+    create_info.size = (size + 0xfff) & ~static_cast<size_t>(0xfff);
+    create_info.domain = Wkmi::kSystem;
+    GpuMemory* gpu_mem = nullptr;
+    if (device->CreateGpuMemory(create_info, &gpu_mem) != ErrorCode::Success ||
+        gpu_mem == nullptr) {
+      return false;
+    }
+
+    slot.memory = gpu_mem->GetGpuMemoryHandle();
+    slot.cpu_addr = reinterpret_cast<char*>(gpu_mem->GpuAddress());
+    slot.size = create_info.size;
+    slot.fence = 0;
+    return true;
+  };
+
+  for (int pass = 0; pass < 2; ++pass) {
+    // Prefer an already-allocated, large-enough, retired buffer.
+    for (int i = 0; i < LargeCommandBufferState::kSlotCount; ++i) {
+      auto& slot = large_cmdbuf_state_->slots[i];
+      if (slot.memory != nullptr && slot.size >= size && retired(slot)) {
+        large_cmdbuf_state_->pending_slot = i;
+        return slot.cpu_addr;
+      }
+    }
+
+    // Otherwise take any retired slot and (re)allocate it at the new size.
+    for (int i = 0; i < LargeCommandBufferState::kSlotCount; ++i) {
+      auto& slot = large_cmdbuf_state_->slots[i];
+      if (retired(slot)) {
+        if (!allocate(i)) return nullptr;
+        large_cmdbuf_state_->pending_slot = i;
+        return slot.cpu_addr;
+      }
+    }
+
+    if (!WaitForLargeCommandBuffer()) return nullptr;
+  }
+
+  return nullptr;
+}
+
+bool ComputeQueue::WaitForLargeCommandBuffer(void) {
+  if (large_cmdbuf_state_ == nullptr) return true;
+
+  for (auto& slot : large_cmdbuf_state_->slots) {
+    if (slot.fence == 0) continue;
+
+    uint64_t fence = slot.fence;
+    if (sync_addr == nullptr || LoadSyncValue(sync_addr) < fence) {
+      if (sync_addr == nullptr || !device->CpuWait(&syncobj, &fence, 1, false)) return false;
+    }
+    slot.fence = 0;
+  }
+  return true;
+}
+
+void ComputeQueue::ReleaseLargeCommandBuffers(void) {
+  if (large_cmdbuf_state_ == nullptr) return;
+
+  if (!WaitForLargeCommandBuffer()) {
+    pr_err("large command buffer fence did not retire before queue destruction\n");
+  }
+
+  for (auto& slot : large_cmdbuf_state_->slots) {
+    if (slot.memory != nullptr) {
+      delete GpuMemory::Convert(slot.memory);
+      slot = LargeCommandBufferState::Slot{};
+    }
+  }
+  large_cmdbuf_state_.reset();
 }
 
 hsa_status_t ComputeQueue::SwitchAql2PM4(void) {

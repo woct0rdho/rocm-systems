@@ -33,14 +33,19 @@ namespace thunk {
 namespace profiling {
 
 // The qualified native-WDDM AQL Profile software queue. The frame has to hold the
-// aqlprofile-built PM4 indirect buffer plus the completion trailer, and the reported
-// PM4 budget is what a producer (AQL Profile, retained PM4 command lists) may hand to
-// the software queue in one AQL vendor packet.
+// aqlprofile-built PM4 indirect buffer plus the completion trailer. Profile packets
+// remain inlined within this budget; a retained PM4 command list that does not fit a
+// frame can use the variable-size command-buffer path advertised by version 2.
 constexpr uint32_t kMinimumFrameBytes = 0x500;
 constexpr uint32_t kQualifiedFrameBytes = 0x2000;
 constexpr uint32_t kFrameTrailerReserveBytes = 0x100;
 constexpr uint32_t kMaximumPm4Dwords =
     (kQualifiedFrameBytes - kFrameTrailerReserveBytes) / sizeof(uint32_t);
+// IT_INDIRECT_BUFFER encodes the stream length in a 20-bit field. Profile
+// packets remain bounded by the frame budget above; a retained PM4 command
+// list that does not fit a frame is submitted from its own variable-size
+// command buffer, so only the hardware field bounds it.
+constexpr uint32_t kMaximumIbDwords = 0xfffffu;
 
 // Describes the AQL Profile PM4 indirect-buffer capability of a device.
 struct Capability {
@@ -61,8 +66,11 @@ constexpr Capability DetectCapability(uint32_t major, uint32_t minor, uint32_t s
   const bool supported = gfx1151 && frame_is_sufficient && software_queue_available;
   const uint32_t available_dwords =
       supported ? (frame_bytes - kFrameTrailerReserveBytes) / sizeof(uint32_t) : 0u;
+  // Version 2 additionally advertises that the software queue can submit a
+  // retained PM4 stream larger than one frame from a variable-size command
+  // buffer. Version 1 thunks only support the inlined frame budget.
   return {supported,
-          supported ? 1u : 0u,
+          supported ? 2u : 0u,
           available_dwords < kMaximumPm4Dwords ? available_dwords : kMaximumPm4Dwords};
 }
 
